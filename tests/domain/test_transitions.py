@@ -93,11 +93,11 @@ def test_claim_rejected_when_blocked() -> None:
 def test_claim_from_ready_becomes_active() -> None:
     work_order = ready_work_order()
 
-    record = work_order.claim(reason="capacity available", at=_NOON)
+    record = work_order.claim(reason="execution request accepted", at=_NOON)
 
     assert work_order.state is WorkOrderState.ACTIVE
     assert work_order.readiness is None
-    assert record.authority is TransitionAuthority.SCHEDULER
+    assert record.authority is TransitionAuthority.EXECUTION_ADMISSION
 
 
 # -- completion -----------------------------------------------------------
