@@ -27,7 +27,7 @@ stateDiagram-v2
     [*] --> DRAFT
     DRAFT --> OPEN: admit
     DRAFT --> RETIRED: withdraw before admission
-    OPEN --> ACTIVE: claim from OPEN + READY
+    OPEN --> ACTIVE: accept execution attempt from OPEN + READY
     OPEN --> RETIRED: invalid before execution
     ACTIVE --> IMPLEMENTED: verified success
     ACTIVE --> OPEN: applied recovery decision
@@ -72,10 +72,19 @@ Checks may include:
 
 ### `ACTIVE`
 
-An execution attempt currently owns the Work Order through the scheduler/lease mechanism.
+An authoritative execution attempt exists for the Work Order; it has been
+accepted for execution.
+
+Normative semantic:
+
+> `WorkOrder.ACTIVE` means an authoritative execution attempt exists / has been
+> accepted for execution. It does **not** mirror Dagster's internal
+> queued/running step state.
 
 `ACTIVE` must correspond to at most one authoritative active execution attempt
 unless the Work Order explicitly supports planned parallel child execution.
+Whether Dagster has actually queued, started, retried, or finished the run is
+separate temporal execution state owned by Dagster.
 
 A failed execution attempt does **not** change the lifecycle state. Tactus records
 a `FailureObservation` while the Work Order stays `ACTIVE` until a recovery
@@ -130,22 +139,24 @@ A readiness change is **not** a lifecycle transition. `UNKNOWN`, `READY` and
 ### `UNKNOWN` (OPEN)
 
 The Work Order was admitted but readiness has not been evaluated yet. `UNKNOWN`
-is not claimable: `OPEN -> ACTIVE` requires `OPEN + READY`.
+is not eligible for execution: `OPEN -> ACTIVE` requires `OPEN + READY`.
 
 ### `READY` (OPEN)
 
-The Work Order is executable and is waiting for scheduling.
+The Work Order is executable and is waiting for admission/eligibility.
 
-`READY` does **not** mean a worker is currently available.
+`READY` does **not** mean a worker is currently available and does **not** mean
+a Dagster run has been queued.
 
 A Work Order remains `READY` while waiting for:
 
-- global concurrency capacity;
-- per-project capacity;
-- backend-compatible worker capacity;
-- scheduler selection.
+- domain dependency readiness to hold at acceptance time;
+- required-capability presence;
+- policy eligibility as validated by Ictus;
+- Ictus semantic routing to a compatible backend.
 
-A pure capacity wait is not a blocker.
+A pure capacity or execution-concurrency wait is not a blocker; execution
+concurrency is Dagster-owned and does not change Work Order readiness.
 
 ### `BLOCKED` (OPEN)
 
@@ -274,7 +285,7 @@ durably (see [Parent/child semantics](#parentchild-semantics)).
 |---|---|---|
 | `DRAFT → OPEN` | Admission | Tactus (human/WorkSource triggered) |
 | `DRAFT → RETIRED` | Withdraw before admission | Tactus |
-| `OPEN → ACTIVE` | Claim from `OPEN + READY` | Tactus scheduler |
+| `OPEN → ACTIVE` | Accepted execution attempt from `OPEN + READY` | Tactus (applies Ictus routing decision) |
 | `OPEN → RETIRED` | Invalidated/superseded before execution | Tactus |
 | `ACTIVE → IMPLEMENTED` | Successful implementation + verification | Tactus (on Dagster outcome + verification) |
 | `ACTIVE → OPEN` | Applied recovery decision | Tactus applies Ictus decision |
@@ -282,9 +293,9 @@ durably (see [Parent/child semantics](#parentchild-semantics)).
 | `IMPLEMENTED` | Terminal | — |
 | `RETIRED` | Terminal | — |
 
-Rule: `OPEN → ACTIVE` is legal **only** when `OPEN + READY` is successfully
-claimed. `ACTIVE → OPEN` is legal **only** through an applied recovery decision;
-the resulting OPEN readiness is `READY` or `BLOCKED`.
+Rule: `OPEN → ACTIVE` is legal **only** when `OPEN + READY` is accepted as an
+execution attempt. `ACTIVE → OPEN` is legal **only** through an applied recovery
+decision; the resulting OPEN readiness is `READY` or `BLOCKED`.
 
 `IMPLEMENTED` and `RETIRED` are terminal: there is no `IMPLEMENTED → RETIRED`
 or `RETIRED → IMPLEMENTED` transition.
@@ -311,7 +322,7 @@ planes:
 |---|---|
 | `DRAFT → OPEN` | Human/WorkSource admission |
 | `DRAFT → RETIRED` | Withdraw before admission |
-| `OPEN → ACTIVE` | Scheduler claim from `OPEN + READY` |
+| `OPEN → ACTIVE` | Accepted execution attempt from `OPEN + READY` (admission/eligibility) |
 | `OPEN → RETIRED` | Supersession/invalidity before execution |
 | `ACTIVE → IMPLEMENTED` | Dagster execution result + verification |
 | `ACTIVE → OPEN` | Applied recovery decision (readiness re-evaluated) |
@@ -319,22 +330,71 @@ planes:
 
 ## Ownership rules
 
-These are normative.
+These are normative. The canonical ownership table is:
 
 ```text
 Tactus
-- sole authority over WorkOrder lifecycle state
-- owns OPEN readiness/blocking status
-- records/normalizes FailureObservations
-- applies validated RecoveryDecisions
+= WorkOrder/domain lifecycle
+= domain dependencies/readiness
+= admission/eligibility
+= domain facts/context
+= application of validated semantic decisions
+= human/domain coordination
+
+Ictus
+= semantic decision making
+= policy
+= capability validation
+= semantic routing
+= recovery strategy
 
 Dagster
-- owns durable execution mechanics
+= temporal/durable execution
+= workflow graph
+= run/step state
+= schedules
+= sensors/events
+= run queue
+= execution concurrency
+= retries
+= re-execution
+= execution history
+= execution observability
+```
+
+Load-bearing distinctions:
+
+```text
+domain dependency      ≠ Dagster step dependency
+domain readiness       ≠ execution scheduling
+semantic retry         ≠ Dagster RetryPolicy
+backend routing policy ≠ Dagster worker scheduling
+ACTIVE                 ≠ "CPU currently running"
+```
+
+**Tactus must never become a workflow engine, run queue, temporal scheduler or
+retry engine.** Dagster is authoritative over temporal execution state. Ictus is
+authoritative over semantic recovery/routing decisions. Tactus is authoritative
+over WorkOrder/domain state.
+
+```text
+Tactus
+- sole authority over WorkOrder/domain lifecycle state
+- owns domain dependencies and OPEN readiness/blocking status
+- owns admission/eligibility
+- records/normalizes FailureObservations as domain facts
+- applies validated semantic RecoveryDecisions
+- owns no run queue, scheduler, execution concurrency or retry engine
+
+Dagster
+- owns temporal/durable execution mechanics and temporal execution state
+- owns execution-level retries (`RetryPolicy`), run queue and concurrency
 - reports execution outcomes/errors
 - does NOT own or mutate Tactus WorkOrder state
 
 Ictus
-- owns diagnosis, policy and typed RecoveryDecisions
+- owns diagnosis, policy, semantic routing and typed RecoveryDecisions
+- authoritative over semantic recovery/routing decisions
 - consumes normalized observations from Tactus
 - does NOT directly mutate WorkOrder state
 ```
@@ -380,7 +440,9 @@ failure/recovery path and never passes through Ictus.
 
 ## Retry is not a lifecycle state
 
-A retry is an **action** that creates another execution attempt.
+A retry is a **semantic action** that creates another execution attempt. It is
+distinct from a Dagster `RetryPolicy`, which governs execution-level retries of
+an individual run inside the execution plane.
 
 Conceptually:
 
@@ -390,7 +452,7 @@ ACTIVE
 Ictus: RETRY / REQUEUE_READY
   ↓ decision applied
 OPEN + READY
-  ↓ scheduler
+  ↓ admission/eligibility
 ACTIVE (new attempt)
 ```
 
@@ -432,7 +494,8 @@ downstream views cannot drift. v1 is acyclic: self-dependencies, duplicate
 edges and cycles are rejected rather than silently accepted. Readiness
 re-evaluation consumes this graph (for example, a downstream Work Order is
 `BLOCKED` while an upstream prerequisite is not yet `IMPLEMENTED`); that
-readiness engine itself is owned by later scheduling issues.
+readiness engine itself is owned by later admission/readiness issues. It is a
+domain readiness concern, not execution scheduling.
 
 ## Implementation
 
