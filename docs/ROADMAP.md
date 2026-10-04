@@ -12,6 +12,60 @@ specification. The original hand-drawn sketch is kept only as a non-authoritativ
 reference artifact at
 [`architecture/whiteboard-original.jpg`](architecture/whiteboard-original.jpg).
 
+## Ownership freeze
+
+Every roadmap slice below must respect the frozen ownership split:
+
+```text
+Tactus
+= WorkOrder/domain lifecycle
+= domain dependencies/readiness
+= admission/eligibility
+= domain facts/context
+= application of validated semantic decisions
+= human/domain coordination
+
+Ictus
+= semantic decision making
+= policy
+= capability validation
+= semantic routing
+= recovery strategy
+
+Dagster
+= temporal/durable execution
+= workflow graph
+= run/step state
+= schedules
+= sensors/events
+= run queue
+= execution concurrency
+= retries
+= re-execution
+= execution history
+= execution observability
+```
+
+```text
+domain dependency      ≠ Dagster step dependency
+domain readiness       ≠ execution scheduling
+semantic retry         ≠ Dagster RetryPolicy
+backend routing policy ≠ Dagster worker scheduling
+ACTIVE                 ≠ "CPU currently running"
+```
+
+**Tactus must never become a workflow engine, run queue, temporal scheduler or
+retry engine.** Dagster is authoritative over temporal execution state. Ictus is
+authoritative over semantic recovery/routing decisions. Tactus is authoritative
+over WorkOrder/domain state.
+
+> `WorkOrder.ACTIVE` means an authoritative execution attempt exists / has been
+> accepted for execution. It does **not** mirror Dagster's internal
+> queued/running step state.
+
+Known issue drift is corrected in
+[`architecture/CORRECTIVE_BACKLOG.md`](architecture/CORRECTIVE_BACKLOG.md).
+
 ## M0 — Architecture baseline
 
 Status: **current**
@@ -19,7 +73,7 @@ Status: **current**
 Goals:
 
 - version the whiteboard architecture;
-- freeze terminology for lifecycle, blockers, scheduler, backend health, triage, and human intervention;
+- freeze terminology for lifecycle, blockers, admission/eligibility, backend health, triage, and human intervention;
 - convert implementation work into GitHub Issues;
 - keep Tactus/Ictus/Dagster ownership boundaries explicit.
 
@@ -41,18 +95,25 @@ Goals:
 - parent/child provenance;
 - small persistence interface/implementation only as needed for the vertical slice.
 
-Do not add scheduler sophistication yet.
+Do not add admission or backend sophistication yet.
 
-## M2 — Scheduler and backend model
+## M2 — Admission, backend eligibility, and execution handoff
 
 Goals:
 
-- READY queue/selection contract;
-- concurrency/budget admission gates;
-- backend registry and health vocabulary;
-- distinguish backend unavailable from worker capacity unavailable;
-- atomic claim into ACTIVE;
-- unblock/re-evaluate when backend availability changes.
+- Tactus admission/eligibility gates over `OPEN + READY` Work Orders;
+- distinguish domain readiness from execution scheduling;
+- backend registry and health vocabulary as availability inputs, not execution
+  state;
+- Ictus-owned semantic backend routing policy;
+- distinguish backend unavailable from execution concurrency unavailable (the
+  latter is Dagster-owned);
+- acceptance of a validated execution intent as a new execution attempt
+  (`OPEN + READY → ACTIVE`);
+- re-evaluate eligibility when backend availability changes.
+
+Do not add Tactus-owned run queues, schedules, sensors, execution concurrency or
+retry engines. Those are Dagster's.
 
 ## M3 — Tactus ↔ Ictus recovery boundary
 
@@ -68,8 +129,8 @@ Goals:
 
 Goals:
 
-- bounded retry/requeue;
-- backend reroute;
+- bounded **semantic** retry/requeue (distinct from Dagster `RetryPolicy`);
+- backend reroute as an Ictus routing decision applied by Tactus;
 - split-and-replan;
 - dependency unblock;
 - conservative unknown-failure escalation.
@@ -91,7 +152,7 @@ Target:
 ```text
 WorkOrder
    ↓
-Tactus lifecycle/scheduler
+Tactus lifecycle/admission
    ↓
 Ictus validated decision/intent
    ↓
@@ -142,8 +203,10 @@ Goals:
 
 ## Executable backlog
 
-Implementation work is tracked as GitHub Issues. The first meaningful
-tranche is the **[M1 — Control-Plane Vertical Slice](https://github.com/Walsamer/tactus/milestone/1)** milestone,
+Implementation work is tracked as GitHub Issues. The corrected wording for the
+ownership-sensitive issues (#4, #6, #8, #9, #12) is maintained in
+[`architecture/CORRECTIVE_BACKLOG.md`](architecture/CORRECTIVE_BACKLOG.md). The
+first meaningful tranche is the **[M1 — Control-Plane Vertical Slice](https://github.com/Walsamer/tactus/milestone/1)** milestone,
 which spans roadmap slices M1–M4 plus the M6 vertical slice:
 
 | Issue | Title |
@@ -177,7 +240,7 @@ Good parallel tracks after M0:
 
 ```text
 Track A: WorkOrder lifecycle + blockers
-Track B: Scheduler/backend contracts
+Track B: Admission/backend eligibility contracts
 Track C: Ictus recovery contract
 ```
 

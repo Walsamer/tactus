@@ -17,23 +17,81 @@ Tactus records and applies lifecycle state. Ictus owns the typed decision/policy
 A failure is an **observation**, not a lifecycle state. While a failure is being
 observed, classified, and triaged, the Work Order remains `ACTIVE`. Only when
 Tactus applies the validated `RecoveryDecision` does the lifecycle state change
-(or readiness change within `OPEN`). This is normative:
+(or readiness change within `OPEN`).
+
+Canonical ownership table:
 
 ```text
 Tactus
-- sole authority over WorkOrder lifecycle state
-- records/normalizes FailureObservations
-- applies validated RecoveryDecisions
-
-Dagster
-- owns durable execution mechanics
-- reports execution outcomes/errors
-- does NOT own or mutate Tactus WorkOrder state
+= WorkOrder/domain lifecycle
+= domain dependencies/readiness
+= admission/eligibility
+= domain facts/context
+= application of validated semantic decisions
+= human/domain coordination
 
 Ictus
-- owns diagnosis, policy and typed RecoveryDecisions
+= semantic decision making
+= policy
+= capability validation
+= semantic routing
+= recovery strategy
+
+Dagster
+= temporal/durable execution
+= workflow graph
+= run/step state
+= schedules
+= sensors/events
+= run queue
+= execution concurrency
+= retries
+= re-execution
+= execution history
+= execution observability
+```
+
+Load-bearing distinctions:
+
+```text
+domain dependency      ≠ Dagster step dependency
+domain readiness       ≠ execution scheduling
+semantic retry         ≠ Dagster RetryPolicy
+backend routing policy ≠ Dagster worker scheduling
+ACTIVE                 ≠ "CPU currently running"
+```
+
+**Tactus must never become a workflow engine, run queue, temporal scheduler or
+retry engine.** Dagster is authoritative over temporal execution state. Ictus is
+authoritative over semantic recovery/routing decisions. Tactus is authoritative
+over WorkOrder/domain state.
+
+Normative `WorkOrder.ACTIVE` semantic:
+
+> `WorkOrder.ACTIVE` means an authoritative execution attempt exists / has been
+> accepted for execution. It does **not** mirror Dagster's internal
+> queued/running step state.
+
+This is normative:
+
+```text
+Tactus
+- sole authority over WorkOrder/domain lifecycle state
+- records/normalizes FailureObservations as domain facts
+- applies validated semantic RecoveryDecisions
+- owns no run queue, scheduler, execution concurrency or retry engine
+
+Ictus
+- owns diagnosis, policy, semantic routing and typed RecoveryDecisions
+- authoritative over semantic recovery/routing decisions
 - consumes normalized observations from Tactus
 - does NOT directly mutate WorkOrder state
+
+Dagster
+- owns temporal/durable execution mechanics and temporal execution state
+- owns execution-level retries (`RetryPolicy`), concurrency and run state
+- reports execution outcomes/errors
+- does NOT own or mutate Tactus WorkOrder state
 ```
 
 ## Recovery model
@@ -144,7 +202,10 @@ This table captures the intent of the whiteboard without freezing implementation
 
 ## Bounded retry policy
 
-Retries must be explicitly budgeted.
+Retries must be explicitly budgeted. These are **semantic** retries: Ictus
+policy decisions that create new execution attempts. They are distinct from a
+Dagster `RetryPolicy`, which governs execution-level retries of an individual run
+inside the execution plane.
 
 At minimum distinguish:
 
@@ -186,16 +247,21 @@ Rules:
   remains `ACTIVE` until then);
 - failure to split safely escalates rather than widening scope.
 
-## Triage trigger vs scheduler trigger
+## Triage trigger vs admission and execution triggers
 
 Keep these separate:
 
-- Scheduler decides **when/where READY work runs**.
+- Tactus admission/eligibility decides **whether an `OPEN + READY` Work Order is
+  eligible for execution**.
+- Ictus semantic routing decides **which backend** an eligible Work Order should
+  use.
+- Dagster decides **when/with what concurrency a run actually executes**.
 - Triage decides **what should happen after an observation/failure**.
 
-A backend-health observation may affect both, but through different interfaces:
+A backend-health observation may affect several of these, but through different
+interfaces:
 
 ```text
-failure → Ictus recovery decision
-backend health update → scheduler routing eligibility
+failure → Ictus semantic recovery decision
+backend health update → routing eligibility (Ictus), recorded by Tactus as domain context
 ```
