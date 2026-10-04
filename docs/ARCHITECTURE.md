@@ -41,9 +41,9 @@ Metaxy, OpenShell, SoL-Pi, Stax, and others lives elsewhere.
 ## Detailed control-plane architecture
 
 This document is the high-level entry point for the plane model. The detailed
-control-plane design — Work Order lifecycle, blocking, scheduling, backend
-availability, triage/recovery, and human intervention — lives in the following
-authoritative documents. Where a control-plane concern is described in more
+control-plane design — Work Order lifecycle, blocking, admission/eligibility,
+backend routing, execution handoff, triage/recovery, and human intervention —
+lives in the following authoritative documents. Where a control-plane concern is described in more
 detail there, those documents win over this summary.
 
 - [Whiteboard overview](architecture/WHITEBOARD_OVERVIEW.md) — control-loop and
@@ -51,13 +51,17 @@ detail there, those documents win over this summary.
   plane.
 - [Work Order lifecycle](architecture/WORK_ORDER_LIFECYCLE.md) — canonical
   lifecycle states, transition authority, blocking, and parent/child semantics.
-- [Scheduling and backends](architecture/SCHEDULING_AND_BACKENDS.md) — admission
-  gates, backend selection, backend health, and the backend-vs-worker-capacity
+- [Admission, backend routing, and execution handoff](architecture/SCHEDULING_AND_BACKENDS.md)
+  — admission/eligibility gates, Ictus semantic backend routing, backend health,
+  execution handoff to Dagster, and the backend-vs-execution-concurrency
   distinction.
 - [Triage and recovery](architecture/TRIAGE_AND_RECOVERY.md) — diagnosis
   taxonomy, typed recovery actions, bounded retry, and split/replan.
 - [Human intervention](architecture/HUMAN_INTERVENTION.md) — typed intervention
   requests and policy-bound human resolutions.
+- [Corrective backlog](architecture/CORRECTIVE_BACKLOG.md) — corrected titles,
+  scope and acceptance criteria for issues #4, #6, #8, #9 and #12, aligned to
+  the frozen ownership split.
 - [Roadmap](ROADMAP.md) — ordered implementation slices from the architecture
   baseline to Fleet migration, including the executable GitHub backlog.
 
@@ -83,29 +87,81 @@ Three distinctions are load-bearing across all of these documents:
 
 ## Ownership boundaries
 
+The single canonical ownership table is:
+
+```text
+Tactus
+= WorkOrder/domain lifecycle
+= domain dependencies/readiness
+= admission/eligibility
+= domain facts/context
+= application of validated semantic decisions
+= human/domain coordination
+
+Ictus
+= semantic decision making
+= policy
+= capability validation
+= semantic routing
+= recovery strategy
+
+Dagster
+= temporal/durable execution
+= workflow graph
+= run/step state
+= schedules
+= sensors/events
+= run queue
+= execution concurrency
+= retries
+= re-execution
+= execution history
+= execution observability
+```
+
+These distinctions are load-bearing and must not be conflated:
+
+```text
+domain dependency      ≠ Dagster step dependency
+domain readiness       ≠ execution scheduling
+semantic retry         ≠ Dagster RetryPolicy
+backend routing policy ≠ Dagster worker scheduling
+ACTIVE                 ≠ "CPU currently running"
+```
+
+Normative `WorkOrder.ACTIVE` semantic:
+
+> `WorkOrder.ACTIVE` means an authoritative execution attempt exists / has been
+> accepted for execution. It does **not** mirror Dagster's internal
+> queued/running step state.
+
+**Tactus must never become a workflow engine, run queue, temporal scheduler or
+retry engine.** Dagster is authoritative over temporal execution state. Ictus is
+authoritative over semantic recovery/routing decisions. Tactus is authoritative
+over WorkOrder/domain state.
+
 ### Tactus — control plane (first-party)
 
 Tactus is the master/system repository and owns the control plane:
 
-- Work Order identity and lifecycle state (sole authority)
-- triggers and admission from work sources
-- dependency readiness and `OPEN` blocked/unblocked readiness status
-- scheduling/coordination and capacity gates
-- capability/backend selection and availability view
-- execution requests
-- records/normalizes failure observations
-- application of validated decisions (recovery, intervention)
-- human-intervention queue
+- Work Order identity and domain lifecycle state (sole authority)
+- domain dependencies and readiness (`OPEN` blocked/unblocked readiness status)
+- admission/eligibility of admitted work
+- domain facts/context (including normalized failure observations)
+- application of validated semantic decisions (recovery, intervention)
+- human/domain coordination, including the human-intervention queue
 - system configuration
 - integration adapters
 - component registration
 - aggregated observability
 - future CLI/API/UI
 
-Tactus decides and coordinates **what should happen**. It must not reimplement
-functionality already owned by lower layers, and it must not build another
-workflow/retry engine (Dagster owns that). Recovery policy is owned by Ictus;
-Tactus applies validated decisions and owns the resulting lifecycle state.
+Tactus decides and coordinates **what domain work is admitted and how its domain
+state evolves**. It must not reimplement functionality already owned by lower
+layers. In particular Tactus owns no run queue, no schedules/sensors, no
+execution concurrency and no retry engine — those are Dagster's. Semantic
+routing and recovery strategy are Ictus's. Tactus applies validated decisions
+and owns the resulting lifecycle state.
 
 ### Ictus — decision plane (first-party external)
 
@@ -115,8 +171,10 @@ publishable/useful. It owns:
 - typed decisions
 - policy
 - capability validation
+- semantic routing (including backend routing policy)
 - approvals
 - diagnosis of execution observations and typed recovery decisions
+- recovery strategy
 - validated `ExecutionIntent`s
 
 Boundary:
@@ -130,17 +188,24 @@ Dagster
 ```
 
 Ictus source is not copied into Tactus; it is integrated through a contract.
-Ictus owns diagnosis and typed recovery decisions but does **not** directly
-mutate Work Order state; Tactus applies the validated decision and owns the
-resulting lifecycle state.
+Ictus is authoritative over semantic recovery/routing decisions. It owns
+diagnosis and typed recovery decisions but does **not** directly mutate Work
+Order state; Tactus applies the validated decision and owns the resulting
+lifecycle state.
 
 ### Dagster — execution plane (third-party)
 
-Dagster is the third-party execution substrate. It owns:
+Dagster is the third-party execution substrate, and it is authoritative over
+temporal execution state. It owns:
 
-- durable execution
-- run/step persistence
-- retries
+- temporal/durable execution
+- workflow graph
+- run/step state and persistence
+- schedules
+- sensors/events
+- run queue
+- execution concurrency
+- retries (`RetryPolicy`)
 - re-execution
 - execution dependencies
 - execution history
@@ -148,7 +213,8 @@ Dagster is the third-party execution substrate. It owns:
 
 Tactus/Ictus decide what should happen; Dagster owns **durably executing it**.
 Dagster reports execution outcomes and errors, but it does **not** own or mutate
-Tactus Work Order state.
+Tactus Work Order state. Tactus must never mirror Dagster's internal
+queued/running step state as Work Order truth.
 
 ### Metaxy — provenance, Dagster-integrated (third-party)
 
