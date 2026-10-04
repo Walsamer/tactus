@@ -38,17 +38,54 @@ The planes are **responsibility boundaries**, not repository nesting. Tactus is
 the master/system repository even though the implementation of Ictus, Dagster,
 Metaxy, OpenShell, SoL-Pi, Stax, and others lives elsewhere.
 
+## Detailed control-plane architecture
+
+This document is the high-level entry point for the plane model. The detailed
+control-plane design — Work Order lifecycle, blocking, scheduling, backend
+availability, triage/recovery, and human intervention — lives in the following
+authoritative documents. Where a control-plane concern is described in more
+detail there, those documents win over this summary.
+
+- [Whiteboard overview](architecture/WHITEBOARD_OVERVIEW.md) — control-loop and
+  responsibility split across Tactus, Ictus, Dagster, Metaxy, and the runtime
+  plane.
+- [Work Order lifecycle](architecture/WORK_ORDER_LIFECYCLE.md) — canonical
+  lifecycle states, transition authority, blocking, and parent/child semantics.
+- [Scheduling and backends](architecture/SCHEDULING_AND_BACKENDS.md) — admission
+  gates, backend selection, backend health, and the backend-vs-worker-capacity
+  distinction.
+- [Triage and recovery](architecture/TRIAGE_AND_RECOVERY.md) — diagnosis
+  taxonomy, typed recovery actions, bounded retry, and split/replan.
+- [Human intervention](architecture/HUMAN_INTERVENTION.md) — typed intervention
+  requests and policy-bound human resolutions.
+- [Roadmap](ROADMAP.md) — ordered implementation slices from the architecture
+  baseline to Fleet migration.
+- [Issue plan](ISSUE_PLAN.md) — staging plan for the executable GitHub issue
+  backlog.
+
+Two distinctions are load-bearing across all of these documents:
+
+- **Lifecycle state and recovery action are different concepts.** `RETRY`,
+  `REQUEUE_READY`, `REROUTE`, `SPLIT_REPLAN`, and `ESCALATE_HUMAN` are
+  actions/decisions, not lifecycle states.
+- **Backend health is system/runtime state, not Work Order truth.** A Work
+  Order's state does not encode which backend is healthy; a lack of worker
+  capacity leaves it `READY` rather than `BLOCKED`.
+
 ## Ownership boundaries
 
 ### Tactus — control plane (first-party)
 
 Tactus is the master/system repository and owns the control plane:
 
-- Work Order lifecycle
-- triggers
-- scheduling/coordination
-- capability selection
+- Work Order identity and lifecycle
+- triggers and admission from work sources
+- dependency readiness and blocked/unblocked state
+- scheduling/coordination and capacity gates
+- capability/backend selection and availability view
 - execution requests
+- application of validated decisions (recovery, intervention)
+- human-intervention queue
 - system configuration
 - integration adapters
 - component registration
@@ -57,7 +94,8 @@ Tactus is the master/system repository and owns the control plane:
 
 Tactus decides and coordinates **what should happen**. It must not reimplement
 functionality already owned by lower layers, and it must not build another
-workflow/retry engine (Dagster owns that).
+workflow/retry engine (Dagster owns that). Recovery policy is owned by Ictus;
+Tactus applies validated decisions and owns the resulting lifecycle state.
 
 ### Ictus — decision plane (first-party external)
 
@@ -68,6 +106,7 @@ publishable/useful. It owns:
 - policy
 - capability validation
 - approvals
+- diagnosis of execution observations and typed recovery decisions
 - validated `ExecutionIntent`s
 
 Boundary:
