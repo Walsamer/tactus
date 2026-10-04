@@ -100,20 +100,26 @@ OPEN + READY
 
 No block record should be created merely because capacity is currently busy.
 
-## Backend health model
+## Backend status model
 
-Tactus should observe backend health independently from individual Work Orders.
+Tactus observes backend status independently from individual Work Orders.
+Status is factual, volatile system state, kept separate from capacity and
+quota.
 
-Initial backend health vocabulary can remain small:
+Status vocabulary (v1):
 
 ```text
 AVAILABLE
-DEGRADED
 UNAVAILABLE
 DISABLED
 ```
 
-Health observations may include:
+- `AVAILABLE` — operational.
+- `UNAVAILABLE` — currently not operational; must not receive work.
+- `DISABLED` — administratively excluded until explicitly re-enabled or
+  superseded.
+
+Status observations may include:
 
 - connectivity/probe status;
 - recent API/provider failures;
@@ -122,7 +128,28 @@ Health observations may include:
 - operator disablement;
 - time of last successful execution.
 
-A backend health observation must have a timestamp and should decay/expire rather than remaining authoritative forever.
+A status observation must have a timestamp and expires at query time. A missing
+or expired observation means "no fresh authoritative status known", which is
+**not** `UNAVAILABLE`. Observations that must stay in force until explicitly
+superseded (for example an operator `DISABLED`) simply carry no expiry; there is
+no default TTL, because different producers have different freshness semantics.
+
+Capacity (concurrency/slots) and quota (tokens/rate limits/budget) are tracked
+separately from status. A backend that is `AVAILABLE` with zero free capacity is
+*busy*, not unavailable, and does not block a Work Order.
+
+## Implementation
+
+Backend facts live in `src/tactus/backends/`:
+
+- `registry.py` — `BackendId`, `BackendDescriptor`, `BackendRequirements`,
+  `EffortLevel`, `BackendRegistry` (mechanically pure compatibility matching);
+- `health.py` — `BackendHealth`, `BackendStatusObservation`,
+  `BackendHealthModel` (latest-wins, query-time expiry);
+- `capacity.py` — `Capacity`, `CapacityView`.
+
+These modules own facts only. Ranking, preference and backend/model/effort
+selection belong to the decision plane and are applied later.
 
 ## Backend failure during ACTIVE execution
 

@@ -51,9 +51,19 @@ Ictus, Dagster, Metaxy, OpenShell, SoL-Pi, Stax, and others lives elsewhere.
 ## Current status
 
 Tactus is currently in the **architecture/bootstrap stage**. This repository
-documents the intended system composition and boundaries; it does not yet
-implement Work Orders, scheduling, triage, adapters, or any orchestration
-functionality.
+documents the intended system composition and boundaries and has begun to land a
+factual control-plane core. It does **not** yet implement scheduling,
+triage/recovery policy, adapters, or any orchestration functionality.
+
+Implemented so far:
+
+- backend facts (`src/tactus/backends/`): a factual backend registry, an
+  independent backend status model (`AVAILABLE | UNAVAILABLE | DISABLED`) with
+  timestamped observations that expire at query time, and independent capacity
+  where a busy backend is not an unavailable one.
+
+These are factual inputs only; backend selection and routing policy belong to
+the decision plane.
 
 ## Documentation
 
