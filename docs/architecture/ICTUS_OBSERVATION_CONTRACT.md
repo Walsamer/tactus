@@ -68,7 +68,8 @@ Domain/control facts must **not** be narrowed into an `ExecutionObservation` and
 must **not** be forced through `ExecutionObservation → UNKNOWN` merely because
 Ictus's execution taxonomy cannot represent them. They belong on the
 `StateSnapshot` facts/context surface consumed by the decision plane, which is
-the subject of the StateSnapshot adapter (FIX-005).
+the subject of the StateSnapshot adapter (FIX-005): see
+[`ICTUS_STATE_SNAPSHOT_CONTRACT.md`](ICTUS_STATE_SNAPSHOT_CONTRACT.md).
 
 For example, the following are **domain/control facts, not execution
 observations**, and are explicitly out of scope for this boundary:
@@ -186,6 +187,29 @@ records and failure observations unchanged.
 
 `src/tactus/integrations/ictus/observation.py` — the only public entry point for
 Ictus observation traffic.
+
+## StateSnapshot adapter (FIX-005)
+
+The outbound complement of this boundary is the purely-Tactus-to-Ictus
+`StateSnapshot` v1 context adapter. It takes the validated execution
+observation (including this boundary's normalized `TactusObservation`),
+together with Work Order/domain facts, attempt/recovery history and backend
+facts, and assembles the domain-neutral state that an Ictus `DecisionProvider`
+consumes.
+
+- It includes the execution observation **without reclassification**: the
+  `observation.category` is copied verbatim and the closed v1 vocabulary is
+  never widened or narrowed.
+- Tactus/domain facts are emitted as their own snapshot facts; they are never
+  disguised as execution categories.
+- The two attempt counters — the Dagster micro-retry index
+  (`attempt.number`) and the semantic execution-attempt/recovery count
+  (`recovery.semantic_attempts`) — are kept strictly separate.
+- The adapter is pure: no Work Order mutation, no lifecycle transition, no
+  persistence-model leakage and no recovery-decision logic.
+
+See [`ICTUS_STATE_SNAPSHOT_CONTRACT.md`](ICTUS_STATE_SNAPSHOT_CONTRACT.md) for
+the payload shape and the full fact vocabulary.
 
 ## Relationship to issue #8
 
