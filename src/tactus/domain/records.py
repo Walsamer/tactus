@@ -28,7 +28,7 @@ class TransitionAuthority(str, Enum):
 
     OPERATOR = "operator"
     ADMISSION = "admission"
-    SCHEDULER = "scheduler"
+    EXECUTION_ADMISSION = "execution_admission"
     VERIFIER = "verifier"
     RECOVERY = "recovery"
     SYSTEM = "system"

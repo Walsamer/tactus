@@ -191,7 +191,7 @@ class WorkOrder:
         *,
         reason: str,
         at: datetime | None = None,
-        authority: TransitionAuthority = TransitionAuthority.SCHEDULER,
+        authority: TransitionAuthority = TransitionAuthority.EXECUTION_ADMISSION,
     ) -> TransitionRecord:
         """Claim an ``OPEN + READY`` Work Order into ``ACTIVE``.
 
