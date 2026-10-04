@@ -27,7 +27,8 @@ done
 
 # 3. No obvious secret material in tracked files.
 if grep -rInE --exclude-dir=.git \
-     '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{20,}' . ; then
+     -e '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----' \
+     -e 'gh[pousr]_[A-Za-z0-9]{20,}' . ; then
   echo "TACTUS_VERIFIER_FAIL: possible secret material detected" >&2
   fail=1
 fi
