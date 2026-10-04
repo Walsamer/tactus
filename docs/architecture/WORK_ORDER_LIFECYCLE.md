@@ -84,7 +84,11 @@ Normative semantic:
 `ACTIVE` must correspond to at most one authoritative active execution attempt
 unless the Work Order explicitly supports planned parallel child execution.
 Whether Dagster has actually queued, started, retried, or finished the run is
-separate temporal execution state owned by Dagster.
+separate temporal execution state owned by Dagster. The authoritative attempt is
+held as an `ExecutionAttempt` correlation
+(`WorkOrderId -> ExecutionIntentId -> DagsterRunId`) that stores no Dagster
+run/step state; see
+[`SCHEDULING_AND_BACKENDS.md`](SCHEDULING_AND_BACKENDS.md#execution-admission-port-executionadmissionport).
 
 A failed execution attempt does **not** change the lifecycle state. Tactus records
 a `FailureObservation` while the Work Order stays `ACTIVE` until a recovery
@@ -506,7 +510,9 @@ The lifecycle, readiness and observation model lives in
   `WorkOrderId`, transition guards;
 - `records.py` — `TransitionAuthority`, `TransitionRecord`;
 - `observation.py` — `FailureObservation`;
-- `dependency.py` — `WorkOrderDependency`, `DependencyGraph`.
+- `dependency.py` — `WorkOrderDependency`, `DependencyGraph`;
+- `admission.py` — `ExecutionAdmissionPort`, `ExecutionAdmission`,
+  `ExecutionAttempt` correlation, `ExecutionRequest`, `AdmissionFacts`.
 
 The domain core is intentionally free of I/O, persistence, scheduler and
 recovery-policy logic.
