@@ -7,10 +7,11 @@ Human intervention handles cases where the system has enough information to know
 Human intervention is **not** a parallel lifecycle/state machine. The Work Order remains in the normal Tactus lifecycle, usually:
 
 ```text
-BLOCKED(reason=HUMAN_INPUT_REQUIRED)
+OPEN + BLOCKED(reason=HUMAN_INPUT_REQUIRED)
 ```
 
-with a structured intervention request attached.
+with a structured intervention request attached. `BLOCKED` here is the readiness
+status of the `OPEN` lifecycle state, not a lifecycle state.
 
 ## Initial intervention reasons
 
@@ -45,7 +46,7 @@ PROVIDE_CLARIFICATION
 MARK_DEPENDENCY_RESOLVED
 ```
 
-The human should not directly issue arbitrary database mutations such as “set state = READY”. Instead:
+The human should not directly issue arbitrary database mutations such as “set readiness = READY” or “set lifecycle state = ACTIVE”. Instead:
 
 ```text
 human action
@@ -104,7 +105,7 @@ Do not make GitHub comments the only source of truth for intervention state.
 Conceptually:
 
 ```text
-Tactus BLOCKED intervention
+Tactus OPEN + BLOCKED intervention
         ↓
 optional GitHub status/comment/link
         ↓
@@ -119,4 +120,4 @@ normal lifecycle transition
 
 A human response does not automatically imply `READY`.
 
-After the requested input/action is supplied, Tactus re-evaluates all blockers and prerequisites. Only if no blocker remains does the Work Order transition to `READY`.
+After the requested input/action is supplied, Tactus re-evaluates all blockers and prerequisites. Only if no blocker remains does the Work Order's `OPEN` readiness become `READY`.

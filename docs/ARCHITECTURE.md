@@ -65,14 +65,21 @@ Markdown in this repository is the authoritative architecture specification. The
 original hand-drawn sketch is kept only as a non-authoritative reference artifact
 at [`architecture/whiteboard-original.jpg`](architecture/whiteboard-original.jpg).
 
-Two distinctions are load-bearing across all of these documents:
+Three distinctions are load-bearing across all of these documents:
 
-- **Lifecycle state and recovery action are different concepts.** `RETRY`,
-  `REQUEUE_READY`, `REROUTE`, `SPLIT_REPLAN`, and `ESCALATE_HUMAN` are
-  actions/decisions, not lifecycle states.
+- **Lifecycle state, readiness status, observations, and recovery actions are
+  different concepts.** The Work Order lifecycle is exactly
+  `DRAFT | OPEN | ACTIVE | IMPLEMENTED | RETIRED`. `READY` and `BLOCKED` are
+  readiness statuses of an `OPEN` Work Order, not lifecycle states. A
+  `FailureObservation` is an event attached to an `ACTIVE` Work Order, not a
+  state. `RETRY`, `REQUEUE_READY`, `REROUTE`, `SPLIT_REPLAN`, and
+  `ESCALATE_HUMAN` are actions/decisions, not lifecycle states.
+- **Failure does not transition the Work Order.** The Work Order remains
+  `ACTIVE` while the failure is observed, classified, and triaged; Tactus applies
+  the resulting recovery decision.
 - **Backend health is system/runtime state, not Work Order truth.** A Work
   Order's state does not encode which backend is healthy; a lack of worker
-  capacity leaves it `READY` rather than `BLOCKED`.
+  capacity leaves it `OPEN + READY` rather than `OPEN + BLOCKED`.
 
 ## Ownership boundaries
 
@@ -80,12 +87,13 @@ Two distinctions are load-bearing across all of these documents:
 
 Tactus is the master/system repository and owns the control plane:
 
-- Work Order identity and lifecycle
+- Work Order identity and lifecycle state (sole authority)
 - triggers and admission from work sources
-- dependency readiness and blocked/unblocked state
+- dependency readiness and `OPEN` blocked/unblocked readiness status
 - scheduling/coordination and capacity gates
 - capability/backend selection and availability view
 - execution requests
+- records/normalizes failure observations
 - application of validated decisions (recovery, intervention)
 - human-intervention queue
 - system configuration
@@ -122,6 +130,9 @@ Dagster
 ```
 
 Ictus source is not copied into Tactus; it is integrated through a contract.
+Ictus owns diagnosis and typed recovery decisions but does **not** directly
+mutate Work Order state; Tactus applies the validated decision and owns the
+resulting lifecycle state.
 
 ### Dagster — execution plane (third-party)
 
@@ -136,6 +147,8 @@ Dagster is the third-party execution substrate. It owns:
 - execution observability
 
 Tactus/Ictus decide what should happen; Dagster owns **durably executing it**.
+Dagster reports execution outcomes and errors, but it does **not** own or mutate
+Tactus Work Order state.
 
 ### Metaxy — provenance, Dagster-integrated (third-party)
 

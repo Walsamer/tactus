@@ -33,9 +33,11 @@ Exit criteria:
 
 Goals:
 
-- WorkOrder v1 model;
-- lifecycle states and transition guards;
+- WorkOrder v1 model with the frozen five-state lifecycle
+  (`DRAFT | OPEN | ACTIVE | IMPLEMENTED | RETIRED`);
+- orthogonal `OPEN` readiness status (`READY`/`BLOCKED`) with transition guards;
 - typed block reasons;
+- normalized `FailureObservation` while a Work Order remains `ACTIVE`;
 - parent/child provenance;
 - small persistence interface/implementation only as needed for the vertical slice.
 
@@ -56,10 +58,11 @@ Goals:
 
 Goals:
 
-- normalize execution failures into an Ictus-facing observation;
+- normalize execution failures into a `FailureObservation` while the Work Order
+  remains `ACTIVE`;
 - receive a typed `RecoveryDecision`;
-- map decisions to Tactus lifecycle transitions/actions;
-- keep policy in Ictus and state ownership in Tactus.
+- map decisions to Tactus lifecycle transitions/readiness changes;
+- keep policy in Ictus and lifecycle-state ownership in Tactus.
 
 ## M4 — Recovery actions
 
@@ -145,8 +148,8 @@ which spans roadmap slices M1–M4 plus the M6 vertical slice:
 
 | Issue | Title |
 |---|---|
-| [#1](https://github.com/Walsamer/tactus/issues/1) | Freeze Work Order lifecycle v1 |
-| [#2](https://github.com/Walsamer/tactus/issues/2) | Implement WorkOrder v1 model and transition guards |
+| [#1](https://github.com/Walsamer/tactus/issues/1) | Formalize Work Order lifecycle and orthogonal status dimensions |
+| [#2](https://github.com/Walsamer/tactus/issues/2) | Implement WorkOrder v1 model, OPEN readiness, and transition guards |
 | [#3](https://github.com/Walsamer/tactus/issues/3) | Add typed BlockReason and unblock semantics |
 | [#4](https://github.com/Walsamer/tactus/issues/4) | Define SchedulerPort and READY claim contract |
 | [#5](https://github.com/Walsamer/tactus/issues/5) | Implement backend registry and health model |
