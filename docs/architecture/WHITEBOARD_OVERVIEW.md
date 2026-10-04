@@ -133,7 +133,7 @@ flowchart TD
     ICTUS -->|RETIRE| RETIRED
 ```
 
-The diagram intentionally treats **retry as an action**, not as a permanent lifecycle state. A retry/requeue decision returns the Work Order to `OPEN + READY` and creates a new execution attempt. The `OPEN + READY` and `OPEN + BLOCKED` nodes are **readiness statuses of the `OPEN` lifecycle state**, not peer lifecycle states. A failure event creates a `FailureObservation` while the Work Order remains `ACTIVE`; failure never becomes a lifecycle state.
+The diagram intentionally treats **retry as an action**, not as a permanent lifecycle state. A retry/requeue decision returns the Work Order to `OPEN + READY` and creates a new execution attempt. The `OPEN + READY` and `OPEN + BLOCKED` nodes are **readiness statuses of the `OPEN` lifecycle state**, not peer lifecycle states. A failure event creates a `FailureObservation` while the Work Order remains `ACTIVE`; failure never becomes a lifecycle state. Successful completion does **not** pass through Ictus recovery: `ACTIVE → IMPLEMENTED` is a direct, independent outcome, and `IMPLEMENTED` / `RETIRED` are terminal.
 
 ## Canonical lifecycle states
 
