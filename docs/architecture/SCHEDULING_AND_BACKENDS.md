@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The scheduler decides **which READY Work Order may run now**. It does not decide how a failed run should be repaired; recovery belongs to Ictus/Tactus triage flow.
+The scheduler decides **which `OPEN + READY` Work Order may run now**. It does not decide how a failed run should be repaired; recovery belongs to the Ictus/Tactus triage flow.
 
 The whiteboard separates three questions:
 
@@ -16,16 +16,19 @@ These must remain distinct.
 
 ```mermaid
 flowchart TD
-    READY[READY Work Orders] --> GATES{Admission gates}
+    READY[OPEN + READY Work Orders] --> GATES{Admission gates}
     GATES -->|budget/concurrency denied for now| READY
     GATES -->|eligible| SELECT[Select compatible backend]
     SELECT --> BH{Backend available?}
-    BH -->|no compatible backend| BLOCKED[BLOCKED: BACKEND_UNAVAILABLE]
+    BH -->|no compatible backend| BLOCKED[OPEN + BLOCKED: BACKEND_UNAVAILABLE]
     BH -->|yes| WH{Worker/capacity available?}
     WH -->|no| READY
     WH -->|yes| CLAIM[Atomic claim / lease]
     CLAIM --> ACTIVE[ACTIVE]
 ```
+
+The `READY` and `BLOCKED` nodes are readiness statuses of the `OPEN` lifecycle
+state, not peer lifecycle states.
 
 ## Admission gates
 
@@ -76,8 +79,10 @@ Examples:
 If no compatible backend remains:
 
 ```text
-READY → BLOCKED(reason=BACKEND_UNAVAILABLE)
+OPEN + READY → OPEN + BLOCKED(reason=BACKEND_UNAVAILABLE)
 ```
+
+This is a readiness change within `OPEN`, not a lifecycle transition.
 
 ### Worker/capacity unavailable
 
@@ -90,7 +95,7 @@ Examples:
 The Work Order remains:
 
 ```text
-READY
+OPEN + READY
 ```
 
 No block record should be created merely because capacity is currently busy.
@@ -128,12 +133,14 @@ Conceptual flow:
 ```mermaid
 flowchart TD
     ACTIVE --> ERR[Provider/backend error]
-    ERR --> OBS[ExecutionObservation]
+    ERR --> OBS[FailureObservation]
     OBS --> ICTUS[Ictus decision]
     ICTUS -->|retry same backend within budget| RETRY[Retry action]
-    ICTUS -->|reroute allowed| REQUEUE[READY + route excludes unhealthy backend]
-    ICTUS -->|no compatible backend| BLOCK[BLOCKED: BACKEND_UNAVAILABLE]
+    ICTUS -->|reroute allowed| REQUEUE[OPEN + READY, route excludes unhealthy backend]
+    ICTUS -->|no compatible backend| BLOCK[OPEN + BLOCKED: BACKEND_UNAVAILABLE]
 ```
+
+The Work Order remains `ACTIVE` while the observation is recorded and triaged.
 
 Do not directly mutate an ACTIVE Work Order to a different backend in-place. End the current attempt, record the observation, and create a new scheduling decision/attempt.
 
@@ -147,7 +154,7 @@ Recommended normalized behavior:
 
 1. Allow at most a very small same-attempt/same-backend retry if policy explicitly permits it.
 2. Repeated timeout marks/degrades the backend health observation.
-3. Requeue the Work Order to `READY` for fresh routing if another compatible backend may exist.
+3. Requeue the Work Order to `OPEN + READY` for fresh routing if another compatible backend may exist.
 4. If no compatible backend is available, block as `BACKEND_UNAVAILABLE`.
 
 ### Usage/quota limit
@@ -163,11 +170,11 @@ A backend-health change can unblock affected Work Orders:
 ```text
 backend becomes AVAILABLE
         ↓
-find BLOCKED WOs with reason BACKEND_UNAVAILABLE
+find OPEN + BLOCKED WOs with reason BACKEND_UNAVAILABLE
         ↓
 re-evaluate compatibility and all readiness gates
         ↓
 READY if runnable; otherwise remain BLOCKED for the remaining reason
 ```
 
-Do not bulk-force all blocked work to READY without re-evaluating other prerequisites.
+Do not bulk-force all blocked work to `OPEN + READY` without re-evaluating other prerequisites.

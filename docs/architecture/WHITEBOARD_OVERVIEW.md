@@ -44,13 +44,23 @@ Tactus owns operational coordination:
 - Work Order identity and lifecycle state;
 - admission from work sources;
 - dependency readiness;
-- blocked/unblocked state;
+- blocked/unblocked status of an `OPEN` Work Order;
 - scheduler eligibility;
 - concurrency and budget gates;
 - backend/runtime availability view;
 - application of validated decisions;
 - human-intervention queue;
 - orchestration-level observability.
+
+Normative ownership rules:
+
+```text
+Tactus
+- sole authority over WorkOrder lifecycle state
+- owns OPEN readiness/blocking status
+- records/normalizes FailureObservations
+- applies validated RecoveryDecisions
+```
 
 ### Ictus
 
@@ -61,6 +71,13 @@ Ictus owns typed decisions and policy:
 - capability and policy validation;
 - approval requirements;
 - emit validated execution intents.
+
+```text
+Ictus
+- owns diagnosis, policy and typed RecoveryDecisions
+- consumes normalized observations from Tactus
+- does NOT directly mutate WorkOrder state
+```
 
 Tactus must not bury recovery policy in ad-hoc scheduler branches. Ictus must not become a scheduler or durable workflow engine.
 
@@ -73,6 +90,13 @@ Dagster owns durable execution:
 - persistence of execution history;
 - workflow dependencies;
 - durable execution observability.
+
+```text
+Dagster
+- owns durable execution mechanics
+- reports execution outcomes/errors
+- does NOT own or mutate Tactus WorkOrder state
+```
 
 ### Metaxy
 
@@ -87,46 +111,77 @@ The runtime plane supplies replaceable `SandboxRuntime` and `AgentRuntime` imple
 ```mermaid
 flowchart TD
     WS[Work Source] --> DRAFT[DRAFT]
-    DRAFT --> OPEN[OPEN]
-    OPEN -->|valid + all prerequisites satisfied| READY[READY]
-    OPEN -->|known blocker| BLOCKED[BLOCKED]
-    BLOCKED -->|blocker resolved| READY
+    DRAFT -->|admit| OPEN[OPEN]
+    DRAFT -->|withdraw| RETIRED[RETIRED]
 
-    READY --> SCHED[Scheduler]
-    SCHED -->|capacity + compatible backend + worker available| ACTIVE[ACTIVE]
-    SCHED -->|worker capacity unavailable| READY
-    SCHED -->|no compatible backend currently available| BLOCKED
+    OPEN -->|readiness: executable| READY[OPEN + READY]
+    OPEN -->|readiness: known blocker| BLOCKED[OPEN + BLOCKED]
+    BLOCKED -->|blocker resolved; re-evaluate| READY
+    READY -->|scheduler claim| ACTIVE[ACTIVE]
+    OPEN -->|invalid / superseded before execution| RETIRED
 
-    ACTIVE -->|successful result| COMPLETED[COMPLETED]
-    ACTIVE -->|superseded / no longer needed| RETIRED[RETIRED]
-    ACTIVE -->|failed execution| FAILED[FAILED]
+    ACTIVE -->|successful result + verification| IMPLEMENTED[IMPLEMENTED]
+    ACTIVE -->|superseded / cancelled| RETIRED
+    ACTIVE -->|failure event| OBS[FailureObservation]
 
-    FAILED --> TRIAGE[Triage observation]
-    TRIAGE --> ICTUS[Ictus RecoveryDecision]
-    ICTUS -->|retry / requeue| READY
+    OBS --> TRIAGE[Triage / diagnosis]
+    TRIAGE --> ICTUS[Ictus: RecoveryDecision]
+    ICTUS -->|retry / requeue / reroute| READY
     ICTUS -->|needs human/input/backend/dependency| BLOCKED
-    ICTUS -->|split and replan| RETIRED
-    ICTUS -->|terminal invalid/superseded| RETIRED
+    ICTUS -->|split and replan| CHILDREN[Durably create child Work Orders]
+    CHILDREN --> RETIRED
+    ICTUS -->|RETIRE| RETIRED
 ```
 
-The diagram intentionally treats **retry as an action**, not as a permanent lifecycle state. A retry/requeue decision returns the Work Order to an existing lifecycle state and creates a new execution attempt.
+The diagram intentionally treats **retry as an action**, not as a permanent lifecycle state. A retry/requeue decision returns the Work Order to `OPEN + READY` and creates a new execution attempt. The `OPEN + READY` and `OPEN + BLOCKED` nodes are **readiness statuses of the `OPEN` lifecycle state**, not peer lifecycle states. A failure event creates a `FailureObservation` while the Work Order remains `ACTIVE`; failure never becomes a lifecycle state.
 
 ## Canonical lifecycle states
 
-The whiteboard currently implies the following primary states:
+The Work Order lifecycle is exactly:
 
-| State | Meaning |
+```text
+DRAFT | OPEN | ACTIVE | IMPLEMENTED | RETIRED
+```
+
+| Lifecycle state | Meaning |
 |---|---|
 | `DRAFT` | Work exists but is not yet admitted for execution. |
-| `OPEN` | Work has been admitted and is being checked for prerequisites/readiness. |
-| `READY` | Work is executable and waiting for scheduling/capacity. |
+| `OPEN` | Work has been admitted; readiness is tracked separately as `READY` or `BLOCKED`. |
 | `ACTIVE` | One execution attempt currently owns the Work Order lease. |
-| `BLOCKED` | Work cannot currently progress because a typed blocker exists. |
-| `FAILED` | The latest execution attempt failed and requires diagnosis/decision. |
-| `COMPLETED` | The requested outcome passed required verification. |
+| `IMPLEMENTED` | The requested outcome passed required verification (whiteboard term: `IMPLEMENTED`). |
 | `RETIRED` | Work is intentionally no longer executable, for example because it is superseded, invalidated, or replaced by split child work. |
 
-`FAILED` may later prove better represented as an execution-attempt outcome rather than a long-lived Work Order state. Keep that question explicit until the first implementation contract is frozen.
+`IMPLEMENTED` and `RETIRED` are terminal.
+
+### OPEN readiness status (orthogonal, not lifecycle states)
+
+While the lifecycle state is `OPEN`, the Work Order carries one readiness status:
+
+| Readiness status | Meaning |
+|---|---|
+| `READY` | Work is executable and waiting for scheduling/capacity. |
+| `BLOCKED` | Work cannot currently progress because a typed blocker exists. |
+
+`READY` and `BLOCKED` are **not** peer lifecycle states. A readiness change is
+**not** a lifecycle transition, and a resolved blocker must trigger
+re-evaluation rather than blindly assigning `READY`.
+
+### Failure is an observation, not a state
+
+A failure that occurs while a Work Order is `ACTIVE` produces a
+`FailureObservation` while the Work Order remains `ACTIVE`:
+
+```text
+ACTIVE
+  ↓ failure event
+FailureObservation
+  ↓
+Triage / Ictus RecoveryDecision
+  ↓
+Tactus applies the decision
+```
+
+There is no `FAILED` / `FAIL` Work Order lifecycle state.
 
 ## Supporting architecture documents
 
@@ -138,25 +193,24 @@ The whiteboard currently implies the following primary states:
 
 ## Design rules extracted from the sketch
 
-1. **Lifecycle state and recovery action are different concepts.** `RETRY`, `REQUEUE`, `SPLIT_REPLAN`, `REROUTE`, and `ESCALATE_HUMAN` are actions/decisions, not new lifecycle states.
-2. **`READY` means executable but waiting.** Lack of worker capacity keeps a Work Order `READY`; it is not a blocker.
-3. **`BLOCKED` always carries a typed reason.** The state alone is insufficient.
+1. **Lifecycle state, readiness status, observations, and recovery actions are different concepts.** `READY`/`BLOCKED` are `OPEN` readiness statuses; `FailureObservation` is an event attached to an `ACTIVE` Work Order; `RETRY`, `REQUEUE`, `REROUTE`, `SPLIT_REPLAN`, and `ESCALATE_HUMAN` are actions/decisions. None of them are lifecycle states.
+2. **`READY` means executable but waiting.** Lack of worker capacity keeps a Work Order `OPEN + READY`; it is not a blocker.
+3. **`BLOCKED` is an `OPEN` readiness status and always carries a typed reason.** The status alone is insufficient.
 4. **Backend health is system state, not Work Order truth.** A Work Order may be reroutable when one backend fails.
 5. **Triage produces a diagnosis plus a typed decision.** The decision then maps to an existing lifecycle transition and optional additional action.
 6. **Human intervention uses the same typed action model as automation.** Humans do not directly mutate arbitrary state.
 7. **Retry budgets are bounded.** Repeated transient failure eventually changes strategy or escalates instead of looping forever.
 8. **Split-and-replan replaces the original execution unit with smaller children.** The parent retains provenance and becomes non-executable when the children take over.
+9. **Failure does not transition the Work Order.** It remains `ACTIVE` until Tactus applies the resulting recovery decision or accepts successful completion.
 
 ## Open questions to resolve during implementation
 
 The hand-drawn design intentionally leaves several choices open. They should become explicit ADRs or issue decisions rather than being guessed in code:
 
-- Should `FAILED` be a durable Work Order state or only an execution-attempt result that immediately enters decision processing?
 - Which block reasons are top-level reasons versus sub-reasons?
 - Which backend health signals are authoritative and how long do they remain valid?
 - Which failures permit a same-backend retry before requeue/reroute?
 - What is the exact retry budget hierarchy: per attempt, per diagnosis, per Work Order, per backend?
-- When split/replan occurs, does the parent become `RETIRED` immediately or only after child creation commits successfully?
 - Which human actions require Ictus policy validation/approval before Tactus applies them?
 
 Do not silently resolve these by copying Fleet v3 behavior. Tactus should preserve the useful semantics while establishing simpler, explicit contracts.
