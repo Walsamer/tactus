@@ -55,8 +55,9 @@ Typical reasons to remain draft:
 
 The Work Order has been admitted. Tactus evaluates whether it is executable.
 
-While `OPEN`, the Work Order also carries a readiness status of `READY` or
-`BLOCKED`. `OPEN` should not become a generic waiting room. Once Tactus can
+While `OPEN`, the Work Order also carries a readiness status of `UNKNOWN`,
+`READY` or `BLOCKED`. Admission leaves readiness `UNKNOWN` until readiness is
+evaluated; `OPEN` should not become a generic waiting room. Once Tactus can
 determine readiness, it should mark the Work Order `READY` or `BLOCKED`; the
 lifecycle state remains `OPEN`.
 
@@ -109,19 +110,27 @@ Work Order lifecycle state is `OPEN`:
 
 ```text
 OPEN
+├── UNKNOWN
 ├── READY
 └── BLOCKED
 ```
 
 ```mermaid
 stateDiagram-v2
-    [*] --> READY: OPEN + evaluated executable
+    [*] --> UNKNOWN: admitted
+    UNKNOWN --> READY: readiness evaluated executable
+    UNKNOWN --> BLOCKED: readiness evaluated blocked
     READY --> BLOCKED: blocker discovered
     BLOCKED --> READY: blockers resolved and readiness re-evaluated
 ```
 
-A readiness change is **not** a lifecycle transition. `READY`/`BLOCKED` are
-never peers of `DRAFT`/`OPEN`/`ACTIVE`/`IMPLEMENTED`/`RETIRED`.
+A readiness change is **not** a lifecycle transition. `UNKNOWN`, `READY` and
+`BLOCKED` are never peers of `DRAFT`/`OPEN`/`ACTIVE`/`IMPLEMENTED`/`RETIRED`.
+
+### `UNKNOWN` (OPEN)
+
+The Work Order was admitted but readiness has not been evaluated yet. `UNKNOWN`
+is not claimable: `OPEN -> ACTIVE` requires `OPEN + READY`.
 
 ### `READY` (OPEN)
 
@@ -284,6 +293,8 @@ or `RETIRED → IMPLEMENTED` transition.
 
 | Change | Trigger |
 |---|---|
+| `OPEN + UNKNOWN → OPEN + READY` | Readiness evaluated executable |
+| `OPEN + UNKNOWN → OPEN + BLOCKED` | Readiness evaluated blocked |
 | `OPEN + READY → OPEN + BLOCKED` | Blocker discovered |
 | `OPEN + BLOCKED → OPEN + READY` | Blocker resolved and readiness re-evaluated |
 | `OPEN + BLOCKED → OPEN + BLOCKED` | A blocker resolved but another remains |
@@ -402,3 +413,37 @@ explicit links to its children.
 
 Children independently enter `OPEN` (with `READY`/`BLOCKED` readiness) according
 to their prerequisites.
+
+## Work Order dependency graph
+
+Work Orders participate in an explicit directed dependency graph. A dependency
+is a first-class relation, not an incidental list on a Work Order:
+
+```text
+upstream -> downstream
+```
+
+means the downstream Work Order depends on the upstream Work Order. For
+`WO-101 -> WO-102 -> WO-103`, `WO-102` has upstream dependency `WO-101` and
+downstream dependent `WO-103`.
+
+The graph stores edges once and derives both directions, so upstream and
+downstream views cannot drift. v1 is acyclic: self-dependencies, duplicate
+edges and cycles are rejected rather than silently accepted. Readiness
+re-evaluation consumes this graph (for example, a downstream Work Order is
+`BLOCKED` while an upstream prerequisite is not yet `IMPLEMENTED`); that
+readiness engine itself is owned by later scheduling issues.
+
+## Implementation
+
+The lifecycle, readiness and observation model lives in
+`src/tactus/domain/`:
+
+- `work_order.py` — `WorkOrder`, `WorkOrderState`, `OpenStatus`,
+  `WorkOrderId`, transition guards;
+- `records.py` — `TransitionAuthority`, `TransitionRecord`;
+- `observation.py` — `FailureObservation`;
+- `dependency.py` — `WorkOrderDependency`, `DependencyGraph`.
+
+The domain core is intentionally free of I/O, persistence, scheduler and
+recovery-policy logic.
