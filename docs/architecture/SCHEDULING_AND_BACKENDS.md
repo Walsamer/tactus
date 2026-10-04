@@ -212,11 +212,13 @@ agent/runtime compatibility
 model/provider compatibility
 project policy
 cost/budget policy
-current backend health/availability (domain context recorded by Tactus)
+current backend status/availability (domain context recorded by Tactus)
+provider-reported capacity/quota facts (domain context recorded by Tactus)
 ```
 
-Tactus may record backend availability observations as domain facts/context, but
-routing policy lives in Ictus and execution scheduling lives in Dagster.
+Tactus may record backend status and provider-capacity observations as domain
+facts/context, but routing policy lives in Ictus and execution scheduling lives
+in Dagster.
 
 ## Backend unavailable vs execution concurrency unavailable
 
@@ -230,7 +232,7 @@ Examples:
 - authentication/service failure;
 - API unavailable;
 - usage/quota limit with no usable route;
-- backend health explicitly disabled.
+- backend status explicitly disabled.
 
 If Ictus routing yields no compatible backend:
 
@@ -248,30 +250,82 @@ Work Order whose accepted attempt is waiting in Dagster's run queue is already
 worker slot is busy. Tactus does not expose Dagster's queue state as Work Order
 readiness.
 
-## Backend health model
+## Backend status model
 
-Tactus may observe and record backend health as domain context that Ictus
-routing consults. Initial health vocabulary can remain small:
+Tactus may observe and record backend **status** as domain context that Ictus
+routing consults. Status is a factual, timestamped observation about an
+external system, not a Work Order field and not temporal execution state:
 
 ```text
 AVAILABLE
-DEGRADED
 UNAVAILABLE
 DISABLED
 ```
 
-Health observations may include:
+Status observations may include:
 
 - connectivity/probe status;
 - recent API/provider failures;
-- quota/usage state;
-- rate-limit state;
+- provider-reported availability;
 - operator disablement;
 - time of last successful execution.
 
-A backend health observation must have a timestamp and should decay/expire
-rather than remaining authoritative forever. Backend health is **not** temporal
-execution state and does not mirror Dagster's internal run/step state.
+A status observation must have a timestamp and expires at query time. A missing
+or expired observation means "no fresh authoritative status known", which is
+**not** `UNAVAILABLE`. Observations that must stay in force until explicitly
+superseded (for example an operator `DISABLED`) simply carry no expiry; there is
+no default TTL, because different producers have different freshness semantics.
+
+Status is kept strictly separate from compatibility: `BackendRegistry.compatible()`
+never consults status. A backend that is `UNAVAILABLE` is still *compatible*;
+availability is a separate operational fact applied later by the routing and
+admission boundary.
+
+## Provider capacity vs execution concurrency
+
+Tactus records **external provider-capacity facts** as domain context. These
+describe limits the outside world reports about itself:
+
+- provider quota and rate limits;
+- GPU availability reported by the provider;
+- externally imposed concurrency ceilings;
+- any other provider-reported limit.
+
+These facts are inputs to Ictus routing and to the Dagster integration. They are
+**not** execution slots, and Tactus never debits or reserves them.
+
+**Execution concurrency is Dagster-owned.** Maximum concurrent runs, pool
+slots, run-queue depth and worker occupancy are Dagster configuration and
+Dagster run/step state. Tactus must not:
+
+- maintain an `in_use`/free-slot occupancy counter;
+- treat a provider-reported limit as authoritative worker-scheduling state;
+- expose Dagster queue/worker state as Work Order readiness;
+- implement a dynamic execution-slot scheduler.
+
+A backend that is `AVAILABLE` but has no provider-reported headroom is *busy*,
+not unavailable, and does not block a Work Order: it stays `OPEN + READY` and
+waits. Execution handoff to Dagster (`OPEN + READY → ACTIVE`) happens on domain
+eligibility; Dagster then queues the run under its own concurrency
+configuration. Tactus tracks no execution-slot occupancy at any point.
+
+## Implementation
+
+Backend facts live in `src/tactus/backends/`:
+
+- `registry.py` — `BackendId`, `BackendDescriptor`, `BackendRequirements`,
+  `EffortLevel`, `BackendRegistry`. `compatible()` is a purely mechanical
+  hard-constraint match, independent of status and provider capacity.
+- `health.py` — `BackendHealth`, `BackendStatusObservation`,
+  `BackendHealthModel` (latest-wins, query-time expiry).
+- `capacity.py` — `ProviderCapacityObservation`, `ProviderCapacityModel`:
+  external provider-capacity facts only. This module deliberately contains **no**
+  execution-slot occupancy or scheduling API; that accounting belongs to
+  Dagster's run queue and pool configuration.
+
+These modules own facts only. Ranking, preference, backend/model/effort
+selection and worker scheduling are **not** here: semantic routing is Ictus
+policy and execution concurrency is Dagster configuration.
 
 ## Backend failure during ACTIVE execution
 
@@ -309,7 +363,7 @@ Normalized behavior under the ownership split:
 
 1. Allow at most a very small same-attempt/same-backend execution retry if
    Dagster policy explicitly permits it.
-2. Repeated timeout marks/degrades the backend health observation.
+2. Repeated timeout marks/degrades the backend status observation.
 3. Ictus may decide a semantic requeue/reroute; Tactus applies it to `OPEN +
    READY` for fresh routing if another compatible backend may exist.
 4. If no compatible backend is available, block as `BACKEND_UNAVAILABLE`.
@@ -319,11 +373,11 @@ Normalized behavior under the ownership split:
 1. Mark that backend unavailable for the relevant capability/window.
 2. Ictus may decide a reroute; Tactus applies it for another compatible backend
    if one exists.
-3. Otherwise block as `BACKEND_UNAVAILABLE` until backend health changes.
+3. Otherwise block as `BACKEND_UNAVAILABLE` until backend status changes.
 
 ## Unblocking
 
-A backend-health change can unblock affected Work Orders:
+A backend-status change can unblock affected Work Orders:
 
 ```text
 backend becomes AVAILABLE
