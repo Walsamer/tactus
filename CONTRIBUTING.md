@@ -30,6 +30,6 @@ Architecture/docs → GitHub Issue → branch → PR → review → main
 - Capture unresolved semantic choices as explicit issues or ADRs rather than
   guessing in code.
 
-The executable backlog lives in GitHub Issues, derived from
-[docs/ISSUE_PLAN.md](docs/ISSUE_PLAN.md). The docs describe the architecture;
-the issues describe bounded work.
+The executable backlog lives in GitHub Issues. [docs/ROADMAP.md](docs/ROADMAP.md)
+describes the milestones and links the current issue set; the architecture docs
+describe the design, and the issues describe bounded work.

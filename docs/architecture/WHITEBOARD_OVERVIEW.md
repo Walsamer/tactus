@@ -1,6 +1,10 @@
 # Tactus Control-Plane Architecture — Whiteboard Translation
 
-This document translates the current hand-drawn Fleet/Tactus control-plane design into a versioned architecture description. It is a design source of truth, not an implementation claim.
+This document translates the hand-drawn control-plane design into a versioned architecture description. It is a design source of truth, not an implementation claim.
+
+The original hand-drawn sketch is preserved as a **non-authoritative reference
+artifact** at [`whiteboard-original.jpg`](whiteboard-original.jpg). This Markdown
+document — not the image — is the authoritative architecture specification.
 
 The sketch focuses on five connected concerns:
 
@@ -95,9 +99,9 @@ flowchart TD
 
     ACTIVE -->|successful result| COMPLETED[COMPLETED]
     ACTIVE -->|superseded / no longer needed| RETIRED[RETIRED]
-    ACTIVE -->|failed execution| FAIL[FAIL]
+    ACTIVE -->|failed execution| FAILED[FAILED]
 
-    FAIL --> TRIAGE[Triage observation]
+    FAILED --> TRIAGE[Triage observation]
     TRIAGE --> ICTUS[Ictus RecoveryDecision]
     ICTUS -->|retry / requeue| READY
     ICTUS -->|needs human/input/backend/dependency| BLOCKED
@@ -118,11 +122,11 @@ The whiteboard currently implies the following primary states:
 | `READY` | Work is executable and waiting for scheduling/capacity. |
 | `ACTIVE` | One execution attempt currently owns the Work Order lease. |
 | `BLOCKED` | Work cannot currently progress because a typed blocker exists. |
-| `FAIL` | The latest execution attempt failed and requires diagnosis/decision. |
+| `FAILED` | The latest execution attempt failed and requires diagnosis/decision. |
 | `COMPLETED` | The requested outcome passed required verification. |
 | `RETIRED` | Work is intentionally no longer executable, for example because it is superseded, invalidated, or replaced by split child work. |
 
-`FAIL` may later prove better represented as an execution-attempt outcome rather than a long-lived Work Order state. Keep that question explicit until the first implementation contract is frozen.
+`FAILED` may later prove better represented as an execution-attempt outcome rather than a long-lived Work Order state. Keep that question explicit until the first implementation contract is frozen.
 
 ## Supporting architecture documents
 
@@ -131,7 +135,6 @@ The whiteboard currently implies the following primary states:
 - [`TRIAGE_AND_RECOVERY.md`](TRIAGE_AND_RECOVERY.md)
 - [`HUMAN_INTERVENTION.md`](HUMAN_INTERVENTION.md)
 - [`../ROADMAP.md`](../ROADMAP.md)
-- [`../ISSUE_PLAN.md`](../ISSUE_PLAN.md)
 
 ## Design rules extracted from the sketch
 
@@ -148,7 +151,7 @@ The whiteboard currently implies the following primary states:
 
 The hand-drawn design intentionally leaves several choices open. They should become explicit ADRs or issue decisions rather than being guessed in code:
 
-- Should `FAIL` be a durable Work Order state or only an execution-attempt result that immediately enters decision processing?
+- Should `FAILED` be a durable Work Order state or only an execution-attempt result that immediately enters decision processing?
 - Which block reasons are top-level reasons versus sub-reasons?
 - Which backend health signals are authoritative and how long do they remain valid?
 - Which failures permit a same-backend retry before requeue/reroute?

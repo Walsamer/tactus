@@ -4,7 +4,13 @@ This roadmap turns the current control-plane architecture into small collaborati
 
 ## Current principle
 
-Build the contracts and one thin vertical slice first. Add complexity only after the ownership boundary is proven.
+Build the contracts and one thin vertical slice first. Add complexity only after
+the ownership boundary is proven.
+
+The Markdown documents in this repository are the authoritative architecture
+specification. The original hand-drawn sketch is kept only as a non-authoritative
+reference artifact at
+[`architecture/whiteboard-original.jpg`](architecture/whiteboard-original.jpg).
 
 ## M0 — Architecture baseline
 
@@ -130,6 +136,27 @@ Goals:
 - move WorkSource/control-plane responsibilities from Fleet to Tactus incrementally;
 - keep the external GitHub Issue → automated work → PR workflow stable;
 - retire Fleet subsystems only after equivalent Tactus paths are proven.
+
+## Executable backlog
+
+Implementation work is tracked as GitHub Issues. The first meaningful
+tranche is the **[M1 — Control-Plane Vertical Slice](https://github.com/Walsamer/tactus/milestone/1)** milestone,
+which spans roadmap slices M1–M4 plus the M6 vertical slice:
+
+| Issue | Title |
+|---|---|
+| [#1](https://github.com/Walsamer/tactus/issues/1) | Freeze Work Order lifecycle v1 |
+| [#2](https://github.com/Walsamer/tactus/issues/2) | Implement WorkOrder v1 model and transition guards |
+| [#3](https://github.com/Walsamer/tactus/issues/3) | Add typed BlockReason and unblock semantics |
+| [#4](https://github.com/Walsamer/tactus/issues/4) | Define SchedulerPort and READY claim contract |
+| [#5](https://github.com/Walsamer/tactus/issues/5) | Implement backend registry and health model |
+| [#6](https://github.com/Walsamer/tactus/issues/6) | Add scheduler backend selection and BACKEND_UNAVAILABLE blocking |
+| [#7](https://github.com/Walsamer/tactus/issues/7) | Define Tactus → Ictus recovery observation contract |
+| [#8](https://github.com/Walsamer/tactus/issues/8) | Define/apply typed RecoveryDecision actions |
+| [#9](https://github.com/Walsamer/tactus/issues/9) | Implement bounded retry and reroute semantics |
+| [#10](https://github.com/Walsamer/tactus/issues/10) | Implement split-and-replan parent/child flow |
+| [#11](https://github.com/Walsamer/tactus/issues/11) | Implement human intervention requests and typed resolutions |
+| [#12](https://github.com/Walsamer/tactus/issues/12) | Minimal Tactus → Ictus → Dagster vertical slice |
 
 ## Collaboration flow
 

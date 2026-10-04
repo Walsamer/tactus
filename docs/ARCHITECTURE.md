@@ -59,9 +59,11 @@ detail there, those documents win over this summary.
 - [Human intervention](architecture/HUMAN_INTERVENTION.md) — typed intervention
   requests and policy-bound human resolutions.
 - [Roadmap](ROADMAP.md) — ordered implementation slices from the architecture
-  baseline to Fleet migration.
-- [Issue plan](ISSUE_PLAN.md) — staging plan for the executable GitHub issue
-  backlog.
+  baseline to Fleet migration, including the executable GitHub backlog.
+
+Markdown in this repository is the authoritative architecture specification. The
+original hand-drawn sketch is kept only as a non-authoritative reference artifact
+at [`architecture/whiteboard-original.jpg`](architecture/whiteboard-original.jpg).
 
 Two distinctions are load-bearing across all of these documents:
 

@@ -25,6 +25,7 @@ flowchart TD
     ACTION -->|RETRY| READY[READY]
     ACTION -->|REQUEUE_READY| READY
     ACTION -->|REROUTE| READY
+    ACTION -->|REPAIR_AND_RETRY| READY
     ACTION -->|BLOCK| BLOCKED[BLOCKED]
     ACTION -->|ESCALATE_HUMAN| BLOCKED
     ACTION -->|SPLIT_REPLAN| SPLIT[Create child Work Orders]
@@ -64,6 +65,7 @@ Do not encode backend/provider-specific product names in the core taxonomy.
 RETRY
 REQUEUE_READY
 REROUTE
+REPAIR_AND_RETRY
 BLOCK
 ESCALATE_HUMAN
 SPLIT_REPLAN
@@ -105,7 +107,7 @@ This table captures the intent of the whiteboard without freezing implementation
 | worker/execution timeout | `REQUEUE_READY` within budget | `READY` | consume retry budget; escalate when exhausted |
 | scope violation | normally `ESCALATE_HUMAN` or constrained replan | `BLOCKED`/`READY` | never silently widen scope |
 | request invalid/superseded | `RETIRE` | `RETIRED` | preserve reason/evidence |
-| integration failure | bounded repair/requeue if policy permits; otherwise human | `READY`/`BLOCKED` | preserve verification evidence |
+| integration failure | `REPAIR_AND_RETRY` if policy permits; otherwise `ESCALATE_HUMAN` | `READY`/`BLOCKED` | preserve verification evidence, never widen scope silently |
 | unknown | conservative `ESCALATE_HUMAN` | `BLOCKED` | no speculative widening |
 
 ## Bounded retry policy
@@ -133,7 +135,7 @@ Split/replan is a recovery action for work that is too large/complex but can be 
 
 ```mermaid
 flowchart TD
-    P[Parent FAIL] --> D[Ictus: SPLIT_REPLAN]
+    P[Parent FAILED] --> D[Ictus: SPLIT_REPLAN]
     D --> PLAN[Generate bounded child plan]
     PLAN --> VALIDATE[Validate child scopes/dependencies]
     VALIDATE --> CREATE[Durably create child WOs]

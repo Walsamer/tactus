@@ -16,10 +16,10 @@ stateDiagram-v2
     READY --> ACTIVE: scheduler claim
     ACTIVE --> COMPLETED: verified success
     ACTIVE --> RETIRED: superseded / replaced
-    ACTIVE --> FAIL: execution failure
-    FAIL --> READY: validated retry/requeue
-    FAIL --> BLOCKED: unresolved blocker / human input
-    FAIL --> RETIRED: invalid / superseded / split parent
+    ACTIVE --> FAILED: execution failure
+    FAILED --> READY: validated retry/requeue
+    FAILED --> BLOCKED: unresolved blocker / human input
+    FAILED --> RETIRED: invalid / superseded / split parent
 ```
 
 ## State semantics
@@ -108,13 +108,13 @@ OTHER
 
 A backend being busy is **not** `BACKEND_UNAVAILABLE`; busy/capacity-constrained work stays `READY`.
 
-### `FAIL`
+### `FAILED`
 
 The latest execution attempt ended unsuccessfully and the result requires diagnosis/decision.
 
-`FAIL` must never itself encode the recovery strategy. Recovery is represented separately as a typed decision.
+`FAILED` must never itself encode the recovery strategy. Recovery is represented separately as a typed decision.
 
-Possible future simplification: model failure only as an `ExecutionResult` and immediately enter recovery decision processing rather than persisting `FAIL` as a long-lived Work Order state. Keep this open until the first implementation slice proves the need.
+Possible future simplification: model failure only as an `ExecutionResult` and immediately enter recovery decision processing rather than persisting `FAILED` as a long-lived Work Order state. Keep this open until the first implementation slice proves the need.
 
 ### `COMPLETED`
 
@@ -147,8 +147,8 @@ Tactus owns lifecycle transitions, but the trigger may come from different plane
 | `BLOCKED → READY` | Resolution event / validated operator action |
 | `READY → ACTIVE` | Scheduler claim |
 | `ACTIVE → COMPLETED` | Dagster execution result + verification |
-| `ACTIVE → FAIL` | Dagster execution failure result |
-| `FAIL → READY/BLOCKED/RETIRED` | Ictus recovery decision applied by Tactus |
+| `ACTIVE → FAILED` | Dagster execution failure result |
+| `FAILED → READY/BLOCKED/RETIRED` | Ictus recovery decision applied by Tactus |
 | `ACTIVE → RETIRED` | explicit supersession/cancellation policy |
 
 ## Retry is not a lifecycle state
@@ -158,7 +158,7 @@ A retry is an **action** that creates another execution attempt.
 Conceptually:
 
 ```text
-FAIL
+FAILED
   ↓
 Ictus: RETRY / REQUEUE_READY
   ↓

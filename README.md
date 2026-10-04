@@ -64,7 +64,7 @@ functionality.
   [scheduling and backends](docs/architecture/SCHEDULING_AND_BACKENDS.md),
   [triage and recovery](docs/architecture/TRIAGE_AND_RECOVERY.md), and
   [human intervention](docs/architecture/HUMAN_INTERVENTION.md).
-- [Roadmap](docs/ROADMAP.md) — ordered implementation milestones.
-- [Issue plan](docs/ISSUE_PLAN.md) — staging plan for the GitHub backlog.
+- [Roadmap](docs/ROADMAP.md) — ordered implementation milestones and the
+  executable GitHub backlog.
 - [Dependencies](docs/DEPENDENCIES.md)
 - [Contributing](CONTRIBUTING.md)
