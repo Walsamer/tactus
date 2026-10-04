@@ -274,6 +274,20 @@ Pixi is intentionally not over-configured during the bootstrap stage.
 - No external system owns Tactus state; external results are bounded or
   advisory unless explicitly promoted.
 
+## Implementation language and portability
+
+The control plane is implemented in **Python 3.12+**, managed with `uv`.
+Python is the pragmatic default because the first-party decision plane (Ictus)
+and the execution plane (Dagster) are Python systems, so contracts and adapters
+sit naturally alongside them.
+
+The **domain core** (`src/tactus/domain/`) is deliberately dependency-free: pure
+value types, entities, guards and graph invariants with no I/O, framework or
+persistence coupling. That keeps the load-bearing invariants portable, so a
+specific reliability-critical component can later be implemented in Rust behind
+the same contract **when one concrete component genuinely justifies it** — not
+preemptively, and without rewriting the domain model around it.
+
 ## Dependency classification
 
 - **First-party (Tactus-owned):** Tactus itself.
