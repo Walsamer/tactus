@@ -36,6 +36,15 @@ Ictus
 - does NOT directly mutate WorkOrder state
 ```
 
+## Observation contract
+
+The versioned wire contract that carries execution facts between Ictus and
+Tactus is defined in
+[ICTUS_OBSERVATION_CONTRACT.md](ICTUS_OBSERVATION_CONTRACT.md). Ictus owns the
+Dagster adapter and the `ExecutionResult` → `ExecutionObservation`
+transformation; Tactus only validates and normalizes the wire contract at its
+edge.
+
 ## Recovery model
 
 ```mermaid

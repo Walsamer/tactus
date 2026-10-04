@@ -56,6 +56,9 @@ detail there, those documents win over this summary.
   distinction.
 - [Triage and recovery](architecture/TRIAGE_AND_RECOVERY.md) — diagnosis
   taxonomy, typed recovery actions, bounded retry, and split/replan.
+- [Tactus → Ictus observation contract](architecture/ICTUS_OBSERVATION_CONTRACT.md)
+  — versioned, fail-closed compatibility boundary for Ictus
+  `ExecutionObservation` v1.
 - [Human intervention](architecture/HUMAN_INTERVENTION.md) — typed intervention
   requests and policy-bound human resolutions.
 - [Roadmap](ROADMAP.md) — ordered implementation slices from the architecture

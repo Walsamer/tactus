@@ -66,6 +66,13 @@ Implemented so far (`src/tactus/domain/`):
   lifecycle state;
 - a first-class, acyclic Work Order dependency graph with atomic edge rewrites.
 
+Ictus compatibility boundary (`src/tactus/integrations/ictus/`):
+
+- a versioned, fail-closed compatibility boundary for Ictus
+  `ExecutionObservation` v1 (pinned to Ictus `833175d`), with a conservative
+  Tactus → Ictus category mapping and full evidence/provenance preservation.
+  See [the observation contract](docs/architecture/ICTUS_OBSERVATION_CONTRACT.md).
+
 ## Development
 
 Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
