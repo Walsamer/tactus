@@ -48,7 +48,6 @@ flowchart TD
     ACTION -->|RETRY| READY[OPEN + READY]
     ACTION -->|REQUEUE_READY| READY
     ACTION -->|REROUTE| READY
-    ACTION -->|REPAIR_AND_RETRY| READY
     ACTION -->|BLOCK| BLOCKED[OPEN + BLOCKED]
     ACTION -->|ESCALATE_HUMAN| BLOCKED
     ACTION -->|SPLIT_REPLAN| SPLIT[Create child Work Orders]
@@ -58,8 +57,12 @@ flowchart TD
 
 The Work Order remains `ACTIVE` while the `FailureObservation` is created and
 triaged. The decision does not invent new lifecycle states. It selects an action
-that leads to an existing lifecycle state (`OPEN`, `IMPLEMENTED`, or `RETIRED`),
-and within `OPEN` Tactus re-evaluates readiness (`READY`/`BLOCKED`).
+that leads to an existing lifecycle state (`OPEN` or `RETIRED`), and within
+`OPEN` Tactus re-evaluates readiness (`READY`/`BLOCKED`).
+
+A recovery `RecoveryDecision` never produces `IMPLEMENTED`. Successful
+completion is the independent direct path `ACTIVE → IMPLEMENTED` and does not
+pass through Ictus recovery.
 
 ## Initial diagnosis taxonomy
 
@@ -91,13 +94,16 @@ Do not encode backend/provider-specific product names in the core taxonomy.
 RETRY
 REQUEUE_READY
 REROUTE
-REPAIR_AND_RETRY
 BLOCK
 ESCALATE_HUMAN
 SPLIT_REPLAN
 RETIRE
 NO_ACTION
 ```
+
+This closed vocabulary is authoritative. A bounded in-scope repair step, if it is
+ever needed, is a future capability or structured parameter/work item — not a
+top-level recovery action — unless a later architecture decision introduces one.
 
 An action may carry structured parameters, for example:
 
@@ -133,7 +139,7 @@ This table captures the intent of the whiteboard without freezing implementation
 | worker/execution timeout | `REQUEUE_READY` within budget | `OPEN + READY` | consume retry budget; escalate when exhausted |
 | scope violation | normally `ESCALATE_HUMAN` or constrained replan | `OPEN + BLOCKED` / `OPEN + READY` | never silently widen scope |
 | request invalid/superseded | `RETIRE` | `RETIRED` | preserve reason/evidence |
-| integration failure | `REPAIR_AND_RETRY` if policy permits; otherwise `ESCALATE_HUMAN` | `OPEN + READY` / `OPEN + BLOCKED` | preserve verification evidence, never widen scope silently |
+| integration failure | `ESCALATE_HUMAN`; any bounded in-scope repair would be a future structured capability, not a top-level action | `OPEN + BLOCKED` | preserve verification evidence, never widen scope silently |
 | unknown | conservative `ESCALATE_HUMAN` | `OPEN + BLOCKED` | no speculative widening |
 
 ## Bounded retry policy

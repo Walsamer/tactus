@@ -214,34 +214,47 @@ Work Order. It is not an `ACTIVE` substate and not a Work Order lifecycle state.
 The observation vocabulary, diagnosis taxonomy, and recovery decisions live in
 [`TRIAGE_AND_RECOVERY.md`](TRIAGE_AND_RECOVERY.md).
 
-## Recovery outcome transitions
+## ACTIVE outcomes
 
-A recovery decision does not invent new lifecycle states. Applying a validated
-decision produces one of the existing lifecycle states:
+`ACTIVE` has two **independent** outcomes. Successful completion does not pass
+through Ictus recovery.
 
-```text
-ACTIVE
-  ↓ RETRY / REQUEUE / REROUTE / REPAIR_AND_RETRY
-OPEN + READY
-```
-
-```text
-ACTIVE
-  ↓ BLOCK / ESCALATE_HUMAN
-OPEN + BLOCKED
-```
-
-```text
-ACTIVE
-  ↓ RETIRE
-RETIRED
-```
+### Successful completion (no recovery)
 
 ```text
 ACTIVE
   ↓ successful implementation + verification
 IMPLEMENTED
 ```
+
+Successful completion is direct: `ACTIVE → IMPLEMENTED`. It does **not** go
+through Ictus and is not a `RecoveryDecision`. Ictus recovery exists only after
+a failure/observation that requires a decision.
+
+### Failure and recovery
+
+When an execution attempt fails, the Work Order stays `ACTIVE` and Tactus records
+a `FailureObservation`. Applying a validated recovery decision produces one of
+the existing non-success lifecycle states:
+
+```text
+ACTIVE
+  ↓ failure event
+FailureObservation
+  ↓
+Triage / Ictus RecoveryDecision
+  ↓
+Tactus applies decision
+  ├── RETRY / REQUEUE_READY / REROUTE   → OPEN + READY
+  ├── BLOCK / ESCALATE_HUMAN            → OPEN + BLOCKED
+  └── RETIRE                            → RETIRED
+```
+
+A recovery decision does not produce `IMPLEMENTED`. `IMPLEMENTED` is reached
+only by successful completion. If a later recovery strategy performs new
+execution and that execution succeeds, it does so through the normal
+`OPEN → ACTIVE → IMPLEMENTED` path, not as a direct
+`RecoveryDecision → IMPLEMENTED` transition.
 
 For split/replan, the parent is retired only after child creation succeeds
 durably (see [Parent/child semantics](#parentchild-semantics)).
@@ -263,6 +276,9 @@ durably (see [Parent/child semantics](#parentchild-semantics)).
 Rule: `OPEN → ACTIVE` is legal **only** when `OPEN + READY` is successfully
 claimed. `ACTIVE → OPEN` is legal **only** through an applied recovery decision;
 the resulting OPEN readiness is `READY` or `BLOCKED`.
+
+`IMPLEMENTED` and `RETIRED` are terminal: there is no `IMPLEMENTED → RETIRED`
+or `RETIRED → IMPLEMENTED` transition.
 
 ## Readiness changes (not lifecycle transitions)
 
@@ -318,32 +334,38 @@ The intended control flow is therefore:
 TACTUS
 WorkOrder = ACTIVE
       │
-      │ execution
-      ▼
-DAGSTER
-execution outcome / error
+      ├── successful execution + verification ──────────┐
+      │                                                  ▼
+      │                                            IMPLEMENTED
       │
-      ▼
-TACTUS ADAPTER
-normalize into FailureObservation
-      │
-      ▼
-TACTUS
-WorkOrder still ACTIVE
-      │
-      ▼
-ICTUS
-Diagnosis + RecoveryDecision
-      │
-      ▼
-TACTUS
-apply decision
-      │
-      ├── OPEN + READY
-      ├── OPEN + BLOCKED
-      ├── RETIRED
-      └── IMPLEMENTED only on successful completion path
+      └── failure event
+              │
+              ▼
+          FailureObservation
+              │
+              ▼
+          TACTUS ADAPTER
+          normalize observation
+              │
+              ▼
+          TACTUS
+          WorkOrder still ACTIVE
+              │
+              ▼
+          ICTUS
+          Diagnosis + RecoveryDecision
+              │
+              ▼
+          TACTUS
+          apply decision
+              │
+              ├── OPEN + READY
+              ├── OPEN + BLOCKED
+              └── RETIRED
 ```
+
+Successful completion (`ACTIVE → IMPLEMENTED`) is independent of the
+failure/recovery path and never passes through Ictus.
 
 ## Retry is not a lifecycle state
 
