@@ -8,7 +8,7 @@ bounded, and aligned with the ownership boundaries described in
 ## Collaboration flow
 
 ```text
-Architecture/docs → GitHub Issue → branch → PR → review → main
+Architecture → GitHub Issue → human branch OR Fleet WorkOrder + branch → PR → review → main
 ```
 
 - `main` should remain working. Do not push architecture or implementation
@@ -20,7 +20,7 @@ Architecture/docs → GitHub Issue → branch → PR → review → main
 - Keep the existing plane model intact:
 
   ```text
-  Tactus → Ictus → Dagster + Metaxy → Runtime/Sandbox → Capabilities
+  Tactus → Ictus → Dagster → runtime adapter → bounded capability
   ```
 
 - Respect ownership boundaries. Do not import logic from another plane:
@@ -33,3 +33,6 @@ Architecture/docs → GitHub Issue → branch → PR → review → main
 The executable backlog lives in GitHub Issues. [docs/ROADMAP.md](docs/ROADMAP.md)
 describes the milestones and links the current issue set; the architecture docs
 describe the design, and the issues describe bounded work.
+
+Use the [shared issue template](.github/ISSUE_TEMPLATE/implementation.md).
+Fleet intake requires `fleet:ready` and the [source revision gates](docs/architecture/MIGRATION_FROM_FLEET.md).

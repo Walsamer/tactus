@@ -1,90 +1,51 @@
 # Tactus
 
-Tactus is the control plane and master integration repository for an autonomous
-software-engineering and agentic execution system. It composes specialized,
-independently maintained systems behind explicit contracts rather than
-reimplementing their functionality.
+Tactus is the WorkOrder control plane and composition repository for a local-first
+system with Ictus decisions and Dagster durable execution.
 
-## Master repository does not mean monorepo
+## Architecture Baseline v1
 
-Tactus is the *master* repository because it owns composition, configuration,
-contracts, adapters, and the migration path — not because it contains the source
-code of every system in the stack.
+**Tactus governs work. Ictus decides. Dagster executes durably. Agents perform the task.**
 
-Cloning Tactus should eventually provide the authoritative entry point for
-constructing, configuring, testing, and operating the complete Tactus stack.
-External and independently useful systems remain separate repositories/packages
-and are integrated through explicit interfaces.
+- Tactus owns WorkOrder state, readiness, dependencies, claims, approvals records,
+  admission, correlation and application of validated decisions/results.
+- Ictus owns policy, capability validation, backend/model routing, approval
+  requirements and semantic recovery. Its generic core remains independent.
+- Dagster owns runs/steps, execution queues/concurrency, retries and workers.
+- Runtime adapters supervise processes; Stax manages authorized workspace and
+  change/PR publication. Metaxy is optional artifact/data lineage.
 
-## Current architecture
+Start with the [canonical architecture](docs/architecture/SYSTEM_ARCHITECTURE.md),
+[reconciliation](docs/architecture/BASELINE_V1_RECONCILIATION.md) and
+[GitHub roadmap](docs/ROADMAP.md).
+
+## Implementation status
+
+Main contains a pure five-state WorkOrder domain model and dependency graph,
+in-memory execution admission/correlation, backend descriptors/health/quota facts,
+and inbound observation/outbound StateSnapshot adapters. Durable domain storage,
+complete initial decision context, trusted validated-decision application and
+the persistent end-to-end execution path remain implementation work.
+
+Decision application code exists on a Fleet integration ref and requires review
+and completion before merge. The first vertical slice uses a deterministic local
+subprocess. Real agents and Stax follow in M3; directory placeholders do not
+establish that those integrations are installed.
+
+## Collaboration
 
 ```text
-CONTROL PLANE
-Tactus
-   ↓
-DECISION PLANE
-Ictus
-   ↓
-EXECUTION / PROVENANCE PLANE
-Dagster + Metaxy
-   ↓
-RUNTIME / SANDBOX PLANE
-SandboxRuntime       AgentRuntime
-OpenShell / ...      Pi / SoL-Pi / ...
-   ↓
-CAPABILITIES
-Git + Stax
-shell
-tests
-build
-deploy
-etc.
+Architecture → GitHub Issue → human branch OR Fleet WorkOrder + branch
+             → PR → review → main
 ```
 
-Pixi sits around the complete stack as the reproducible environment/bootstrap
-layer.
-
-These are architectural responsibility boundaries, not repository nesting.
-Tactus remains the master/system repository even though the implementation of
-Ictus, Dagster, Metaxy, OpenShell, SoL-Pi, Stax, and others lives elsewhere.
-
-## Current status
-
-Tactus is currently in the **architecture/bootstrap stage**. This repository
-documents the intended system composition and boundaries and now contains the
-first domain core: the Work Order lifecycle model and its dependency graph. It
-does **not** yet implement scheduling, triage/recovery policy, adapters, or any
-orchestration functionality.
-
-Implemented so far (`src/tactus/domain/`):
-
-- the five-state Work Order lifecycle (`DRAFT | OPEN | ACTIVE | IMPLEMENTED |
-  RETIRED`) with transition guards and transition provenance;
-- orthogonal `OPEN` readiness (`UNKNOWN | READY | BLOCKED`), which is not a
-  lifecycle transition;
-- `FailureObservation` attached to an `ACTIVE` Work Order without changing its
-  lifecycle state;
-- a first-class, acyclic Work Order dependency graph with atomic edge rewrites.
+Issues are shared intent. Fleet WorkOrders derive from a checked Issue revision.
+Only explicit `fleet:ready` issues may be ingested after intake gates are upgraded;
+see [migration/intake](docs/architecture/MIGRATION_FROM_FLEET.md).
 
 ## Development
 
-Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
+Python 3.12+ and uv. `uv run pytest` runs the existing suite;
+`scripts/verify-goal.sh` is the repository gate.
 
-```bash
-uv run pytest            # run the domain test suite
-scripts/verify-goal.sh   # repository verifier gate
-```
-
-## Documentation
-
-- [Architecture](docs/ARCHITECTURE.md) — high-level plane model and ownership
-  boundaries.
-- [Detailed control-plane architecture](docs/architecture/WHITEBOARD_OVERVIEW.md)
-  — [Work Order lifecycle](docs/architecture/WORK_ORDER_LIFECYCLE.md),
-  [scheduling and backends](docs/architecture/SCHEDULING_AND_BACKENDS.md),
-  [triage and recovery](docs/architecture/TRIAGE_AND_RECOVERY.md), and
-  [human intervention](docs/architecture/HUMAN_INTERVENTION.md).
-- [Roadmap](docs/ROADMAP.md) — ordered implementation milestones and the
-  executable GitHub backlog.
-- [Dependencies](docs/DEPENDENCIES.md)
-- [Contributing](CONTRIBUTING.md)
+See [Contributing](CONTRIBUTING.md) and [Dependencies](docs/DEPENDENCIES.md).

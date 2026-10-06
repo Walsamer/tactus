@@ -1,3 +1,8 @@
+> **Implemented v1 adapter reference, not the complete target contract.**
+> [Baseline v1 contracts](CROSS_SYSTEM_CONTRACTS.md) govern new work;
+> [reconciliation](BASELINE_V1_RECONCILIATION.md) records profile, initial-context
+> and validation gaps. The pinned schemas here describe inspected main.
+
 # Tactus → Ictus `StateSnapshot` v1 Context Adapter
 
 ## Purpose
