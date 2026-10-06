@@ -1,8 +1,8 @@
 # Architecture Baseline v1
 
 Normative design, 2026-10-06. This baseline records the operator's specified
-responsibility split. The architecture PRs review its repository adoption;
-they do not assert that the target system is already implemented.
+responsibility split. The operator merged Tactus PR #19 and Ictus PR #1 on 2026-10-06.
+Adoption does not assert that the target system is already implemented.
 
 ## Authority and navigation
 
