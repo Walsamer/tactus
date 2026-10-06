@@ -36,8 +36,8 @@ handwritten timings are not adopted as requirements.
 | `ExecutionAdmission` uses dictionaries and requires run ID at accept | KEEP + MODIFY; not restart-safe, cannot safely bridge lost acknowledgement | Tactus | #4 durable claim/fencing, attempts and outbox/inbox; accept stable intent before attaching receipt. | High; duplicate live execution. |
 | `ExecutionRequest` construction is documented as proof of authorization | SUPERSEDE trust assumption | Ictus validation / Tactus applicability | #6 require trusted validated envelope and subject/source binding; remove misleading docstring in that implementation PR. | High; forged/stale authorization. |
 | Backend registry/health and provider quota facts exist | KEEP + MODIFY; facts are correct, initial descriptor contract incomplete for Ictus | Tactus facts | #5 retained/re-scoped to versioned observed facts, expiry and full descriptors; #6 consumes only selected route. | Medium; unknown health mistaken for usable. |
-| `BackendRegistry.compatible()` performs mechanical constraint filtering | MOVE RESPONSIBILITY for authoritative compatibility | Ictus | Routing issue owns decision; retain helper temporarily as nonauthoritative compatibility utility, no preferred ordering; retire callers incrementally. | Medium; rejecting candidates before policy sees facts. |
-| Snapshot requires previous observation and emits different fact keys than Ictus reads | KEEP + MODIFY | Tactus adapter / Ictus profile | #7 plus Ictus context contract: initial phase, explicit semantic budget/count; no fabricated observation. | High; exhausted 0/0 defaults, no initial execution. |
+| `BackendRegistry.compatible()` performs mechanical constraint filtering | MOVE RESPONSIBILITY for authoritative compatibility | Ictus | [Ictus #4](https://github.com/Walsamer/ictus/issues/4) owns decision; retain helper temporarily as nonauthoritative compatibility utility, no preferred ordering; retire callers incrementally. | Medium; rejecting candidates before policy sees facts. |
+| Snapshot requires previous observation and emits different fact keys than Ictus reads | KEEP + MODIFY | Tactus adapter / Ictus profile | #7 plus [Ictus #2](https://github.com/Walsamer/ictus/issues/2): initial phase, explicit semantic budget/count; no fabricated observation. | High; exhausted 0/0 defaults, no initial execution. |
 | Inbound observation parser is strict and execution-only | KEEP | Tactus adapter / Ictus result contract | Retain FIX-004 in #7/#12 fixtures; add correlation/freshness at composition layer. | Low; avoid broad domain-to-UNKNOWN mapping. |
 | Integration FIX-007 parses raw proposal, drops subject/provider/evidence, applies mutable in-memory effects | KEEP + MODIFY; not proof of policy validation or durable idempotency | Ictus produces / Tactus applies | #8 reuse candidate only after bound envelope and transactional application; do not auto-merge integration. | High; wrong-target/replayed effects. |
 | Attempt closure and recovery reopening are separate operations | KEEP + MODIFY | Tactus | #4/#8 coordinate closure and effect in one transaction. | High; reopened work still has active attempt. |
@@ -45,14 +45,14 @@ handwritten timings are not adopted as requirements.
 | Typed general BlockReason absent despite FIX-007 prerequisite | NEW GAP | Tactus | #3 implement typed blockers; completed worker status does not waive missing acceptance. | Medium; unblocking unrelated conditions. |
 | Ictus generic contracts/core/ports and three domains | KEEP | Ictus | Preserve generic design; integrate through profile, not WorkOrder classes in core. | Low if fixtures retain other domains. |
 | FIX-006 adds generic kinds and Proposal v2, route fields but no full selector | KEEP + MODIFY | Ictus | Review/promote vocabulary within context/decision contract issue; implement compatibility/routing separately. | Medium; supported enum mistaken for behavior. |
-| Ictus rules/evaluator read retry.attempt/budget, default missing to 0; SUCCESS produces ABORT | KEEP + MODIFY | Ictus semantic policy; Tactus success application | Semantic recovery issue aligns profile; #8/#12 complete success directly. | High; incorrect escalation/retirement. |
+| Ictus rules/evaluator read retry.attempt/budget, default missing to 0; SUCCESS produces ABORT | KEEP + MODIFY | Ictus semantic policy; Tactus success application | [Ictus #5](https://github.com/Walsamer/ictus/issues/5) aligns profile; #8/#12 complete success directly. | High; incorrect escalation/retirement. |
 | Python hand validators cover only part of wire semantics | KEEP + MODIFY | Ictus contracts/bridge | Shared conformance fixtures include bool-as-integer rejection, schema versions, authorization absence and unknown kinds. | Medium; cross-language disagreement. |
-| Bridge uses persistent DAGSTER_HOME when set but execute_in_process | KEEP + MODIFY; history exists, independent queued launch not proved | Dagster integration in Ictus | Durable submission issue adds receipt/query/deduplication; keep demos. | High; duplicate dispatch on restart. |
+| Bridge uses persistent DAGSTER_HOME when set but execute_in_process | KEEP + MODIFY; history exists, independent queued launch not proved | Dagster integration in Ictus | [Ictus #6](https://github.com/Walsamer/ictus/issues/6) adds receipt/query/deduplication; keep demos. | High; duplicate dispatch on restart. |
 | Result mapping uses coarse process-crash classification | KEEP + MODIFY | Ictus execution bridge / runtime adapter | Preserve raw evidence, map known timeout/cancel/failure facts accurately without semantic recovery decisions. | Medium; policy fed misleading facts. |
 | Older docs repeat ownership and session plans; README omits merged adapters | SUPERSEDE | Canonical architecture + GitHub Issues | Replaced with seven canonical specs, reconciliations and compatibility links; historic versions remain in Git history. | Low; update entry links. |
 | Whiteboard READY/BLOCKED/FAIL states and Tactus capacity scheduler | SUPERSEDE | Tactus orthogonal readiness / Dagster queue | Keep source image as history. No failed lifecycle state or Tactus slot scheduler. | Medium if old issues remain active. |
 | Runtime placeholders select OpenShell/Pi by default; Stax required before first probe | SUPERSEDE as M2 prerequisites | Runtime/Stax later | Simple local process M2; explicit agent/Stax selection M3. Metaxy remains optional lineage. | Low; no implementation removed. |
-| GitHub→Fleet adapter exists with automation:ready, no source digest/freshness | KEEP + MODIFY | Current Fleet work-source boundary | High-priority intake issue; use fleet:ready exclusively, revision checks, correct Ictus project mapping. | High; stale or unintended execution. |
+| GitHub→Fleet adapter exists with automation:ready, no source digest/freshness | KEEP + MODIFY | Current Fleet work-source boundary | [Tactus #20](https://github.com/Walsamer/tactus/issues/20); use fleet:ready exclusively, revision checks, correct Ictus project mapping. | High; stale or unintended execution. |
 | Fleet FIX-008 blocked; FIX-009 waiting on dependency | KEEP evidence; not architectural impossibility | Current Fleet operator | Runtime stall was recorded for FIX-008; new Dagster/slice Issues own intent. Explicit reconciliation before any retry/resume. | High if duplicate work is launched. |
 
 No functioning source is deleted in this PR. REMOVE is reserved for obsolete
@@ -68,10 +68,10 @@ instructions; code removal needs its own reviewed migration acceptance evidence.
 | #3 typed BlockReason | KEEP + MODIFY | Tactus | Keep number; add independent blocker resolution and freshness semantics. |
 | #4 SchedulerPort/claim | KEEP + MODIFY | Tactus | Replace capacity scheduler objective with durable domain claim/admission/correlation. |
 | #5 backend registry/health | KEEP + MODIFY | Tactus | Acknowledge merged facts; remaining scope is versioned descriptors/freshness, not rebuilding registry. |
-| #6 scheduler backend selection | MOVE RESPONSIBILITY | Ictus selection; Tactus revalidation | Retain #6 for consuming/revalidating selected intents; Ictus routing issue owns actual selection. |
+| #6 scheduler backend selection | MOVE RESPONSIBILITY | Ictus selection; Tactus revalidation | Retain #6 for consuming/revalidating selected intents; [Ictus #4](https://github.com/Walsamer/ictus/issues/4) owns actual selection. |
 | #7 recovery observation | KEEP + MODIFY | Tactus adapter | Retain inbound parser; extend initial/recovery context and align semantic facts. |
 | #8 RecoveryDecision | KEEP + MODIFY | Ictus produces; Tactus applies | Reuse integration-only applier after trusted envelope, correlation and transactions. |
-| #9 bounded retry/reroute | SUPERSEDE / MOVE RESPONSIBILITY | Ictus | Close as not planned in Tactus; replacement is Ictus semantic recovery plus #8 domain application. |
+| #9 bounded retry/reroute | SUPERSEDE / MOVE RESPONSIBILITY | Ictus | Close as not planned in Tactus; replacement is [Ictus #5](https://github.com/Walsamer/ictus/issues/5) plus #8 domain application. |
 | #10 split/replan | KEEP + MODIFY | Tactus | Validated plan only; atomic children/graph/parent, deferred to M3. |
 | #11 human intervention | KEEP + MODIFY | Tactus records, Ictus requirements | Typed grants/resolutions, revocation and revalidation. |
 | #12 vertical slice | KEEP + MODIFY | Cross-system | Five mandatory scenarios, simplest runtime, no Stax/agent prerequisite. |
@@ -90,3 +90,16 @@ capability details. M5 defines run-family re-execution, server storage/transport
 and operational SLOs. M2 defaults are explicit: local SQLite domain storage,
 persistent Dagster, one run/semantic attempt and deterministic local process.
 These choices do not block baseline agreement or justify another scheduler.
+
+## Adoption and backlog publication
+
+The operator merged baseline PRs Tactus #19 and Ictus #1 on 2026-10-06. Their main
+commits are `7c8c97d70e35e58d1ca55dc66a433d91f8313751` and
+`b55a0adeda2b9c7df58045908367964d213c9838`. A subsequent documentation-only branch
+links the now-created backlog. Twenty active objectives have milestone/priority/
+Fleet-status labels and 36 native dependency edges. Tactus #9 is closed as
+not-planned with its Ictus replacement; the original body remains visible.
+
+All nine revised Tactus issues preserve their previous title/body in explicit
+reconciliation comments. Current Fleet intake/configuration remains unchanged;
+zero issues have fleet:ready. See the roadmap for the exact conditional first batch.

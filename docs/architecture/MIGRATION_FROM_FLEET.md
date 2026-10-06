@@ -70,12 +70,11 @@ is enabled under the old label; Ictus intake is disabled. Local project identity
 for Ictus is still `agentic-control`, so config `ictus` must be reconciled before
 enablement. These are inspected deployment facts, not recommended settings.
 
-Change this adapter through a separately reviewed, high-priority Issue targeting
-the current Fleet repository. Establish strict `fleet:ready`, immutable provenance,
+Change this adapter through [Issue #20](https://github.com/Walsamer/tactus/issues/20),
+a separately reviewed, high-priority objective targeting the current Fleet repository. Establish strict `fleet:ready`, immutable provenance,
 claim/dispatch freshness checks and project mapping before automated intake.
 Do not enable both legacy and new readiness labels as interchangeable permissions.
-The initial baseline release has no fleet:ready issues until these gates and
-the baseline PR reviews are complete. Humans may take explicitly assigned
+The initial baseline release has no fleet:ready issues until these intake gates are complete. The paired baseline PRs have been merged. Humans may take explicitly assigned
 `fleet:human` work in parallel. Readiness labels are changed deliberately after
 dependency completion; milestone membership does not grant readiness.
 
@@ -86,7 +85,8 @@ as component labels; add `area:stax` and `area:cross-system`. Add only necessary
 types (`architecture`, `contract`, `implementation`, `integration`, `test`,
 `migration`), priorities p0/p1/p2 and fleet:ready/blocked/human. Existing historical
 status labels are not authorization. Active issues use exactly one Fleet status.
-Dependencies are explicit full GitHub Issue URLs in the template; keep a DAG.
+Dependencies are explicit full GitHub Issue URLs in the template and native
+GitHub blocked-by edges; keep both consistent and acyclic.
 
 M0 Architecture Convergence; M1 Control / Decision Boundary; M2 Minimal Vertical
 Slice; M3 Runtime + Development Workflow; M4 Fleet Migration; M5 Production
