@@ -1,16 +1,5 @@
-# SandboxRuntime
+# sandbox
 
-`SandboxRuntime` is an abstraction, not a specific sandbox.
+Runtime adapters enforce the authorized environment and supervise execution. OpenShell, containers and remote targets are candidates, not selected M2 prerequisites. This does not adopt an integration into current Fleet.
 
-```text
-SandboxRuntime
-├── OpenShellBackend
-└── OtherSandboxBackend
-```
-
-OpenShell is the initial/default candidate backend. Other implementations may
-be added later. Tactus is not tightly coupled to OpenShell; the sandbox
-implementation must remain replaceable without changing Tactus, Ictus, or
-Dagster.
-
-Sandbox choice is orthogonal to agent choice (see `../agents/`).
+See [Architecture Baseline v1](../../docs/architecture/SYSTEM_ARCHITECTURE.md).

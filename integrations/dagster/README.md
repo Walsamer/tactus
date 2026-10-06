@@ -1,17 +1,5 @@
-# Dagster
+# dagster
 
-Third-party execution substrate.
+Dagster owns durable run/step execution, queueing, concurrency and execution-level retry. Ictus owns semantic recovery. Dagster launches its workers; a runtime adapter inside a capability supervises the agent.
 
-- Durable execution, run/step persistence, retries, re-execution.
-- Execution dependencies, history, and observability.
-
-Tactus/Ictus decide what should happen; Dagster owns **durably executing it**.
-Tactus must not build another workflow/retry engine.
-
-```text
-Tactus
-   ↓
-Ictus
-   ↓
-Dagster
-```
+See [Architecture Baseline v1](../../docs/architecture/SYSTEM_ARCHITECTURE.md).

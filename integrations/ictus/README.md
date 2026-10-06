@@ -1,18 +1,5 @@
-# Ictus
+# ictus
 
-First-party external decision/policy layer. Independently versioned and
-publishable.
+Ictus owns typed decisions, policy, capability validation, routing and approval requirements. Tactus persists human grants/interventions and applies validated effects. Ictus remains an independent repository.
 
-- Typed decisions, policy, capability validation, approvals.
-- Produces validated `ExecutionIntent`s consumed by the execution plane.
-- Source lives in `Walsamer/ictus`; it is **not** copied into Tactus.
-
-Tactus integrates with Ictus through an explicit contract:
-
-```text
-Tactus
-   ↓
-Ictus
-   ↓
-Dagster
-```
+See [Architecture Baseline v1](../../docs/architecture/SYSTEM_ARCHITECTURE.md).
