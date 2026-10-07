@@ -7,12 +7,13 @@ no scheduler, dependency-graph, recovery-policy, Ictus, Dagster or agent logic.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
 from ._clock import utcnow
+from .blockers import BlockReason, Blocker, BlockerId, BlockerSet
 from .observation import FailureObservation
 from .records import TransitionAuthority, TransitionRecord
 
@@ -109,6 +110,7 @@ class WorkOrder:
         self._readiness: OpenStatus | None = None
         self._transitions: list[TransitionRecord] = []
         self._failures: list[FailureObservation] = []
+        self._blockers: BlockerSet = BlockerSet()
 
     @classmethod
     def create(cls, work_order_id: WorkOrderId | str, title: str | None = None) -> WorkOrder:
@@ -143,6 +145,18 @@ class WorkOrder:
     @property
     def failure_observations(self) -> tuple[FailureObservation, ...]:
         return tuple(self._failures)
+
+    @property
+    def blockers(self) -> tuple[Blocker, ...]:
+        """All typed blockers (resolved and unresolved), in insertion order."""
+
+        return self._blockers.all
+
+    @property
+    def active_blockers(self) -> tuple[Blocker, ...]:
+        """The unresolved blockers currently holding readiness at ``BLOCKED``."""
+
+        return self._blockers.active
 
     @property
     def is_terminal(self) -> bool:
@@ -269,18 +283,107 @@ class WorkOrder:
     # -- readiness (not lifecycle transitions) ----------------------------
 
     def set_readiness(self, status: OpenStatus) -> None:
-        """Set ``OPEN`` readiness.
+        """Set ``OPEN`` readiness directly (raw/legacy seam).
 
         This is intentionally *not* a lifecycle transition and appends no
-        ``TransitionRecord``. Typed block reasons and unblock/re-evaluation
-        semantics are owned by #3.
+        ``TransitionRecord``. Prefer :meth:`recompute_readiness` and the typed
+        blocker API: readiness may not become ``READY`` while a typed blocker is
+        still active.
         """
 
+        self._require_open_for_readiness()
+        if status is OpenStatus.READY and self._blockers.has_active:
+            raise InvalidReadinessError(
+                "readiness cannot be READY while typed blockers are active"
+            )
+        self._readiness = status
+
+    # -- typed blockers and independent unblocking ------------------------
+
+    def add_blocker(self, blocker: Blocker) -> Blocker:
+        """Attach a typed blocker; readiness becomes ``BLOCKED``.
+
+        Blockers are meaningful only while ``OPEN``. Adding a blocker is
+        additive and never clears an existing blocker.
+        """
+
+        self._require_open_for_readiness()
+        added = self._blockers.add(blocker)
+        self._readiness = OpenStatus.BLOCKED
+        return added
+
+    def block(
+        self,
+        reason: BlockReason,
+        *,
+        detail: str = "",
+        subreason: str | None = None,
+        evidence: Mapping[str, str] | None = None,
+        at: datetime | None = None,
+    ) -> Blocker:
+        """Attach a typed blocker built from ``reason`` (convenience)."""
+
+        return self.add_blocker(
+            Blocker(
+                reason=reason,
+                detail=detail,
+                subreason=subreason,
+                evidence=evidence or {},
+                blocked_at=at if at is not None else utcnow(),
+            )
+        )
+
+    def resolve_blocker(
+        self,
+        blocker_id: BlockerId | str,
+        *,
+        at: datetime | None = None,
+        authority: TransitionAuthority = TransitionAuthority.OPERATOR,
+        note: str = "",
+    ) -> Blocker:
+        """Resolve exactly one blocker and recompute readiness.
+
+        Other blockers are left untouched. Readiness only becomes ``READY`` when
+        the whole set has no active blocker left.
+        """
+
+        self._require_open_for_readiness()
+        resolved = self._blockers.resolve(
+            blocker_id, at=at, authority=authority, note=note
+        )
+        self.recompute_readiness()
+        return resolved
+
+    def replace_blockers(self, blockers: Iterable[Blocker]) -> OpenStatus:
+        """Atomically replace the blocker set and recompute readiness.
+
+        Used by readiness re-evaluation so readiness reflects the latest
+        validated facts instead of accumulating stale blockers.
+        """
+
+        self._require_open_for_readiness()
+        self._blockers.replace(blockers)
+        return self.recompute_readiness()
+
+    def recompute_readiness(self) -> OpenStatus:
+        """Recompute ``OPEN`` readiness from the whole blocker set.
+
+        ``BLOCKED`` while any blocker is active, ``READY`` only once none
+        remain. This never yields ``UNKNOWN`` (that means "not evaluated yet")
+        and never clears a blocker on its own.
+        """
+
+        self._require_open_for_readiness()
+        self._readiness = (
+            OpenStatus.BLOCKED if self._blockers.has_active else OpenStatus.READY
+        )
+        return self._readiness
+
+    def _require_open_for_readiness(self) -> None:
         if self._state is not WorkOrderState.OPEN:
             raise InvalidReadinessError(
                 f"readiness is only defined while OPEN (state={self._state.value})"
             )
-        self._readiness = status
 
     # -- observations (do not change lifecycle state) ---------------------
 
