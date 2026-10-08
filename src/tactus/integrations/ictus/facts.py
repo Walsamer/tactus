@@ -45,6 +45,7 @@ from enum import Enum
 from typing import Any
 
 from tactus.backends.capacity import ProviderCapacityObservation
+from tactus.backends.facts import BackendAdministrativeEnablementFact
 from tactus.backends.health import BackendStatusObservation
 from tactus.backends.registry import BackendDescriptor
 
@@ -199,16 +200,18 @@ class AuthorizationGrant:
 
 @dataclass(frozen=True, slots=True)
 class BackendFacts:
-    """Raw backend facts: descriptors plus status and quota observations.
+    """Raw backend facts: descriptors plus health, enablement and quota facts.
 
     This is deliberately not a filtered or ranked candidate list. It exposes
     stable backend identities, static descriptors (capability/provider/runtime/
-    model/effort) and timestamped, expiring health and provider-quota facts so
-    the decision plane can evaluate compatibility, freshness and route.
+    model/effort), timestamped expiring health observations, operator-controlled
+    administrative enablement, and provider-quota observations so the decision
+    plane can evaluate compatibility, freshness and route.
     """
 
     descriptors: tuple[BackendDescriptor, ...] = ()
     statuses: tuple[BackendStatusObservation, ...] = ()
+    administrative_enablement: tuple[BackendAdministrativeEnablementFact, ...] = ()
     quotas: tuple[ProviderCapacityObservation, ...] = ()
     previous_backend: str | None = None
 
@@ -228,6 +231,15 @@ class BackendFacts:
                     "backend statuses must be BackendStatusObservation values"
                 )
         object.__setattr__(self, "statuses", statuses)
+
+        enablement = tuple(self.administrative_enablement)
+        for entry in enablement:
+            if not isinstance(entry, BackendAdministrativeEnablementFact):
+                raise StateSnapshotContractError(
+                    "backend administrative enablement entries must be "
+                    "BackendAdministrativeEnablementFact values"
+                )
+        object.__setattr__(self, "administrative_enablement", enablement)
 
         quotas = tuple(self.quotas)
         for quota in quotas:

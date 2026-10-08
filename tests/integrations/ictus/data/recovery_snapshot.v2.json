@@ -1,11 +1,12 @@
 {
-  "capabilities": [
-    "demo.verify"
-  ],
-  "constraints": [
-    "approval_required"
-  ],
+  "schema_version": 1,
+  "snapshot_id": "snap-recovery-0001",
+  "timestamp": "2026-10-01T00:00:00Z",
   "domain": "software",
+  "subject": {
+    "type": "work_order",
+    "id": "WO-1"
+  },
   "facts": [
     {
       "key": "snapshot.profile_version",
@@ -48,9 +49,9 @@
       "value": [
         {
           "kind": "test_report",
-          "note": "verifier output",
+          "uri": "file:///artifacts/report.xml",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "uri": "file:///artifacts/report.xml"
+          "note": "verifier output"
         }
       ]
     },
@@ -98,11 +99,11 @@
       "key": "backend.descriptors",
       "value": [
         {
-          "agent_runtime": "local-subprocess",
           "backend_id": "backend-a",
           "capabilities": [
             "demo.verify"
           ],
+          "agent_runtime": "local-subprocess",
           "model": "model-x",
           "provider": "provider-x"
         },
@@ -119,15 +120,28 @@
       "value": [
         {
           "backend_id": "backend-a",
-          "expires_at": "2026-10-02T00:00:00Z",
+          "status": "AVAILABLE",
           "observed_at": "2026-10-01T00:00:00Z",
-          "status": "AVAILABLE"
+          "expires_at": "2026-10-02T00:00:00Z"
         },
         {
           "backend_id": "backend-b",
+          "status": "UNAVAILABLE",
+          "observed_at": "2026-10-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "key": "backend.administrative_enablement",
+      "value": [
+        {
+          "schema_version": 1,
+          "backend_id": "backend-b",
+          "enabled": false,
+          "provenance": "operator",
           "observed_at": "2026-10-01T00:00:00Z",
-          "reason": "administratively excluded",
-          "status": "DISABLED"
+          "expires_at": null,
+          "reason": "administratively excluded"
         }
       ]
     },
@@ -136,11 +150,11 @@
       "value": [
         {
           "backend_id": "backend-a",
-          "expires_at": "2026-10-02T00:00:00Z",
-          "limit": 10,
           "observed_at": "2026-10-01T00:00:00Z",
+          "limit": 10,
+          "unit": "runs",
           "source": "provider-api",
-          "unit": "runs"
+          "expires_at": "2026-10-02T00:00:00Z"
         }
       ]
     },
@@ -152,15 +166,15 @@
       "key": "authorization.grants",
       "value": [
         {
+          "grant_id": "grant-0001",
+          "scope": "WO-1",
           "actor": "operator-1",
+          "issued_at": "2026-10-01T00:00:00Z",
+          "expires_at": "2026-10-02T00:00:00Z",
+          "source_revision": "src-rev-1",
           "evidence": [
             "sig:abc123"
-          ],
-          "expires_at": "2026-10-02T00:00:00Z",
-          "grant_id": "grant-0001",
-          "issued_at": "2026-10-01T00:00:00Z",
-          "scope": "WO-1",
-          "source_revision": "src-rev-1"
+          ]
         }
       ]
     },
@@ -177,14 +191,13 @@
     },
     {
       "key": "snapshot.digest",
-      "value": "ecf6c1146ab7a830d276e23040425e407b959028b6e54d78f1537cd928f498b8"
+      "value": "a76072d3a6e2d1ca85224a5cd737a6c812b908b40fa098384b688ae667be1784"
     }
   ],
-  "schema_version": 1,
-  "snapshot_id": "snap-recovery-0001",
-  "subject": {
-    "id": "WO-1",
-    "type": "work_order"
-  },
-  "timestamp": "2026-10-01T00:00:00Z"
+  "capabilities": [
+    "demo.verify"
+  ],
+  "constraints": [
+    "approval_required"
+  ]
 }

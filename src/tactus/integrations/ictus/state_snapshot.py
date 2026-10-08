@@ -135,6 +135,7 @@ FACT_RECOVERY_INTENT_ID = "recovery.intent_id"
 FACT_CAPABILITY_ID = "capability.id"
 FACT_BACKEND_DESCRIPTORS = "backend.descriptors"
 FACT_BACKEND_STATUS = "backend.status"
+FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT = "backend.administrative_enablement"
 FACT_BACKEND_QUOTA = "backend.quota"
 FACT_BACKEND_PREVIOUS_BACKEND = "backend.previous_backend"
 FACT_AUTHORIZATION_GRANTS = "authorization.grants"
@@ -500,6 +501,7 @@ def _append_backend_facts(
     if backend_facts is None:
         descriptors: tuple[Any, ...] = ()
         statuses: tuple[Any, ...] = ()
+        administrative_enablement: tuple[Any, ...] = ()
         quotas: tuple[Any, ...] = ()
         previous_backend: str | None = None
     else:
@@ -507,6 +509,7 @@ def _append_backend_facts(
             raise StateSnapshotContractError("backend_facts must be a BackendFacts")
         descriptors = backend_facts.descriptors
         statuses = backend_facts.statuses
+        administrative_enablement = backend_facts.administrative_enablement
         quotas = backend_facts.quotas
         previous_backend = backend_facts.previous_backend
 
@@ -522,6 +525,13 @@ def _append_backend_facts(
             "value": [backend_status_fact(status) for status in statuses],
         }
     )
+    if administrative_enablement:
+        fact_entries.append(
+            {
+                "key": FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT,
+                "value": [entry.to_fact() for entry in administrative_enablement],
+            }
+        )
     fact_entries.append(
         {"key": FACT_BACKEND_QUOTA, "value": [backend_quota_fact(quota) for quota in quotas]}
     )
@@ -642,6 +652,7 @@ __all__ = [
     "FACT_ATTEMPT_NUMBER",
     "FACT_AUTHORIZATION_GRANTS",
     "FACT_BACKEND_DESCRIPTORS",
+    "FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT",
     "FACT_BACKEND_PREVIOUS_BACKEND",
     "FACT_BACKEND_QUOTA",
     "FACT_BACKEND_STATUS",

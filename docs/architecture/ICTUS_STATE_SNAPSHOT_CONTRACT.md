@@ -29,7 +29,7 @@ ExecutionObservation v1             (inbound: Ictus -> Tactus, validated)
         + WorkOrder / source / revision facts
         + fenced execution-attempt correlation
         + canonical semantic count/limit + diagnostic step retry
-        + raw backend descriptors / health / quota facts
+        + raw backend descriptors / health / administrative enablement / quota facts
         + raw approval grants/evidence + constraints
         ↓
 Tactus StateSnapshot adapter        (this edge: assemble facts, decide nothing)
@@ -168,7 +168,8 @@ refill the semantic allowance by substitution.
 | Key | Value |
 |---|---|
 | `backend.descriptors` | Raw descriptors: stable `backend_id`, `capabilities`, optional `provider`/`model`/`agent_runtime`/`effort`. |
-| `backend.status` | Timestamped health/administrative observations: `status`, `observed_at`, optional `expires_at`/`reason`. |
+| `backend.status` | Timestamped observed-health facts: `status` (`AVAILABLE`/`UNAVAILABLE`), `observed_at`, optional `expires_at`/`reason`. |
+| `backend.administrative_enablement` | Operator/admin enablement, independent of observed health: `backend_id`, `enabled`, optional `provenance`/`observed_at`/`expires_at`/`reason`. Emitted only when present. |
 | `backend.quota` | Externally reported provider-capacity facts: optional `limit`/`unit`/`source`, `observed_at`, optional `expires_at`/`reason`. |
 | `backend.previous_backend` | Backend previously used, if any. |
 

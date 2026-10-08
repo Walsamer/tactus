@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tactus.backends import (
+    BackendAdministrativeEnablementFact,
     BackendDescriptor,
     BackendHealth,
     BackendId,
@@ -126,7 +127,15 @@ def sample_backend_facts() -> BackendFacts:
             ),
             BackendStatusObservation(
                 backend=BackendId("backend-b"),
-                status=BackendHealth.DISABLED,
+                status=BackendHealth.UNAVAILABLE,
+                observed_at=FIXTURE_TIMESTAMP,
+            ),
+        ),
+        administrative_enablement=(
+            BackendAdministrativeEnablementFact(
+                BackendId("backend-b"),
+                enabled=False,
+                provenance="operator",
                 observed_at=FIXTURE_TIMESTAMP,
                 reason="administratively excluded",
             ),
