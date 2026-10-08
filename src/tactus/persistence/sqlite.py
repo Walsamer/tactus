@@ -256,7 +256,11 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
                 (str(claim.work_order_id),),
             ).fetchone()
             if existing is not None:
-                if existing["intent_id"] == request.intent_id.value and existing["intent_digest"] == request.intent_digest:
+                if (
+                    existing["intent_id"] == request.intent_id.value
+                    and existing["intent_digest"] == request.intent_digest
+                    and existing["source_revision"] == request.source_revision.value
+                ):
                     return _attempt_from_row(existing), _submission_from_row(existing)
                 raise ImmutableRecordConflictError("an unclosed semantic attempt already exists")
             order = self._work_order(claim.work_order_id)
@@ -322,7 +326,7 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
             return SubmissionRecord(identifier, ExecutionAttemptId(row["attempt_id"]), row["intent_digest"], _as_datetime(row["created_at"]), run_id)
 
     def pending_submissions(self) -> tuple[SubmissionRecord, ...]:
-        """Return every unreceipted identity for send *or reconciliation*.
+        """Return active, unreceipted identities for send *or reconciliation*.
 
         A previous send timestamp never removes an item from recovery.  A crash
         after send/before acknowledgement must query or resend this exact
@@ -330,8 +334,29 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         """
 
         rows = self._connection.execute(
-            """SELECT s.* FROM submissions s JOIN submission_outbox o ON o.submission_id = s.submission_id
-            WHERE s.dagster_run_id IS NULL ORDER BY s.created_at, s.submission_id"""
+            """SELECT s.* FROM submissions s
+            JOIN submission_outbox o ON o.submission_id = s.submission_id
+            JOIN execution_attempts a ON a.attempt_id = s.attempt_id
+            JOIN work_orders w ON w.work_order_id = a.work_order_id
+            WHERE s.dagster_run_id IS NULL AND a.closed_at IS NULL AND w.state = 'ACTIVE'
+            ORDER BY s.created_at, s.submission_id"""
+        ).fetchall()
+        return tuple(_submission_from_row(row) for row in rows)
+
+    def reconciliation_submissions(self) -> tuple[SubmissionRecord, ...]:
+        """Return closed, unreceipted identities for query only, never dispatch.
+
+        Closing an attempt revokes its dispatch eligibility in the same commit.
+        Its ledger is retained because a send may have happened before a lost
+        acknowledgement (even before ``mark_dispatched``). A late receipt can
+        still be attached to the original submission without reopening work.
+        """
+
+        rows = self._connection.execute(
+            """SELECT s.* FROM submissions s
+            JOIN execution_attempts a ON a.attempt_id = s.attempt_id
+            WHERE s.dagster_run_id IS NULL AND a.closed_at IS NOT NULL
+            ORDER BY s.created_at, s.submission_id"""
         ).fetchall()
         return tuple(_submission_from_row(row) for row in rows)
 
@@ -340,11 +365,18 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         sent_at = at if at is not None else utcnow()
         with self._transaction():
             updated = self._connection.execute(
-                "UPDATE submission_outbox SET dispatched_at = COALESCE(dispatched_at, ?) WHERE submission_id = ?",
+                """UPDATE submission_outbox SET dispatched_at = COALESCE(dispatched_at, ?)
+                WHERE submission_id = ? AND EXISTS (
+                    SELECT 1 FROM submissions s
+                    JOIN execution_attempts a ON a.attempt_id = s.attempt_id
+                    JOIN work_orders w ON w.work_order_id = a.work_order_id
+                    WHERE s.submission_id = submission_outbox.submission_id
+                      AND a.closed_at IS NULL AND w.state = 'ACTIVE'
+                )""",
                 (_timestamp(sent_at), str(identifier)),
             )
             if updated.rowcount != 1:
-                raise UnknownExecutionAttemptError(f"no submission outbox record {identifier}")
+                raise IneligibleWorkOrderError(f"no active dispatch for submission {identifier}")
 
     def apply_result(
         self,

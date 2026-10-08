@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+# One run per ref: a branch with an open PR is validated only by the
+# pull_request event, and a rapid re-push cancels the superseded run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: python (pytest + verifier)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: install (frozen)
+        run: uv sync --frozen
+      - name: pytest
+        run: uv run --frozen pytest -q
+      - name: verifier
+        run: ./scripts/verify-goal.sh

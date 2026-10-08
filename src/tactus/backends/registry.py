@@ -64,6 +64,7 @@ class BackendDescriptor:
     model: str | None = None
     provider: str | None = None
     effort: EffortLevel | None = None
+    constraints: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,8 +134,9 @@ class BackendRegistry:
     ) -> tuple[BackendDescriptor, ...]:
         """Descriptors satisfying the hard requirements.
 
-        This is a mechanical match only: it does not consider status, provider
-        capacity, quota, ranking or preference.
+        This nonauthoritative helper is a mechanical match only: it does not
+        consider status, provider capacity, quota, ranking, preference or route
+        selection. Authoritative compatibility and routing belong to Ictus.
         """
 
         return tuple(
