@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "snap-recovery-0001",
+  "timestamp": "2026-10-01T00:00:00Z",
+  "domain": "software",
+  "subject": {
+    "type": "work_order",
+    "id": "WO-1"
+  },
+  "facts": [
+    {
+      "key": "snapshot.profile_version",
+      "value": 2
+    },
+    {
+      "key": "snapshot.phase",
+      "value": "RECOVERY"
+    },
+    {
+      "key": "observation.category",
+      "value": "WORKER_TIMEOUT"
+    },
+    {
+      "key": "observation.message",
+      "value": "worker exceeded its timeout class"
+    },
+    {
+      "key": "observation.observation_id",
+      "value": "obs-0001"
+    },
+    {
+      "key": "observation.execution_id",
+      "value": "exec-0001"
+    },
+    {
+      "key": "observation.intent_id",
+      "value": "intent-0001"
+    },
+    {
+      "key": "observation.observed_at",
+      "value": "2026-10-01T00:00:00Z"
+    },
+    {
+      "key": "observation.retryable",
+      "value": true
+    },
+    {
+      "key": "observation.evidence",
+      "value": [
+        {
+          "kind": "test_report",
+          "uri": "file:///artifacts/report.xml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "note": "verifier output"
+        }
+      ]
+    },
+    {
+      "key": "recovery.attempt_id",
+      "value": "attempt-0001"
+    },
+    {
+      "key": "recovery.intent_id",
+      "value": "intent-0001"
+    },
+    {
+      "key": "work_order.id",
+      "value": "WO-1"
+    },
+    {
+      "key": "work_order.state",
+      "value": "ACTIVE"
+    },
+    {
+      "key": "work_order.revision",
+      "value": 3
+    },
+    {
+      "key": "source.revision",
+      "value": "src-rev-1"
+    },
+    {
+      "key": "recovery.semantic_attempts",
+      "value": 1
+    },
+    {
+      "key": "recovery.max_semantic_attempts",
+      "value": 3
+    },
+    {
+      "key": "execution.step_retry_index",
+      "value": 2
+    },
+    {
+      "key": "capability.id",
+      "value": "demo.verify"
+    },
+    {
+      "key": "backend.descriptors",
+      "value": [
+        {
+          "backend_id": "backend-a",
+          "capabilities": [
+            "demo.verify"
+          ],
+          "agent_runtime": "local-subprocess",
+          "model": "model-x",
+          "provider": "provider-x"
+        },
+        {
+          "backend_id": "backend-b",
+          "capabilities": [
+            "demo.verify"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "backend.status",
+      "value": [
+        {
+          "backend_id": "backend-a",
+          "status": "AVAILABLE",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "expires_at": "2026-10-02T00:00:00Z"
+        },
+        {
+          "backend_id": "backend-b",
+          "status": "UNAVAILABLE",
+          "observed_at": "2026-10-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "key": "backend.administrative_enablement",
+      "value": [
+        {
+          "schema_version": 1,
+          "backend_id": "backend-b",
+          "enabled": false,
+          "provenance": "operator",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "expires_at": null,
+          "reason": "administratively excluded"
+        }
+      ]
+    },
+    {
+      "key": "backend.quota",
+      "value": [
+        {
+          "backend_id": "backend-a",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "limit": 10,
+          "unit": "runs",
+          "source": "provider-api",
+          "expires_at": "2026-10-02T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "key": "backend.previous_backend",
+      "value": "backend-a"
+    },
+    {
+      "key": "authorization.grants",
+      "value": [
+        {
+          "grant_id": "grant-0001",
+          "scope": "WO-1",
+          "actor": "operator-1",
+          "issued_at": "2026-10-01T00:00:00Z",
+          "expires_at": "2026-10-02T00:00:00Z",
+          "source_revision": "src-rev-1",
+          "evidence": [
+            "sig:abc123"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "domain.dependencies_satisfied",
+      "value": true
+    },
+    {
+      "key": "domain.scope_constraints",
+      "value": [
+        "src/**",
+        "tests/**"
+      ]
+    },
+    {
+      "key": "snapshot.digest",
+      "value": "a76072d3a6e2d1ca85224a5cd737a6c812b908b40fa098384b688ae667be1784"
+    }
+  ],
+  "capabilities": [
+    "demo.verify"
+  ],
+  "constraints": [
+    "approval_required"
+  ]
+}

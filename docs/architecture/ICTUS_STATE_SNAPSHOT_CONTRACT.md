@@ -1,16 +1,17 @@
-> **Implemented v1 adapter reference, not the complete target contract.**
-> [Baseline v1 contracts](CROSS_SYSTEM_CONTRACTS.md) govern new work;
-> [reconciliation](BASELINE_V1_RECONCILIATION.md) records profile, initial-context
-> and validation gaps. The pinned schemas here describe inspected main.
+> **Implemented versioned adapter reference.** [Baseline v1 contracts](CROSS_SYSTEM_CONTRACTS.md)
+> govern new work; [reconciliation](BASELINE_V1_RECONCILIATION.md) records the
+> profile, initial-context and validation gaps this adapter closes. The pinned
+> Ictus schemas describe inspected main (Ictus commit `833175d`).
 
-# Tactus → Ictus `StateSnapshot` v1 Context Adapter
+# Tactus → Ictus `StateSnapshot` versioned context adapter
 
 ## Purpose
 
 Ictus's `DecisionProvider` consumes a `StateSnapshot`, not an
 `ExecutionObservation` directly. This document defines the **outbound**,
 versioned adapter at which Tactus assembles one valid, domain-neutral Ictus
-`StateSnapshot` v1 from execution observations plus Tactus/domain facts.
+`StateSnapshot` v1 for **first execution** (`INITIAL`) and **recovery**
+(`RECOVERY`) from domain/control facts.
 
 The adapter transports facts to the decision plane. It decides nothing and
 mutates nothing.
@@ -25,12 +26,13 @@ out to Ictus here.
 
 ```text
 ExecutionObservation v1             (inbound: Ictus -> Tactus, validated)
-        + WorkOrder / domain facts
-        + attempt / recovery history
-        + backend availability facts
-        + constraints / authorization
+        + WorkOrder / source / revision facts
+        + fenced execution-attempt correlation
+        + canonical semantic count/limit + diagnostic step retry
+        + raw backend descriptors / health / administrative enablement / quota facts
+        + raw approval grants/evidence + constraints
         ↓
-Tactus StateSnapshot v1 adapter     (this edge: assemble facts, decide nothing)
+Tactus StateSnapshot adapter        (this edge: assemble facts, decide nothing)
         ↓
 Ictus DecisionProvider              (owns all decision/policy)
 ```
@@ -38,7 +40,8 @@ Ictus DecisionProvider              (owns all decision/policy)
 - Tactus owns the Work Order lifecycle, domain facts and the assembly of the
   snapshot.
 - Ictus owns whatever consumes the snapshot — diagnosis, policy, retrieval,
-  reroute/decompose/escalate decisions. None of that lives here.
+  reroute/decompose/escalate decisions, backend compatibility/freshness and
+  route selection. None of that lives here.
 - The adapter is **pure**: it reads the public, read-only views of the domain
   entity and returns a fresh JSON-serializable `dict`. It performs no Work
   Order mutation, no lifecycle transition, no readiness change, no persistence,
@@ -53,9 +56,29 @@ Ictus DecisionProvider              (owns all decision/policy)
 | Ictus repository | `Walsamer/ictus` |
 | Pinned commit | `833175d` |
 | `StateSnapshot` schema | `contracts/state-snapshot.schema.json` |
-| Supported `schema_version` | `1` |
+| Supported generic `schema_version` | `1` |
+| Tactus fact-profile version | `2` (independent, `snapshot.profile_version`) |
 
-Tactus emits exactly `schema_version = 1`.
+The generic Ictus schema version stays `1`. The *Tactus fact profile* is
+versioned independently (Baseline v1): a consumer rejects an unsupported
+profile rather than guessing. `validate_snapshot_profile()` is the
+consumer-side guard.
+
+## Phases
+
+| Fact | Phase | Observation |
+|---|---|---|
+| `snapshot.phase = INITIAL` | first execution | **none** — a previous/fake observation is never fabricated. |
+| `snapshot.phase = RECOVERY` | recovery after a failure | exactly one validated, **correlated** observation. |
+
+For `RECOVERY`, Tactus correlates the observation against the authoritative
+[`ExecutionAttempt`](../../src/tactus/domain/admission.py):
+
+- Work Order identity ↔ `attempt.work_order_id` (**subject**);
+- `observation.intent_id` ↔ `attempt.intent_id` (**intent**);
+- `observation.execution_id` ↔ `attempt.dagster_run_id` (**attempt/run**).
+
+A mismatch, a missing attempt, or a `SUCCESS` observation fails closed.
 
 ## Payload shape (v1)
 
@@ -66,80 +89,24 @@ Optional: `facts`, `capabilities`, `constraints`.
 ```json
 {
   "schema_version": 1,
-  "snapshot_id": "snap-0001",
+  "snapshot_id": "snap-recovery-0001",
   "timestamp": "2026-10-01T00:00:00Z",
   "domain": "software",
   "subject": { "type": "work_order", "id": "WO-1" },
   "facts": [
+    { "key": "snapshot.profile_version", "value": 2 },
+    { "key": "snapshot.phase", "value": "RECOVERY" },
     { "key": "observation.category", "value": "WORKER_TIMEOUT" },
+    { "key": "recovery.attempt_id", "value": "attempt-0001" },
+    { "key": "recovery.intent_id", "value": "intent-0001" },
     { "key": "work_order.id", "value": "WO-1" },
     { "key": "work_order.state", "value": "ACTIVE" },
-    { "key": "attempt.number", "value": 1 },
-    { "key": "recovery.semantic_attempts", "value": 3 },
-    { "key": "capability.id", "value": "demo.verify" },
-    {
-      "key": "backend.descriptors",
-      "value": [
-        {
-          "schema_version": 1,
-          "backend_id": "backend-a",
-          "capabilities": ["shell"],
-          "runtime": "local",
-          "model": "model-a",
-          "provider": "provider-a",
-          "constraints": ["workspace:repo"],
-          "provenance": "declaration",
-          "observed_at": "2026-10-01T00:00:00Z",
-          "expires_at": null
-        }
-      ]
-    },
-    {
-      "key": "backend.health",
-      "value": [
-        {
-          "schema_version": 1,
-          "backend_id": "backend-a",
-          "health": "AVAILABLE",
-          "provenance": "probe",
-          "observed_at": "2026-10-01T00:00:00Z",
-          "expires_at": "2026-10-01T00:05:00Z",
-          "reason": null
-        }
-      ]
-    },
-    {
-      "key": "backend.administrative_enablement",
-      "value": [
-        {
-          "schema_version": 1,
-          "backend_id": "backend-a",
-          "enabled": true,
-          "provenance": "operator",
-          "observed_at": "2026-10-01T00:00:00Z",
-          "expires_at": null,
-          "reason": null
-        }
-      ]
-    },
-    {
-      "key": "backend.provider_quota",
-      "value": [
-        {
-          "schema_version": 1,
-          "backend_id": "backend-a",
-          "limit": 10,
-          "unit": "requests_per_minute",
-          "provenance": "provider_api",
-          "observed_at": "2026-10-01T00:00:00Z",
-          "expires_at": "2026-10-01T00:01:00Z",
-          "reason": null
-        }
-      ]
-    },
-    { "key": "backend.previous_backend", "value": "backend-a" },
-    { "key": "domain.dependencies_satisfied", "value": true },
-    { "key": "domain.scope_constraints", "value": ["src/**"] }
+    { "key": "recovery.semantic_attempts", "value": 1 },
+    { "key": "recovery.max_semantic_attempts", "value": 3 },
+    { "key": "execution.step_retry_index", "value": 2 },
+    { "key": "backend.descriptors", "value": [ { "backend_id": "backend-a" } ] },
+    { "key": "authorization.grants", "value": [ { "grant_id": "grant-0001" } ] },
+    { "key": "snapshot.digest", "value": "ecf6c114…" }
   ],
   "capabilities": ["demo.verify"],
   "constraints": ["approval_required"]
@@ -152,110 +119,124 @@ Optional: `facts`, `capabilities`, `constraints`.
 - `timestamp` is an RFC 3339 / ISO 8601 UTC instant; naive datetimes are
   interpreted as UTC.
 - `snapshot_id` is caller-supplied or generated fresh.
-- `facts` is an ordered list of `{ key, value }` entries. `value` is open JSON,
-  which is what lets domain detail travel without changing the Ictus core.
-- `capabilities` is the set of capability ids advertised as available in this
-  state; Tactus mirrors `capability.id` there when a capability is supplied.
-- `constraints` carries domain-neutral constraint tokens such as
-  `approval_required`.
+- `snapshot.digest` is a SHA-256 over the canonical (sorted-key, compact,
+  UTF-8) JSON body *without* the digest fact. With an explicit `snapshot_id`
+  and `timestamp` the whole payload — including the digest — is deterministic.
+- `facts` is an ordered list of `{ key, value }` entries with unique keys.
+- `capabilities` mirrors `capability.id` when a capability is supplied;
+  `constraints` carries domain-neutral tokens such as `approval_required`.
 
-## Fact vocabulary
+## Canonical fact vocabulary
 
-All keys use the dotted, domain-neutral namespace the Ictus core expects. The
-adapter's declared vocabulary is:
+### Profile / identity
 
-| Key | Type | Source | Meaning |
-|---|---|---|---|
-| `observation.category` | string (Ictus v1 category) | execution observation | The execution outcome, copied **verbatim**; never reclassified. |
-| `observation.message` | string | execution observation | Free-text execution detail (omitted when absent). |
-| `observation.observation_id` | string | execution observation | Observation identity. |
-| `observation.execution_id` | string | execution observation | Execution/run identity. |
-| `observation.intent_id` | string | execution observation | Validated execution-intent reference. |
-| `observation.observed_at` | string (date-time) | execution observation | When the execution outcome was observed. |
-| `observation.retryable` | boolean | execution observation | Backend advisory hint only; omitted when absent. |
-| `observation.evidence` | array of evidence objects | execution observation | Preserved evidence pointers (`kind`, `uri`, optional `sha256`/`note`); omitted when empty. |
-| `work_order.id` | string | Work Order | Stable Work Order identity. |
-| `work_order.state` | string | Work Order | One of `DRAFT`, `OPEN`, `ACTIVE`, `IMPLEMENTED`, `RETIRED`. |
-| `work_order.readiness` | string | Work Order | `UNKNOWN`/`READY`/`BLOCKED`; present only while `OPEN`. |
-| `attempt.number` | integer | attempt history | **Dagster micro-retry** attempt index (backend-owned). |
-| `recovery.semantic_attempts` | integer | recovery history | **Semantic** execution-attempt / recovery count. |
-| `capability.id` | string | capability facts | Capability to (re-)execute. |
-| `backend.descriptors` | array of descriptor records | backend facts | Raw backend declarations: `schema_version`, stable `backend_id`, capabilities, provider/runtime/model, supplied constraints, provenance, `observed_at` and `expires_at`; no compatibility filtering or ranking. |
-| `backend.health` | array of health records | backend facts | Latest observed health per backend. `health` is `AVAILABLE`, `UNAVAILABLE` or explicit `UNKNOWN` when absent/expired; administrative disablement is not encoded here. |
-| `backend.administrative_enablement` | array of enablement records | backend facts | Operator/admin enablement per backend, independent from observed health. |
-| `backend.provider_quota` | array of quota records | backend facts | Externally reported provider quota/capacity. This is not Dagster concurrency and contains no worker-slot occupancy. |
-| `backend.previous_backend` | string | recovery/context facts | Backend previously used, if any (omitted otherwise). This records history only and does not imply preference, compatibility or permission to reuse it. |
-| `domain.dependencies_satisfied` | boolean | domain facts | Dependency-satisfaction fact (omitted when unknown). |
-| `domain.scope_constraints` | array of strings | domain facts | Declared scope constraints for the Work Order. |
+| Key | Type | Meaning |
+|---|---|---|
+| `snapshot.profile_version` | integer | Tactus fact-profile version (currently `2`). |
+| `snapshot.phase` | string | `INITIAL` or `RECOVERY`. |
+| `snapshot.digest` | string | SHA-256 of the canonical body. |
+| `work_order.id` / `work_order.state` / `work_order.readiness` | string | Work Order identity and lifecycle/readiness views. |
+| `work_order.revision` | integer | Tactus-owned optimistic Work Order revision (optional). |
+| `source.revision` | string | Immutable source revision bound to the context (optional). |
 
-The stable key constants are exported from
-`tactus.integrations.ictus.state_snapshot`.
+### Execution observation (RECOVERY only)
 
-## Two attempt counters — never conflated
+`observation.category`, `observation.message`,
+`observation.observation_id`, `observation.execution_id`,
+`observation.intent_id`, `observation.observed_at`,
+`observation.retryable`, `observation.evidence` — copied verbatim from the
+validated inbound `ExecutionObservation`; the closed Ictus v1 category
+vocabulary is never widened, narrowed or reclassified.
 
-There are two categorically different counters and the adapter keeps them on
-separate keys:
+`recovery.attempt_id` / `recovery.intent_id` bind the correlated attempt.
+
+### Canonical budget facts — not the legacy retry facts
+
+| Key | Type | Meaning |
+|---|---|---|
+| `recovery.semantic_attempts` | integer | Already accepted semantic attempts (zero before the first; includes the failed current attempt during recovery). |
+| `recovery.max_semantic_attempts` | integer | Authorized total accepted-attempt limit. |
+| `execution.step_retry_index` | integer | Execution-owned (Dagster) diagnostic step-retry index only. |
+
+Another attempt is permitted only while `count < limit`. Missing or invalid
+budget is a hard validation failure (`StateSnapshotContractError`), never an
+implicit zero or unlimited budget. The step-retry index can never consume or
+refill the semantic allowance by substitution.
+
+### Raw backend facts (never a filtered candidate list)
+
+| Key | Value |
+|---|---|
+| `backend.descriptors` | Raw descriptors: stable `backend_id`, `capabilities`, optional `provider`/`model`/`agent_runtime`/`effort`. |
+| `backend.status` | Timestamped observed-health facts: `status` (`AVAILABLE`/`UNAVAILABLE`), `observed_at`, optional `expires_at`/`reason`. |
+| `backend.administrative_enablement` | Operator/admin enablement, independent of observed health: `backend_id`, `enabled`, optional `provenance`/`observed_at`/`expires_at`/`reason`. Emitted only when present. |
+| `backend.quota` | Externally reported provider-capacity facts: optional `limit`/`unit`/`source`, `observed_at`, optional `expires_at`/`reason`. |
+| `backend.previous_backend` | Backend previously used, if any. |
+
+Tactus supplies these facts without policy-filtering a preferred candidate
+list. Ictus decides compatibility, freshness suitability and deterministic
+tie-breaking.
+
+### Raw authorization evidence
+
+| Key | Value |
+|---|---|
+| `authorization.grants` | Raw approval grants: `grant_id`, `scope`, `actor`, `issued_at`, optional `expires_at`/`source_revision` and `evidence` refs. |
+
+Tactus records grants; it never asserts that a grant is sufficient or that an
+`ALLOW` was issued. Ictus validates their sufficiency.
+
+### Domain / control facts
+
+| Key | Type | Meaning |
+|---|---|---|
+| `capability.id` | string | Capability to (re-)execute (mirrored in `capabilities`). |
+| `domain.dependencies_satisfied` | boolean | Dependency-satisfaction fact (omitted when unknown). |
+| `domain.scope_constraints` | array of strings | Declared scope constraints for the Work Order. |
+
+## Two counters — never conflated
 
 ```text
-attempt.number               -> Dagster micro-retry attempt index
-                                (backend-owned, carried verbatim)
+recovery.semantic_attempts / recovery.max_semantic_attempts
+    canonical, decision-relevant semantic count/limit
 
-recovery.semantic_attempts   -> semantic execution-attempt / recovery count
-                                (Tactus decision-relevant)
+execution.step_retry_index
+    execution-owned diagnostic (Dagster); never a semantic attempt
+
+attempt.number / retry.attempt / retry.budget
+    SUPERSEDED legacy v1 profile inputs; never emitted by this adapter
 ```
 
 - A Dagster step retry is **not** a new semantic execution attempt. The adapter
   never substitutes one count for the other, never sums them and never derives
   one from the other.
-- `attempt.number` is an opaque backend fact; Tactus derives no execution
-  semantics from it.
-- `recovery.semantic_attempts` counts the authoritative Tactus execution
-  attempts / recovery cycles.
-
-## Execution observation is included, not reclassified
-
-- `observation.category` is copied exactly from the validated inbound
-  `ExecutionObservation`, so the closed Ictus v1 vocabulary
-  (`SUCCESS`, `WORKER_TIMEOUT`, `PROCESS_CRASH`, `VERIFICATION_FAILURE`,
-  `INTEGRATION_CONFLICT`, `RESOURCE_EXHAUSTED`, `PROVIDER_UNAVAILABLE`,
-  `UNKNOWN`) is never widened or narrowed by this adapter.
-- Tactus/domain facts (dependency state, scope constraints, backend
-  availability, ...) are emitted as their own `facts` keys. They are **never**
-  disguised as an execution category, and there is no domain-to-category
-  mapping and no `UNKNOWN` fallback used to smuggle a domain concept through
-  execution.
-
-## Constraints and scope
-
-Two distinct concepts are kept separate:
-
-- `constraints` (top-level, domain-neutral tokens) — Ictus-level authorization
-  / policy gates such as `approval_required`.
-- `domain.scope_constraints` (a fact) — the concrete scope declared for the
-  Work Order, e.g. `src/**`, `tests/**`.
+- Legacy inputs are translated only **explicitly** by
+  `translate_legacy_budget_facts()` (and `semantic_budget_from_legacy()` for the
+  Tactus `AttemptHistory` shim). The former mismatch — missing legacy facts
+  defaulting to `0`, so an exhausted `0/0` budget blocked first execution, or
+  the step-retry index masquerading as the semantic count — is covered by the
+  shared fixtures.
 
 ## Stop-condition / representability note
 
 The Ictus v1 `fact.value` is open JSON, so every Tactus/domain fact listed above
-has a valid slot and nothing is dropped or invented. There is currently **no**
-required fact that lacks a valid `StateSnapshot` v1 representation.
+has a valid slot and nothing is dropped or invented.
 
 ## Tests
 
-`tests/integrations/ictus/test_state_snapshot.py`:
+`tests/integrations/ictus/`:
 
-- **contract**: the emitted payload is structurally validated against the shape
-  of the authoritative `contracts/state-snapshot.schema.json` (validation is
-  encoded locally because `jsonschema` is deliberately not a Tactus
-  dependency; the external schema is not vendored);
-- **no reclassification**: `observation.category` is copied verbatim across the
-  whole v1 vocabulary and never replaced by a domain fact;
-- **counter separation**: the Dagster micro-retry index and the semantic
-  attempt count move independently;
-- **purity**: no Work Order/lifecycle mutation, no persistence object leakage,
-  and no recovery-decision surface.
+- `test_state_snapshot.py` — schema shape, phases, correlation rejection,
+  canonical budget facts, raw backend/authorization facts, deterministic
+  digest, profile validation, fail-closed input validation and purity;
+- `test_profile_fixtures.py` and `data/*.json` — cross-repository pinned
+  fixtures run through a schema/profile boundary and through the documented
+  policy rule, exposing the former `retry.attempt`/`retry.budget` mismatch.
 
 ## Implementation
 
 `src/tactus/integrations/ictus/state_snapshot.py` — `build_state_snapshot()`,
-`AttemptHistory`, `BackendFacts` and the fact-key constants.
+`SemanticBudget`, `StepRetryDiagnostic`, `SnapshotPhase`,
+`validate_snapshot_profile()`, `compute_snapshot_digest()` and the fact-key
+constants. Domain fact adapters live in
+`src/tactus/integrations/ictus/facts.py`.
