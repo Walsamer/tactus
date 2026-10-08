@@ -37,7 +37,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from ._clock import utcnow
 from .records import TransitionAuthority
@@ -105,6 +105,61 @@ class ExecutionAttemptId:
 
 
 @dataclass(frozen=True, slots=True)
+class ClaimToken:
+    """Opaque identity supplied by the process coordinating an admission.
+
+    A token is not authorization to execute.  It is paired with a durable,
+    monotonically increasing fence by the persistence adapter and only proves
+    that this caller owns a short-lived coordination claim.
+    """
+
+    value: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", _require_non_empty(self.value, "ClaimToken"))
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class WorkOrderRevision:
+    """Optimistic revision of Tactus-owned WorkOrder state."""
+
+    value: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.value, bool) or not isinstance(self.value, int) or self.value < 0:
+            raise ValueError("WorkOrderRevision must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRevision:
+    """Immutable source revision to which an accepted intent is bound."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", _require_non_empty(self.value, "SourceRevision"))
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionId:
+    """Stable identity delivered to the execution bridge exactly as recorded."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", _require_non_empty(self.value, "SubmissionId"))
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionAttempt:
     """Authoritative correlation for one accepted execution attempt.
 
@@ -124,10 +179,11 @@ class ExecutionAttempt:
 class ExecutionRequest:
     """An Ictus-validated request to execute one Work Order.
 
-    The request carries the validated execution-intent reference and the opaque
-    Dagster run id produced by the execution plane. Constructing and passing a
-    request is the evidence that Ictus authorized this execution; Tactus does not
-    re-derive that policy.
+    The legacy in-memory seam includes a Dagster run id.  Durable admission uses
+    :class:`DurableAdmissionRequest` instead: it commits a stable submission
+    before dispatch and attaches the opaque run id only after a bridge receipt.
+    The caller must obtain validated intent evidence through the Ictus boundary;
+    constructing this value is not proof of authorization.
     """
 
     work_order_id: WorkOrderId
@@ -180,6 +236,142 @@ class DuplicateExecutionAttemptError(AdmissionError):
 
 class UnknownExecutionAttemptError(AdmissionError):
     """A correlation lookup referenced an attempt that is not recorded."""
+
+
+class ClaimUnavailableError(AdmissionError):
+    """Another unexpired coordinator currently owns the WorkOrder claim."""
+
+
+class FencingError(AdmissionError):
+    """A stale, expired, or superseded claim attempted a durable write."""
+
+
+class StaleWorkOrderRevisionError(AdmissionError):
+    """The claimed WorkOrder/source revision no longer matches durable state."""
+
+
+class ImmutableRecordConflictError(AdmissionError):
+    """A stable record identity was replayed with different immutable content."""
+
+
+class ResultApplicationError(AdmissionError):
+    """A result cannot be applied to the referenced durable attempt."""
+
+
+# -- durable admission contracts -----------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DomainClaim:
+    """A persisted, fenced coordination claim for one WorkOrder revision."""
+
+    work_order_id: WorkOrderId
+    expected_revision: WorkOrderRevision
+    token: ClaimToken
+    fence: int
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if isinstance(self.fence, bool) or not isinstance(self.fence, int) or self.fence < 1:
+            raise ValueError("fence must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class DurableAdmissionRequest:
+    """Immutable input accepted under a fenced claim.
+
+    ``intent_digest`` identifies the exact validated intent envelope.  It is
+    deliberately opaque to Tactus: verifying the envelope is an application
+    boundary responsibility, while this port records and protects its identity.
+    """
+
+    work_order_id: WorkOrderId
+    expected_revision: WorkOrderRevision
+    source_revision: SourceRevision
+    claim_token: ClaimToken
+    intent_id: ExecutionIntentId
+    intent_digest: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "intent_digest", _require_non_empty(self.intent_digest, "intent_digest"))
+
+
+@dataclass(frozen=True, slots=True)
+class DurableAttempt:
+    """A semantic attempt persisted independently of a Dagster run receipt."""
+
+    attempt_id: ExecutionAttemptId
+    work_order_id: WorkOrderId
+    intent_id: ExecutionIntentId
+    source_revision: SourceRevision
+    fence: int
+    accepted_at: datetime
+    closed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionRecord:
+    """Immutable dispatch identity committed before any external send."""
+
+    submission_id: SubmissionId
+    attempt_id: ExecutionAttemptId
+    intent_digest: str
+    created_at: datetime
+    dagster_run_id: DagsterRunId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResultRecord:
+    """Inbound result/decision identity and immutable payload digest."""
+
+    result_id: str
+    attempt_id: ExecutionAttemptId
+    payload_digest: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "result_id", _require_non_empty(self.result_id, "result_id"))
+        object.__setattr__(self, "payload_digest", _require_non_empty(self.payload_digest, "payload_digest"))
+
+
+@runtime_checkable
+class DurableExecutionAdmissionPort(Protocol):
+    """Persistence boundary for fenced admission and restart-safe handoff.
+
+    It is intentionally not a scheduler: it contains no worker slots, queue
+    ordering, routing, retry selection, or execution policy.
+    """
+
+    def acquire_claim(
+        self,
+        work_order_id: WorkOrderId | str,
+        *,
+        expected_revision: WorkOrderRevision,
+        claim_token: ClaimToken,
+        expires_at: datetime,
+        now: datetime | None = None,
+    ) -> DomainClaim: ...
+
+    def accept_durable(
+        self,
+        claim: DomainClaim,
+        request: DurableAdmissionRequest,
+        *,
+        at: datetime | None = None,
+    ) -> tuple[DurableAttempt, SubmissionRecord]: ...
+
+    def attach_receipt(
+        self,
+        submission_id: SubmissionId | str,
+        dagster_run_id: DagsterRunId | str,
+    ) -> SubmissionRecord: ...
+
+    def apply_result(
+        self,
+        result: ResultRecord,
+        *,
+        apply_domain_effect: Callable[[object], None] | None = None,
+        at: datetime | None = None,
+    ) -> bool: ...
 
 
 # -- port contract --------------------------------------------------------
