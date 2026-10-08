@@ -13,7 +13,7 @@ and contains no recovery-decision logic.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -26,6 +26,7 @@ from tactus.backends import (
     BackendHealthFact,
     BackendId,
     BackendProviderQuotaFact,
+    BackendStatusObservation,
 )
 from tactus.domain import OpenStatus, WorkOrder, WorkOrderState
 from tactus.integrations.ictus import (
@@ -270,6 +271,137 @@ def test_full_snapshot_is_valid_ictus_state_snapshot_v1() -> None:
     assert facts[FACT_BACKEND_PREVIOUS_BACKEND] == "backend-a"
     assert facts[FACT_DOMAIN_DEPENDENCIES_SATISFIED] is False
     assert facts[FACT_DOMAIN_SCOPE_CONSTRAINTS] == ["src/**", "tests/**"]
+
+
+def test_health_fact_created_fresh_exports_unknown_after_snapshot_expiry() -> None:
+    observed_at = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    expires_at = observed_at + timedelta(minutes=5)
+    health = BackendHealthFact(
+        BackendId("backend-a"),
+        BackendHealth.AVAILABLE,
+        provenance="probe",
+        observed_at=observed_at,
+        expires_at=expires_at,
+        reason="last probe succeeded",
+    )
+
+    payload = _build(
+        timestamp=expires_at + timedelta(seconds=1),
+        backend_facts=BackendFacts(health=(health,)),
+    )
+
+    exported = _facts(payload)[FACT_BACKEND_HEALTH][0]
+    assert exported["health"] == "UNKNOWN"
+    assert exported["observed_at"] == "2026-10-01T00:00:00Z"
+    assert exported["expires_at"] == "2026-10-01T00:05:00Z"
+    assert exported["provenance"] == "probe"
+    assert exported["reason"] == "last probe succeeded"
+
+
+def test_health_fact_exports_unknown_at_exact_snapshot_expiry_boundary() -> None:
+    observed_at = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    expires_at = observed_at + timedelta(minutes=5)
+    health = BackendHealthFact(
+        BackendId("backend-a"),
+        BackendHealth.AVAILABLE,
+        provenance="probe",
+        observed_at=observed_at,
+        expires_at=expires_at,
+    )
+
+    payload = _build(timestamp=expires_at, backend_facts=BackendFacts(health=(health,)))
+
+    assert _facts(payload)[FACT_BACKEND_HEALTH][0]["health"] == "UNKNOWN"
+
+
+def test_snapshot_export_path_requires_evaluation_time_for_expiring_health() -> None:
+    observed_at = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    expires_at = observed_at + timedelta(minutes=5)
+    health = BackendHealthFact.from_observation(
+        BackendStatusObservation(
+            BackendId("backend-a"),
+            BackendHealth.AVAILABLE,
+            observed_at=observed_at,
+            expires_at=expires_at,
+        ),
+        provenance="probe",
+    )
+
+    payload = _build(
+        timestamp=expires_at + timedelta(minutes=1),
+        backend_facts=BackendFacts(health=(health,)),
+    )
+
+    assert _facts(payload)[FACT_BACKEND_HEALTH][0]["health"] == "UNKNOWN"
+
+
+def test_health_export_preserves_fresh_missing_and_non_expiring_statuses() -> None:
+    observed_at = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    expires_at = observed_at + timedelta(minutes=5)
+    payload = _build(
+        timestamp=observed_at + timedelta(minutes=1),
+        backend_facts=BackendFacts(
+            health=(
+                BackendHealthFact(
+                    BackendId("fresh"),
+                    BackendHealth.AVAILABLE,
+                    provenance="probe",
+                    observed_at=observed_at,
+                    expires_at=expires_at,
+                ),
+                BackendHealthFact(
+                    BackendId("missing"),
+                    None,
+                    provenance="probe",
+                ),
+                BackendHealthFact(
+                    BackendId("non-expiring"),
+                    BackendHealth.UNAVAILABLE,
+                    provenance="probe",
+                    observed_at=observed_at,
+                    expires_at=None,
+                ),
+            ),
+        ),
+    )
+
+    exported = {
+        item["backend_id"]: item["health"]
+        for item in _facts(payload)[FACT_BACKEND_HEALTH]
+    }
+    assert exported == {
+        "fresh": "AVAILABLE",
+        "missing": "UNKNOWN",
+        "non-expiring": "UNAVAILABLE",
+    }
+
+
+def test_snapshot_health_expiry_uses_normalized_snapshot_time() -> None:
+    observed_at = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    expires_at = observed_at + timedelta(minutes=5)
+    health = BackendHealthFact(
+        BackendId("backend-a"),
+        BackendHealth.AVAILABLE,
+        provenance="probe",
+        observed_at=observed_at,
+        expires_at=expires_at,
+    )
+
+    naive_after_expiry = datetime(2026, 10, 1, 0, 5)
+    offset_after_expiry = datetime.fromisoformat("2026-09-30T20:05:00-04:00")
+
+    assert _facts(
+        _build(
+            timestamp=naive_after_expiry,
+            backend_facts=BackendFacts(health=(health,)),
+        )
+    )[FACT_BACKEND_HEALTH][0]["health"] == "UNKNOWN"
+    assert _facts(
+        _build(
+            timestamp=offset_after_expiry,
+            backend_facts=BackendFacts(health=(health,)),
+        )
+    )[FACT_BACKEND_HEALTH][0]["health"] == "UNKNOWN"
 
 
 def test_snapshot_is_json_serializable() -> None:
