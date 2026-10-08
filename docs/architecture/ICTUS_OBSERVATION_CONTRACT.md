@@ -193,23 +193,28 @@ records and failure observations unchanged.
 `src/tactus/integrations/ictus/observation.py` — the only public entry point for
 Ictus observation traffic.
 
-## StateSnapshot adapter (FIX-005)
+## StateSnapshot adapter
 
-The outbound complement of this boundary is the purely-Tactus-to-Ictus
-`StateSnapshot` v1 context adapter. It takes the validated execution
-observation (including this boundary's normalized `TactusObservation`),
-together with Work Order/domain facts, attempt/recovery history and backend
-facts, and assembles the domain-neutral state that an Ictus `DecisionProvider`
-consumes.
+The outbound complement of this boundary is the **versioned** pure
+Tactus-to-Ictus `StateSnapshot` context adapter (Tactus fact profile `2`). It
+assembles the domain-neutral state that an Ictus `DecisionProvider` consumes
+for first execution (`INITIAL`, no fabricated observation) and recovery
+(`RECOVERY`, one correlated observation), together with Work Order/source
+facts, the accepted-attempt correlation, canonical semantic count/limit and raw
+backend and authorization facts.
 
 - It includes the execution observation **without reclassification**: the
   `observation.category` is copied verbatim and the closed v1 vocabulary is
   never widened or narrowed.
 - Tactus/domain facts are emitted as their own snapshot facts; they are never
   disguised as execution categories.
-- The two attempt counters — the Dagster micro-retry index
-  (`attempt.number`) and the semantic execution-attempt/recovery count
-  (`recovery.semantic_attempts`) — are kept strictly separate.
+- Recovery context is **correlated**: a wrong subject, intent or attempt/run —
+  or a `SUCCESS` observation — fails closed.
+- The canonical semantic count/limit (`recovery.semantic_attempts`,
+  `recovery.max_semantic_attempts`) is kept strictly separate from the
+  execution-owned diagnostic step-retry index (`execution.step_retry_index`).
+  The superseded `attempt.number`/`retry.attempt`/`retry.budget` facts are never
+  emitted and are only translated explicitly.
 - The adapter is pure: no Work Order mutation, no lifecycle transition, no
   persistence-model leakage and no recovery-decision logic.
 
