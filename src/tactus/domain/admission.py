@@ -365,6 +365,18 @@ class DurableExecutionAdmissionPort(Protocol):
         dagster_run_id: DagsterRunId | str,
     ) -> SubmissionRecord: ...
 
+    def pending_submissions(self) -> tuple[SubmissionRecord, ...]:
+        """Active submissions eligible for delivery or receipt reconciliation."""
+        ...
+
+    def reconciliation_submissions(self) -> tuple[SubmissionRecord, ...]:
+        """Closed submissions that may only be queried for a missing receipt."""
+        ...
+
+    def mark_dispatched(
+        self, submission_id: SubmissionId | str, *, at: datetime | None = None
+    ) -> None: ...
+
     def apply_result(
         self,
         result: ResultRecord,

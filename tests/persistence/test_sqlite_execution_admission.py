@@ -163,3 +163,71 @@ def test_result_effect_and_close_roll_back_together_then_deduplicate(tmp_path) -
     assert adapter._connection.execute("SELECT count(*) FROM effects").fetchone()[0] == 1
     with pytest.raises(ImmutableRecordConflictError):
         adapter.apply_result(ResultRecord("result-1", attempt.attempt_id, "changed"), at=NOW)
+
+
+@pytest.mark.parametrize("changes", [
+    {"source_revision": SourceRevision("changed")},
+    {"intent_id": ExecutionIntentId("changed")},
+    {"intent_digest": "changed"},
+])
+def test_admission_replay_rejects_changed_immutable_content(tmp_path, changes) -> None:
+    from dataclasses import replace
+
+    adapter = store(tmp_path)
+    held = claim(adapter)
+    accepted = adapter.accept_durable(held, request(), at=NOW)
+    with pytest.raises(ImmutableRecordConflictError):
+        adapter.accept_durable(held, replace(request(), **changes), at=NOW)
+    assert adapter.accept_durable(held, request(), at=NOW) == accepted
+    assert adapter.pending_submissions() == (accepted[1],)
+
+
+@pytest.mark.parametrize("sent", [False, True])
+def test_closed_attempt_cannot_dispatch_after_restart_but_can_reconcile(tmp_path, sent) -> None:
+    from tactus.domain import IneligibleWorkOrderError
+
+    adapter = store(tmp_path)
+    attempt, submission = adapter.accept_durable(claim(adapter), request(), at=NOW)
+    if sent:
+        adapter.mark_dispatched(submission.submission_id, at=NOW)
+
+    def retire(connection):
+        connection.execute(
+            "UPDATE work_orders SET state='RETIRED', readiness=NULL, revision=revision+1 WHERE work_order_id='WO-1'"
+        )
+
+    adapter.apply_result(
+        ResultRecord("retire", attempt.attempt_id, "decision-sha"),
+        apply_domain_effect=retire, at=NOW,
+    )
+    adapter.close()
+    restarted = SqliteExecutionAdmission(tmp_path / "domain.sqlite")
+    assert restarted.pending_submissions() == ()
+    assert restarted.reconciliation_submissions() == (submission,)
+    with pytest.raises(IneligibleWorkOrderError):
+        restarted.mark_dispatched(submission.submission_id, at=NOW)
+    receipt = restarted.attach_receipt(submission.submission_id, "late-run")
+    assert receipt.dagster_run_id == DagsterRunId("late-run")
+    assert restarted.reconciliation_submissions() == ()
+    assert restarted.attempt(attempt.attempt_id).closed_at == NOW
+    assert restarted.work_order_snapshot("WO-1")[1] is WorkOrderState.RETIRED
+    restarted.close()
+
+
+def test_failed_application_preserves_dispatch_eligibility(tmp_path) -> None:
+    adapter = store(tmp_path)
+    attempt, submission = adapter.accept_durable(claim(adapter), request(), at=NOW)
+
+    def failed_retirement(connection):
+        connection.execute("UPDATE work_orders SET state='RETIRED' WHERE work_order_id='WO-1'")
+        raise RuntimeError("application failed")
+
+    with pytest.raises(RuntimeError):
+        adapter.apply_result(
+            ResultRecord("retire", attempt.attempt_id, "decision-sha"),
+            apply_domain_effect=failed_retirement, at=NOW,
+        )
+    assert adapter.pending_submissions() == (submission,)
+    assert adapter.reconciliation_submissions() == ()
+    assert adapter.attempt(attempt.attempt_id).closed_at is None
+    adapter.close()
