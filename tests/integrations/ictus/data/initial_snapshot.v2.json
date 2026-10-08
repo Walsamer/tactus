@@ -1,0 +1,143 @@
+{
+  "capabilities": [
+    "demo.verify"
+  ],
+  "constraints": [
+    "approval_required"
+  ],
+  "domain": "software",
+  "facts": [
+    {
+      "key": "snapshot.profile_version",
+      "value": 2
+    },
+    {
+      "key": "snapshot.phase",
+      "value": "INITIAL"
+    },
+    {
+      "key": "work_order.id",
+      "value": "WO-1"
+    },
+    {
+      "key": "work_order.state",
+      "value": "ACTIVE"
+    },
+    {
+      "key": "work_order.revision",
+      "value": 2
+    },
+    {
+      "key": "source.revision",
+      "value": "src-rev-1"
+    },
+    {
+      "key": "recovery.semantic_attempts",
+      "value": 0
+    },
+    {
+      "key": "recovery.max_semantic_attempts",
+      "value": 3
+    },
+    {
+      "key": "execution.step_retry_index",
+      "value": 0
+    },
+    {
+      "key": "capability.id",
+      "value": "demo.verify"
+    },
+    {
+      "key": "backend.descriptors",
+      "value": [
+        {
+          "agent_runtime": "local-subprocess",
+          "backend_id": "backend-a",
+          "capabilities": [
+            "demo.verify"
+          ],
+          "model": "model-x",
+          "provider": "provider-x"
+        },
+        {
+          "backend_id": "backend-b",
+          "capabilities": [
+            "demo.verify"
+          ]
+        }
+      ]
+    },
+    {
+      "key": "backend.status",
+      "value": [
+        {
+          "backend_id": "backend-a",
+          "expires_at": "2026-10-02T00:00:00Z",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "status": "AVAILABLE"
+        },
+        {
+          "backend_id": "backend-b",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "reason": "administratively excluded",
+          "status": "DISABLED"
+        }
+      ]
+    },
+    {
+      "key": "backend.quota",
+      "value": [
+        {
+          "backend_id": "backend-a",
+          "expires_at": "2026-10-02T00:00:00Z",
+          "limit": 10,
+          "observed_at": "2026-10-01T00:00:00Z",
+          "source": "provider-api",
+          "unit": "runs"
+        }
+      ]
+    },
+    {
+      "key": "backend.previous_backend",
+      "value": "backend-a"
+    },
+    {
+      "key": "authorization.grants",
+      "value": [
+        {
+          "actor": "operator-1",
+          "evidence": [
+            "sig:abc123"
+          ],
+          "expires_at": "2026-10-02T00:00:00Z",
+          "grant_id": "grant-0001",
+          "issued_at": "2026-10-01T00:00:00Z",
+          "scope": "WO-1",
+          "source_revision": "src-rev-1"
+        }
+      ]
+    },
+    {
+      "key": "domain.dependencies_satisfied",
+      "value": true
+    },
+    {
+      "key": "domain.scope_constraints",
+      "value": [
+        "src/**",
+        "tests/**"
+      ]
+    },
+    {
+      "key": "snapshot.digest",
+      "value": "a39819f242144364a89e05e824eb8a97da0a8b41770de42d234f5259296235d3"
+    }
+  ],
+  "schema_version": 1,
+  "snapshot_id": "snap-initial-0001",
+  "subject": {
+    "id": "WO-1",
+    "type": "work_order"
+  },
+  "timestamp": "2026-10-01T00:00:00Z"
+}
