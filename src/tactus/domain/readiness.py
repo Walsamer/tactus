@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import MappingProxyType
 
 from ._clock import utcnow
 from .blockers import BlockReason, Blocker
@@ -47,7 +48,7 @@ class AuthenticatedHold:
     def __post_init__(self) -> None:
         if not isinstance(self.reason, BlockReason):
             raise ValueError("hold reason must be a BlockReason")
-        object.__setattr__(self, "evidence", dict(self.evidence))
+        object.__setattr__(self, "evidence", MappingProxyType(dict(self.evidence)))
 
     def to_blocker(self) -> Blocker:
         return Blocker(
@@ -65,7 +66,8 @@ class ReadinessFacts:
 
     ``None`` means "not evaluated / unknown" for that prerequisite and never
     produces a blocker by itself. Callers pass a complete snapshot; each ``False``
-    yields a typed blocker.
+    yields a typed blocker. Every nullable prerequisite must be evaluated before
+    readiness can become READY; use True for a prerequisite that is not applicable.
 
     ``capacity_busy`` is Dagster-owned execution-concurrency state. It is
     accepted only so a caller can pass a complete snapshot and is *ignored* by
@@ -86,6 +88,20 @@ class ReadinessFacts:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "holds", tuple(self.holds))
+        for value in self.prerequisites:
+            if value is not None and type(value) is not bool:
+                raise ValueError("readiness prerequisites must be bool or None")
+
+    @property
+    def prerequisites(self) -> tuple[bool | None, ...]:
+        return (
+            self.dependencies_satisfied, self.backend_available, self.route_available,
+            self.source_current, self.integration_ready, self.delivery_ready,
+        )
+
+    @property
+    def prerequisites_known(self) -> bool:
+        return all(value is not None for value in self.prerequisites)
 
 
 def derive_blockers(
@@ -191,19 +207,14 @@ def derive_blockers(
     return tuple(blockers)
 
 
-def readiness_status(blockers: Iterable[Blocker]) -> OpenStatus:
-    """Recompute readiness from a blocker set.
+def readiness_status(
+    blockers: Iterable[Blocker], *, prerequisites_known: bool = False
+) -> OpenStatus:
+    """Known blockers take precedence; an empty set alone cannot prove readiness."""
 
-    ``BLOCKED`` while any blocker is active, ``READY`` once none remain. It
-    never yields ``UNKNOWN``: ``UNKNOWN`` means readiness has not been evaluated
-    yet.
-    """
-
-    return (
-        OpenStatus.BLOCKED
-        if any(not blocker.is_resolved for blocker in blockers)
-        else OpenStatus.READY
-    )
+    if any(not blocker.is_resolved for blocker in blockers):
+        return OpenStatus.BLOCKED
+    return OpenStatus.READY if prerequisites_known else OpenStatus.UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +236,7 @@ def evaluate_readiness(
     evaluated_at = at if at is not None else utcnow()
     blockers = derive_blockers(facts, at=evaluated_at)
     return ReadinessEvaluation(
-        status=readiness_status(blockers),
+        status=readiness_status(blockers, prerequisites_known=facts.prerequisites_known),
         blockers=blockers,
         evaluated_at=evaluated_at,
     )
@@ -245,7 +256,9 @@ def apply_readiness(
     """
 
     evaluation = evaluate_readiness(facts, at=at)
-    work_order.replace_blockers(evaluation.blockers)
+    work_order.replace_blockers(
+        evaluation.blockers, prerequisites_known=facts.prerequisites_known
+    )
     return evaluation
 
 

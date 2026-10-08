@@ -111,6 +111,7 @@ class WorkOrder:
         self._transitions: list[TransitionRecord] = []
         self._failures: list[FailureObservation] = []
         self._blockers: BlockerSet = BlockerSet()
+        self._prerequisites_known = False
 
     @classmethod
     def create(cls, work_order_id: WorkOrderId | str, title: str | None = None) -> WorkOrder:
@@ -297,6 +298,7 @@ class WorkOrder:
                 "readiness cannot be READY while typed blockers are active"
             )
         self._readiness = status
+        self._prerequisites_known = status is OpenStatus.READY
 
     # -- typed blockers and independent unblocking ------------------------
 
@@ -344,7 +346,7 @@ class WorkOrder:
         """Resolve exactly one blocker and recompute readiness.
 
         Other blockers are left untouched. Readiness only becomes ``READY`` when
-        the whole set has no active blocker left.
+        the whole set has no active blocker left and prerequisites are known.
         """
 
         self._require_open_for_readiness()
@@ -354,7 +356,9 @@ class WorkOrder:
         self.recompute_readiness()
         return resolved
 
-    def replace_blockers(self, blockers: Iterable[Blocker]) -> OpenStatus:
+    def replace_blockers(
+        self, blockers: Iterable[Blocker], *, prerequisites_known: bool = False
+    ) -> OpenStatus:
         """Atomically replace the blocker set and recompute readiness.
 
         Used by readiness re-evaluation so readiness reflects the latest
@@ -363,20 +367,24 @@ class WorkOrder:
 
         self._require_open_for_readiness()
         self._blockers.replace(blockers)
+        self._prerequisites_known = prerequisites_known
         return self.recompute_readiness()
 
     def recompute_readiness(self) -> OpenStatus:
         """Recompute ``OPEN`` readiness from the whole blocker set.
 
-        ``BLOCKED`` while any blocker is active, ``READY`` only once none
-        remain. This never yields ``UNKNOWN`` (that means "not evaluated yet")
-        and never clears a blocker on its own.
+        ``BLOCKED`` while any blocker is active. Without blockers, return
+        ``READY`` only when prerequisites are known, otherwise ``UNKNOWN``.
+        This never establishes missing facts or clears a blocker on its own.
         """
 
         self._require_open_for_readiness()
-        self._readiness = (
-            OpenStatus.BLOCKED if self._blockers.has_active else OpenStatus.READY
-        )
+        if self._blockers.has_active:
+            self._readiness = OpenStatus.BLOCKED
+        else:
+            self._readiness = (
+                OpenStatus.READY if self._prerequisites_known else OpenStatus.UNKNOWN
+            )
         return self._readiness
 
     def _require_open_for_readiness(self) -> None:
@@ -434,5 +442,6 @@ class WorkOrder:
 
         self._state = to_state
         self._readiness = readiness if to_state is WorkOrderState.OPEN else None
+        self._prerequisites_known = self._readiness is OpenStatus.READY
         self._transitions.append(record)
         return record

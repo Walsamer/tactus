@@ -28,6 +28,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
+from types import MappingProxyType
 
 from ._clock import utcnow
 from .records import TransitionAuthority
@@ -199,7 +200,7 @@ class Blocker:
         if self.resolved_at is not None and self.resolved_by is None:
             raise InvalidBlockerError("resolved_at requires resolved_by")
         object.__setattr__(self, "blocker_id", coerce_blocker_id(self.blocker_id))
-        object.__setattr__(self, "evidence", dict(self.evidence))
+        object.__setattr__(self, "evidence", MappingProxyType(dict(self.evidence)))
 
     @property
     def is_resolved(self) -> bool:
