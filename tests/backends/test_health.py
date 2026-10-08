@@ -13,17 +13,16 @@ _T0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 _T1 = _T0 + timedelta(minutes=1)
 
 
-def test_health_vocabulary_is_exactly_three_values() -> None:
+def test_health_vocabulary_is_exactly_two_observed_values() -> None:
     assert {member.value for member in BackendHealth} == {
         "AVAILABLE",
         "UNAVAILABLE",
-        "DISABLED",
     }
 
 
 def test_observation_freshness() -> None:
     authoritative = BackendStatusObservation(
-        BackendId("generic-a"), BackendHealth.DISABLED, observed_at=_T0
+        BackendId("generic-a"), BackendHealth.UNAVAILABLE, observed_at=_T0
     )
     expiring = BackendStatusObservation(
         BackendId("generic-a"), BackendHealth.AVAILABLE, observed_at=_T0, expires_at=_T1
@@ -67,12 +66,12 @@ def test_expires_at_none_is_authoritative_until_superseded() -> None:
     model = BackendHealthModel()
     model.record(
         BackendStatusObservation(
-            BackendId("generic-a"), BackendHealth.DISABLED, observed_at=_T0
+            BackendId("generic-a"), BackendHealth.UNAVAILABLE, observed_at=_T0
         )
     )
 
     assert model.effective_status("generic-a", at=_T0 + timedelta(days=365)) is (
-        BackendHealth.DISABLED
+        BackendHealth.UNAVAILABLE
     )
 
 
@@ -106,7 +105,7 @@ def test_out_of_order_observation_does_not_overwrite_newer_state() -> None:
     assert model.history("generic-a") == (newer, older)
 
 
-def test_disable_supersedes_availability() -> None:
+def test_unavailable_observation_supersedes_availability() -> None:
     model = BackendHealthModel()
     model.record(
         BackendStatusObservation(BackendId("generic-a"), BackendHealth.AVAILABLE, _T0)
@@ -114,10 +113,10 @@ def test_disable_supersedes_availability() -> None:
     model.record(
         BackendStatusObservation(
             BackendId("generic-a"),
-            BackendHealth.DISABLED,
+            BackendHealth.UNAVAILABLE,
             _T0 + timedelta(minutes=1),
-            reason="operator disabled",
+            reason="probe failed",
         )
     )
 
-    assert model.effective_status("generic-a", at=_T0) is BackendHealth.DISABLED
+    assert model.effective_status("generic-a", at=_T0) is BackendHealth.UNAVAILABLE

@@ -111,6 +111,14 @@ def test_compatible_treats_optional_fields_as_hard_constraints() -> None:
     assert [descriptor.backend_id.value for descriptor in compatible] == ["generic-a"]
 
 
+def test_descriptor_preserves_supplied_constraints() -> None:
+    descriptor = BackendDescriptor(
+        BackendId("generic-a"), constraints=frozenset({"workspace:repo"})
+    )
+
+    assert descriptor.constraints == frozenset({"workspace:repo"})
+
+
 def test_unspecified_requirement_is_unconstrained() -> None:
     registry = BackendRegistry(
         [
