@@ -27,14 +27,16 @@ FACT_BACKEND_PROVIDER_QUOTA = "backend.provider_quota"
 UNKNOWN_HEALTH = "UNKNOWN"
 
 
+def _normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _to_rfc3339(value: datetime | None) -> str | None:
     if value is None:
         return None
-    normalized = value
-    if normalized.tzinfo is None:
-        normalized = normalized.replace(tzinfo=timezone.utc)
-    normalized = normalized.astimezone(timezone.utc)
-    return normalized.isoformat().replace("+00:00", "Z")
+    return _normalize_datetime(value).isoformat().replace("+00:00", "Z")
 
 
 def _non_empty(value: str, field: str) -> str:
@@ -174,11 +176,19 @@ class BackendHealthFact:
         )
         object.__setattr__(self, "reason", _optional_non_empty(self.reason, "reason"))
 
-    def to_fact(self) -> dict[str, Any]:
+    def to_fact(self, *, effective_at: datetime | None = None) -> dict[str, Any]:
+        health = self.health
+        if (
+            health is not None
+            and effective_at is not None
+            and self.expires_at is not None
+            and _normalize_datetime(effective_at) >= _normalize_datetime(self.expires_at)
+        ):
+            health = None
         return {
             "schema_version": self.schema_version,
             "backend_id": self.backend.value,
-            "health": self.health.value if self.health is not None else UNKNOWN_HEALTH,
+            "health": health.value if health is not None else UNKNOWN_HEALTH,
             "provenance": self.provenance,
             "observed_at": _to_rfc3339(self.observed_at),
             "expires_at": _to_rfc3339(self.expires_at),

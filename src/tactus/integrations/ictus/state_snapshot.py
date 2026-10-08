@@ -230,7 +230,10 @@ def build_state_snapshot(
     )
     resolved_domain = _require_non_empty(domain, "domain")
     resolved_subject_type = _require_non_empty(subject_type, "subject_type")
-    resolved_timestamp = _to_rfc3339(timestamp if timestamp is not None else utcnow())
+    resolved_timestamp_instant = _normalize_datetime(
+        timestamp if timestamp is not None else utcnow()
+    )
+    resolved_timestamp = _to_rfc3339(resolved_timestamp_instant)
 
     capabilities: list[str] = []
     facts: list[dict[str, Any]] = []
@@ -304,7 +307,10 @@ def build_state_snapshot(
             },
             {
                 "key": FACT_BACKEND_HEALTH,
-                "value": [record.to_fact() for record in backends.health],
+                "value": [
+                    record.to_fact(effective_at=resolved_timestamp_instant)
+                    for record in backends.health
+                ],
             },
             {
                 "key": FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT,
@@ -366,17 +372,20 @@ def _require_non_empty(value: str, label: str) -> str:
     return value.strip()
 
 
-def _to_rfc3339(value: datetime) -> str:
-    """Serialize a datetime as an RFC 3339 / ISO 8601 UTC instant.
-
-    Naive datetimes are interpreted as UTC; the schema requires a ``date-time``.
-    """
+def _normalize_datetime(value: datetime) -> datetime:
+    """Normalize a datetime to UTC, interpreting naive datetimes as UTC."""
 
     if not isinstance(value, datetime):
         raise StateSnapshotContractError("timestamp must be a datetime")
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return value.astimezone(timezone.utc)
+
+
+def _to_rfc3339(value: datetime) -> str:
+    """Serialize a datetime as an RFC 3339 / ISO 8601 UTC instant."""
+
+    return _normalize_datetime(value).isoformat().replace("+00:00", "Z")
 
 
 def _evidence_to_json(ref: EvidenceRef) -> dict[str, str]:
