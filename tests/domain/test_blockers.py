@@ -12,6 +12,7 @@ These tests pin the domain contract for issue #3:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -45,6 +46,10 @@ from tactus.domain import (
 
 _NOON = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 _LATER = datetime(2026, 1, 1, 13, 0, tzinfo=timezone.utc)
+_READY_FACTS = ReadinessFacts(
+    dependencies_satisfied=True, backend_available=True, route_available=True,
+    source_current=True, integration_ready=True, delivery_ready=True,
+)
 
 _REQUIRED_REASONS = {
     "DEPENDENCY",
@@ -191,6 +196,7 @@ def test_resolving_one_blocker_leaves_the_other_active() -> None:
 
 def test_resolving_the_last_blocker_recomputes_readiness_ready() -> None:
     work_order = open_work_order()
+    apply_readiness(work_order, _READY_FACTS)
     first = work_order.add_blocker(blocker(BlockReason.DEPENDENCY, "b1"))
     second = work_order.add_blocker(blocker(BlockReason.SOURCE_CHANGED, "b2"))
 
@@ -234,12 +240,12 @@ def test_set_readiness_ready_is_refused_while_a_blocker_is_active() -> None:
     assert work_order.readiness is OpenStatus.BLOCKED
 
 
-def test_recompute_readiness_never_yields_unknown() -> None:
+def test_recompute_readiness_preserves_unknown_prerequisites() -> None:
     work_order = open_work_order()
     assert work_order.readiness is OpenStatus.UNKNOWN
 
-    # Re-evaluation with no blockers resolves to READY, not UNKNOWN.
-    assert work_order.recompute_readiness() is OpenStatus.READY
+    # Absence of blockers is not evidence that prerequisites were evaluated.
+    assert work_order.recompute_readiness() is OpenStatus.UNKNOWN
 
 
 def test_unknown_never_admits_execution() -> None:
@@ -291,6 +297,8 @@ def test_busy_capacity_alone_is_not_a_blocker() -> None:
         backend_available=True,
         route_available=True,
         source_current=True,
+        integration_ready=True,
+        delivery_ready=True,
         capacity_busy=True,  # Dagster-owned; must be ignored
     )
 
@@ -326,7 +334,7 @@ def test_facts_cover_dependency_backend_human_integration_and_delivery() -> None
 
 def test_unset_facts_alone_do_not_block() -> None:
     assert derive_blockers(ReadinessFacts(), at=_NOON) == ()
-    assert readiness_status(()) is OpenStatus.READY
+    assert readiness_status(()) is OpenStatus.UNKNOWN
 
 
 def test_no_validated_route_produces_backend_unavailable() -> None:
@@ -363,6 +371,7 @@ def test_authenticated_hold_becomes_a_typed_blocker() -> None:
 
 def test_replace_blockers_is_independent_of_previous_resolution() -> None:
     work_order = open_work_order()
+    apply_readiness(work_order, _READY_FACTS)
     stale = work_order.add_blocker(blocker(BlockReason.SOURCE_CHANGED, "b1"))
     work_order.resolve_blocker(stale.blocker_id, at=_LATER)
     assert work_order.readiness is OpenStatus.READY
@@ -428,3 +437,68 @@ def test_domain_blocker_api_has_no_backend_ranking_or_recovery_selector() -> Non
             assert banned not in lowered, (
                 f"tactus.domain must not expose selection policy: {name}"
             )
+
+
+@pytest.mark.parametrize("missing", [
+    "dependencies_satisfied", "backend_available", "route_available",
+    "source_current", "integration_ready", "delivery_ready",
+])
+def test_each_unknown_prerequisite_prevents_claim(missing) -> None:
+    order = open_work_order()
+    apply_readiness(order, _READY_FACTS)
+    evaluation = apply_readiness(order, replace(_READY_FACTS, **{missing: None}))
+    assert evaluation.status is OpenStatus.UNKNOWN
+    assert order.recompute_readiness() is OpenStatus.UNKNOWN
+    with pytest.raises(IllegalTransitionError):
+        order.claim(reason="unevaluated prerequisite")
+
+
+def test_empty_snapshot_does_not_authorize_execution() -> None:
+    order = open_work_order()
+    assert apply_readiness(order, ReadinessFacts()).status is OpenStatus.UNKNOWN
+    with pytest.raises(IllegalTransitionError):
+        order.claim(reason="no facts")
+
+
+def test_clearing_last_blocker_preserves_unknown_prerequisites() -> None:
+    order = open_work_order()
+    evaluation = apply_readiness(order, ReadinessFacts(source_current=False))
+    assert evaluation.status is OpenStatus.BLOCKED
+    order.resolve_blocker(order.active_blockers[0].blocker_id)
+    assert order.readiness is OpenStatus.UNKNOWN
+    with pytest.raises(IllegalTransitionError):
+        order.claim(reason="other prerequisites still unknown")
+    assert apply_readiness(order, _READY_FACTS).status is OpenStatus.READY
+    order.claim(reason="all prerequisites checked")
+
+
+def test_bare_blocker_replacement_cannot_assert_prerequisites() -> None:
+    order = open_work_order()
+    apply_readiness(order, _READY_FACTS)
+    assert order.replace_blockers(()) is OpenStatus.UNKNOWN
+
+
+@pytest.mark.parametrize("invalid", ["true", 1, 0, [], {}])
+def test_invalid_prerequisite_fails_closed(invalid) -> None:
+    with pytest.raises(ValueError):
+        replace(_READY_FACTS, source_current=invalid)
+
+
+@pytest.mark.parametrize("factory", [Blocker, AuthenticatedHold])
+def test_evidence_is_an_immutable_snapshot(factory) -> None:
+    evidence = {"upstream": "original"}
+    record = factory(reason=BlockReason.DEPENDENCY, evidence=evidence)
+    evidence["upstream"] = "changed input"
+    with pytest.raises(TypeError):
+        record.evidence["upstream"] = "rewritten"
+    assert record.evidence == {"upstream": "original"}
+    if isinstance(record, AuthenticatedHold):
+        record = record.to_blocker()
+    order = open_work_order()
+    order.add_blocker(record)
+    with pytest.raises(TypeError):
+        order.blockers[0].evidence["upstream"] = "rewritten through entity"
+    resolved = order.resolve_blocker(record.blocker_id, at=_LATER)
+    with pytest.raises(TypeError):
+        resolved.evidence["upstream"] = "rewritten after resolution"
+    assert resolved.evidence == {"upstream": "original"}
