@@ -77,7 +77,66 @@ Optional: `facts`, `capabilities`, `constraints`.
     { "key": "attempt.number", "value": 1 },
     { "key": "recovery.semantic_attempts", "value": 3 },
     { "key": "capability.id", "value": "demo.verify" },
-    { "key": "backend.available_candidates", "value": ["backend-a", "backend-b"] },
+    {
+      "key": "backend.descriptors",
+      "value": [
+        {
+          "schema_version": 1,
+          "backend_id": "backend-a",
+          "capabilities": ["shell"],
+          "runtime": "local",
+          "model": "model-a",
+          "provider": "provider-a",
+          "constraints": ["workspace:repo"],
+          "provenance": "declaration",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "expires_at": null
+        }
+      ]
+    },
+    {
+      "key": "backend.health",
+      "value": [
+        {
+          "schema_version": 1,
+          "backend_id": "backend-a",
+          "health": "AVAILABLE",
+          "provenance": "probe",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "expires_at": "2026-10-01T00:05:00Z",
+          "reason": null
+        }
+      ]
+    },
+    {
+      "key": "backend.administrative_enablement",
+      "value": [
+        {
+          "schema_version": 1,
+          "backend_id": "backend-a",
+          "enabled": true,
+          "provenance": "operator",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "expires_at": null,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "key": "backend.provider_quota",
+      "value": [
+        {
+          "schema_version": 1,
+          "backend_id": "backend-a",
+          "limit": 10,
+          "unit": "requests_per_minute",
+          "provenance": "provider_api",
+          "observed_at": "2026-10-01T00:00:00Z",
+          "expires_at": "2026-10-01T00:01:00Z",
+          "reason": null
+        }
+      ]
+    },
     { "key": "backend.previous_backend", "value": "backend-a" },
     { "key": "domain.dependencies_satisfied", "value": true },
     { "key": "domain.scope_constraints", "value": ["src/**"] }
@@ -121,8 +180,11 @@ adapter's declared vocabulary is:
 | `attempt.number` | integer | attempt history | **Dagster micro-retry** attempt index (backend-owned). |
 | `recovery.semantic_attempts` | integer | recovery history | **Semantic** execution-attempt / recovery count. |
 | `capability.id` | string | capability facts | Capability to (re-)execute. |
-| `backend.available_candidates` | array of strings | backend facts | Backends available as candidates; no ranking. |
-| `backend.previous_backend` | string | backend facts | Backend previously used, if any (omitted otherwise). |
+| `backend.descriptors` | array of descriptor records | backend facts | Raw backend declarations: `schema_version`, stable `backend_id`, capabilities, provider/runtime/model, supplied constraints, provenance, `observed_at` and `expires_at`; no compatibility filtering or ranking. |
+| `backend.health` | array of health records | backend facts | Latest observed health per backend. `health` is `AVAILABLE`, `UNAVAILABLE` or explicit `UNKNOWN` when absent/expired; administrative disablement is not encoded here. |
+| `backend.administrative_enablement` | array of enablement records | backend facts | Operator/admin enablement per backend, independent from observed health. |
+| `backend.provider_quota` | array of quota records | backend facts | Externally reported provider quota/capacity. This is not Dagster concurrency and contains no worker-slot occupancy. |
+| `backend.previous_backend` | string | recovery/context facts | Backend previously used, if any (omitted otherwise). This records history only and does not imply preference, compatibility or permission to reuse it. |
 | `domain.dependencies_satisfied` | boolean | domain facts | Dependency-satisfaction fact (omitted when unknown). |
 | `domain.scope_constraints` | array of strings | domain facts | Declared scope constraints for the Work Order. |
 

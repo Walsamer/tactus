@@ -53,7 +53,7 @@ def test_compatible_ignores_status_and_capacity() -> None:
     )
     health = BackendHealthModel()
     health.record(
-        BackendStatusObservation(backend_id, BackendHealth.DISABLED, observed_at=_T0)
+        BackendStatusObservation(backend_id, BackendHealth.UNAVAILABLE, observed_at=_T0)
     )
     capacity = ProviderCapacityModel()
     capacity.record(
@@ -62,7 +62,7 @@ def test_compatible_ignores_status_and_capacity() -> None:
 
     requirements = BackendRequirements(required_capabilities=frozenset({"shell"}))
 
-    # Disabled status and a zero provider-reported limit change nothing about
+    # Unavailable status and a zero provider-reported limit change nothing about
     # factual compatibility.
     assert [d.backend_id for d in registry.compatible(requirements)] == [backend_id]
 

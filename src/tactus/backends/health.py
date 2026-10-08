@@ -1,19 +1,15 @@
-"""Backend status (health) model.
+"""Backend health observation model.
 
-Backend status is factual, volatile system state — observed independently of
-any Work Order and of any execution attempt. It is deliberately separate from
-provider capacity and quota:
+Backend health is factual, volatile system state observed independently of any
+Work Order and of any execution attempt. It is deliberately separate from both
+provider capacity/quota and administrative enablement:
 
-* status            -> ``AVAILABLE`` / ``UNAVAILABLE`` / ``DISABLED``
+* health            -> ``AVAILABLE`` / ``UNAVAILABLE`` probe/runtime fact
+* admin enablement  -> operator-controlled fact serialized separately
 * provider capacity -> externally reported limits/quota/GPU availability
                        (see :mod:`tactus.backends.capacity`)
 * execution concurrency -> Dagster-owned (max concurrent runs, pool slots,
                        queued runs); deliberately **not** modelled here
-
-``DISABLED`` is administrative, not a health condition, which is why the
-observation type is named :class:`BackendStatusObservation` rather than
-``HealthObservation``: it covers both probe-derived and operator-controlled
-state.
 """
 
 from __future__ import annotations
@@ -26,17 +22,17 @@ from .registry import BackendId, coerce_backend_id
 
 
 class BackendHealth(str, Enum):
-    """Small, precise status vocabulary.
+    """Small, precise observed-health vocabulary.
 
-    ``AVAILABLE`` — operational.
-    ``UNAVAILABLE`` — currently not operational; must not receive work.
-    ``DISABLED`` — administratively excluded until explicitly re-enabled or
-    superseded.
+    ``AVAILABLE`` — observed operational.
+    ``UNAVAILABLE`` — observed not operational.
+
+    Administrative disablement is not health and is serialized as a separate
+    ``backend.administrative_enablement`` fact.
     """
 
     AVAILABLE = "AVAILABLE"
     UNAVAILABLE = "UNAVAILABLE"
-    DISABLED = "DISABLED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +40,8 @@ class BackendStatusObservation:
     """A status observation with explicit freshness semantics.
 
     ``expires_at is None`` means the observation is authoritative until
-    superseded (for example an operator ``DISABLED``). There is deliberately no
-    default TTL: freshness policy belongs to each observation producer.
+    superseded. There is deliberately no default TTL: freshness policy belongs
+    to each observation producer.
     """
 
     backend: BackendId

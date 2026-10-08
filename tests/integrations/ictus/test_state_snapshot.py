@@ -19,11 +19,22 @@ from typing import Any
 import pytest
 
 import tactus.integrations.ictus.state_snapshot as state_snapshot
+from tactus.backends import (
+    BackendAdministrativeEnablementFact,
+    BackendDescriptorFact,
+    BackendHealth,
+    BackendHealthFact,
+    BackendId,
+    BackendProviderQuotaFact,
+)
 from tactus.domain import OpenStatus, WorkOrder, WorkOrderState
 from tactus.integrations.ictus import (
     FACT_ATTEMPT_NUMBER,
-    FACT_BACKEND_AVAILABLE_CANDIDATES,
+    FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT,
+    FACT_BACKEND_DESCRIPTORS,
+    FACT_BACKEND_HEALTH,
     FACT_BACKEND_PREVIOUS_BACKEND,
+    FACT_BACKEND_PROVIDER_QUOTA,
     FACT_CAPABILITY_ID,
     FACT_DOMAIN_DEPENDENCIES_SATISFIED,
     FACT_DOMAIN_SCOPE_CONSTRAINTS,
@@ -170,7 +181,50 @@ def test_full_snapshot_is_valid_ictus_state_snapshot_v1() -> None:
             dagster_micro_retry_attempt=1, semantic_attempts=3
         ),
         backend_facts=BackendFacts(
-            available_candidates=("backend-a", "backend-b"),
+            descriptors=(
+                BackendDescriptorFact(
+                    BackendId("backend-a"),
+                    capabilities=("shell",),
+                    runtime="local",
+                    model="model-a",
+                    provider="provider-a",
+                    constraints=("workspace:repo",),
+                    provenance="declaration",
+                    observed_at=_TIMESTAMP,
+                ),
+                BackendDescriptorFact(
+                    BackendId("backend-b"),
+                    capabilities=("git", "shell"),
+                    provenance="declaration",
+                    observed_at=_TIMESTAMP,
+                ),
+            ),
+            health=(
+                BackendHealthFact(
+                    BackendId("backend-a"),
+                    BackendHealth.AVAILABLE,
+                    provenance="probe",
+                    observed_at=_TIMESTAMP,
+                ),
+            ),
+            administrative_enablement=(
+                BackendAdministrativeEnablementFact(
+                    BackendId("backend-a"),
+                    enabled=False,
+                    provenance="operator",
+                    observed_at=_TIMESTAMP,
+                    reason="maintenance",
+                ),
+            ),
+            provider_quota=(
+                BackendProviderQuotaFact(
+                    BackendId("backend-a"),
+                    limit=10,
+                    unit="requests_per_minute",
+                    provenance="provider_api",
+                    observed_at=_TIMESTAMP,
+                ),
+            ),
             previous_backend="backend-a",
         ),
         dependencies_satisfied=False,
@@ -184,7 +238,35 @@ def test_full_snapshot_is_valid_ictus_state_snapshot_v1() -> None:
 
     facts = _facts(payload)
     assert facts[FACT_CAPABILITY_ID] == "demo.verify"
-    assert facts[FACT_BACKEND_AVAILABLE_CANDIDATES] == ["backend-a", "backend-b"]
+    assert facts[FACT_BACKEND_DESCRIPTORS] == [
+        {
+            "schema_version": 1,
+            "backend_id": "backend-a",
+            "capabilities": ["shell"],
+            "runtime": "local",
+            "model": "model-a",
+            "provider": "provider-a",
+            "constraints": ["workspace:repo"],
+            "provenance": "declaration",
+            "observed_at": "2026-10-01T00:00:00Z",
+            "expires_at": None,
+        },
+        {
+            "schema_version": 1,
+            "backend_id": "backend-b",
+            "capabilities": ["git", "shell"],
+            "runtime": None,
+            "model": None,
+            "provider": None,
+            "constraints": [],
+            "provenance": "declaration",
+            "observed_at": "2026-10-01T00:00:00Z",
+            "expires_at": None,
+        },
+    ]
+    assert facts[FACT_BACKEND_HEALTH][0]["health"] == "AVAILABLE"
+    assert facts[FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT][0]["enabled"] is False
+    assert facts[FACT_BACKEND_PROVIDER_QUOTA][0]["limit"] == 10
     assert facts[FACT_BACKEND_PREVIOUS_BACKEND] == "backend-a"
     assert facts[FACT_DOMAIN_DEPENDENCIES_SATISFIED] is False
     assert facts[FACT_DOMAIN_SCOPE_CONSTRAINTS] == ["src/**", "tests/**"]
@@ -193,7 +275,9 @@ def test_full_snapshot_is_valid_ictus_state_snapshot_v1() -> None:
 def test_snapshot_is_json_serializable() -> None:
     payload = _build(
         capability_id="demo.verify",
-        backend_facts=BackendFacts(available_candidates=("backend-a",)),
+        backend_facts=BackendFacts(
+            descriptors=(BackendDescriptorFact(BackendId("backend-a")),),
+        ),
         constraints=("approval_required",),
     )
 
@@ -367,7 +451,9 @@ def test_adapter_does_not_mutate_work_order_lifecycle() -> None:
         timestamp=_TIMESTAMP,
         capability_id="demo.verify",
         attempt_history=AttemptHistory(semantic_attempts=5),
-        backend_facts=BackendFacts(available_candidates=("backend-a",)),
+        backend_facts=BackendFacts(
+            descriptors=(BackendDescriptorFact(BackendId("backend-a")),),
+        ),
         constraints=("approval_required",),
     )
 
@@ -408,7 +494,9 @@ def test_snapshot_contains_no_work_order_or_persistence_object() -> None:
     # JSON values may appear.
     payload = _build(
         capability_id="demo.verify",
-        backend_facts=BackendFacts(available_candidates=("backend-a",)),
+        backend_facts=BackendFacts(
+            descriptors=(BackendDescriptorFact(BackendId("backend-a")),),
+        ),
     )
 
     for value in _walk(payload):

@@ -62,6 +62,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from tactus.backends import (
+    FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT,
+    FACT_BACKEND_DESCRIPTORS,
+    FACT_BACKEND_HEALTH,
+    FACT_BACKEND_PROVIDER_QUOTA,
+    BackendAdministrativeEnablementFact,
+    BackendDescriptorFact,
+    BackendHealthFact,
+    BackendProviderQuotaFact,
+)
 from tactus.domain._clock import utcnow
 from tactus.domain.work_order import WorkOrder
 
@@ -95,7 +105,6 @@ FACT_WORK_ORDER_READINESS = "work_order.readiness"
 FACT_ATTEMPT_NUMBER = "attempt.number"
 FACT_RECOVERY_SEMANTIC_ATTEMPTS = "recovery.semantic_attempts"
 FACT_CAPABILITY_ID = "capability.id"
-FACT_BACKEND_AVAILABLE_CANDIDATES = "backend.available_candidates"
 FACT_BACKEND_PREVIOUS_BACKEND = "backend.previous_backend"
 FACT_DOMAIN_DEPENDENCIES_SATISFIED = "domain.dependencies_satisfied"
 FACT_DOMAIN_SCOPE_CONSTRAINTS = "domain.scope_constraints"
@@ -136,23 +145,47 @@ class AttemptHistory:
 
 @dataclass(frozen=True, slots=True)
 class BackendFacts:
-    """Backend availability facts consumed by the decision plane.
+    """Raw backend facts consumed by the decision plane.
 
-    Selection/ranking policy is not encoded here and never in the snapshot;
-    this records only which backends are available as candidates and which
-    backend (if any) was previously used.
+    Selection/ranking policy is not encoded here and never in the snapshot.
+    Descriptor, health, administrative enablement and provider-quota facts are
+    emitted as raw versioned records. ``previous_backend`` is preserved as a
+    separate recovery/context fact: it records what was used before, not a
+    preference, permission or compatibility decision.
     """
 
-    available_candidates: tuple[str, ...] = ()
+    descriptors: tuple[BackendDescriptorFact, ...] = ()
+    health: tuple[BackendHealthFact, ...] = ()
+    administrative_enablement: tuple[BackendAdministrativeEnablementFact, ...] = ()
+    provider_quota: tuple[BackendProviderQuotaFact, ...] = ()
     previous_backend: str | None = None
 
     def __post_init__(self) -> None:
-        candidates = tuple(self.available_candidates)
-        for candidate in candidates:
-            _require_non_empty(candidate, "backend candidate id")
+        object.__setattr__(self, "descriptors", tuple(self.descriptors))
+        object.__setattr__(self, "health", tuple(self.health))
+        object.__setattr__(
+            self,
+            "administrative_enablement",
+            tuple(self.administrative_enablement),
+        )
+        object.__setattr__(self, "provider_quota", tuple(self.provider_quota))
+        for collection_name, collection, expected_type in (
+            ("descriptors", self.descriptors, BackendDescriptorFact),
+            ("health", self.health, BackendHealthFact),
+            (
+                "administrative_enablement",
+                self.administrative_enablement,
+                BackendAdministrativeEnablementFact,
+            ),
+            ("provider_quota", self.provider_quota, BackendProviderQuotaFact),
+        ):
+            for record in collection:
+                if not isinstance(record, expected_type):
+                    raise StateSnapshotContractError(
+                        f"{collection_name} entries must be {expected_type.__name__}"
+                    )
         if self.previous_backend is not None:
             _require_non_empty(self.previous_backend, "previous_backend")
-        object.__setattr__(self, "available_candidates", candidates)
 
 
 def build_state_snapshot(
@@ -261,13 +294,30 @@ def build_state_snapshot(
         facts.append({"key": FACT_CAPABILITY_ID, "value": resolved_capability})
         capabilities.append(resolved_capability)
 
-    # -- backend availability facts --------------------------------------
+    # -- raw backend facts ------------------------------------------------
     backends = backend_facts if backend_facts is not None else BackendFacts()
-    facts.append(
-        {
-            "key": FACT_BACKEND_AVAILABLE_CANDIDATES,
-            "value": list(backends.available_candidates),
-        }
+    facts.extend(
+        (
+            {
+                "key": FACT_BACKEND_DESCRIPTORS,
+                "value": [record.to_fact() for record in backends.descriptors],
+            },
+            {
+                "key": FACT_BACKEND_HEALTH,
+                "value": [record.to_fact() for record in backends.health],
+            },
+            {
+                "key": FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT,
+                "value": [
+                    record.to_fact()
+                    for record in backends.administrative_enablement
+                ],
+            },
+            {
+                "key": FACT_BACKEND_PROVIDER_QUOTA,
+                "value": [record.to_fact() for record in backends.provider_quota],
+            },
+        )
     )
     if backends.previous_backend is not None:
         facts.append(
@@ -347,8 +397,11 @@ def _evidence_to_json(ref: EvidenceRef) -> dict[str, str]:
 __all__ = [
     "DEFAULT_DOMAIN",
     "FACT_ATTEMPT_NUMBER",
-    "FACT_BACKEND_AVAILABLE_CANDIDATES",
+    "FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT",
+    "FACT_BACKEND_DESCRIPTORS",
+    "FACT_BACKEND_HEALTH",
     "FACT_BACKEND_PREVIOUS_BACKEND",
+    "FACT_BACKEND_PROVIDER_QUOTA",
     "FACT_CAPABILITY_ID",
     "FACT_DOMAIN_DEPENDENCIES_SATISFIED",
     "FACT_DOMAIN_SCOPE_CONSTRAINTS",
