@@ -11,6 +11,12 @@ This package holds both directions of the Tactus/Ictus contract edge:
   :mod:`tactus.integrations.ictus.facts`): Tactus assembles the domain-neutral
   state a ``DecisionProvider`` consumes for first execution (``INITIAL``) and
   recovery (``RECOVERY``). The adapter decides nothing; Ictus owns all policy.
+* the **inbound** generic ``DecisionProposal`` decision boundary
+  (:mod:`tactus.integrations.ictus.decisions`): Ictus produces the validated
+  generic semantic decision (``REEXECUTE``/``ROUTE``/``DECOMPOSE``/``ESCALATE``/
+  ``ABORT``/``EXECUTE_CAPABILITY``), Tactus validates the decision-relevant part
+  fail-closed and applies the Work Order effect (:mod:`tactus.domain.decision_application`).
+  Unknown tokens fail closed; Tactus never decides.
 
 Ownership boundary (normative)::
 
@@ -37,6 +43,15 @@ represented on the ``StateSnapshot`` facts/context surface; they are never
 disguised as execution observations.
 """
 
+from .decisions import (
+    LEGACY_DECISION_SCHEMA_VERSION,
+    SUPPORTED_DECISION_SCHEMA_VERSION,
+    DecisionContractError,
+    MalformedDecisionError,
+    UnknownDecisionError,
+    UnsupportedDecisionVersionError,
+    parse_decision,
+)
 from .facts import (
     LEGACY_FACT_ATTEMPT_NUMBER,
     LEGACY_FACT_RETRY_ATTEMPT,
@@ -150,15 +165,19 @@ __all__ = [
     "LEGACY_FACT_RETRY_ATTEMPT",
     "LEGACY_FACT_RETRY_BUDGET",
     "STATE_SNAPSHOT_SCHEMA",
+    "LEGACY_DECISION_SCHEMA_VERSION",
     "SUPPORTED_SCHEMA_VERSION",
     "SUPPORTED_SNAPSHOT_PROFILE_VERSION",
     "SUPPORTED_SNAPSHOT_SCHEMA_VERSION",
+    "SUPPORTED_DECISION_SCHEMA_VERSION",
     "WORK_ORDER_SUBJECT_TYPE",
     "AttemptHistory",
     "AuthorizationGrant",
     "BackendFacts",
+    "DecisionContractError",
     "EvidenceRef",
     "IctusObservationCategory",
+    "MalformedDecisionError",
     "MalformedObservationError",
     "MalformedSnapshotError",
     "ObservationContractError",
@@ -167,7 +186,9 @@ __all__ = [
     "StateSnapshotContractError",
     "StepRetryDiagnostic",
     "TactusObservation",
+    "UnknownDecisionError",
     "UnknownObservationCategoryError",
+    "UnsupportedDecisionVersionError",
     "UnsupportedObservationVersionError",
     "UnsupportedSnapshotProfileError",
     "UnsupportedSnapshotVersionError",
@@ -177,6 +198,7 @@ __all__ = [
     "backend_status_fact",
     "build_state_snapshot",
     "compute_snapshot_digest",
+    "parse_decision",
     "parse_observation",
     "semantic_budget_from_legacy",
     "translate_legacy_budget_facts",
