@@ -96,7 +96,7 @@ domain concepts through execution.
 | Item | Value |
 |---|---|
 | Ictus repository | `Walsamer/ictus` |
-| Pinned commit | `833175d` |
+| Pinned commit | `e823000c9255b959c2c9516ed4ee85eb13150df2` |
 | `ExecutionObservation` schema | `contracts/observation.schema.json` |
 | Supported `schema_version` | `1` |
 
