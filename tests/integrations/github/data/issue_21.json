@@ -1,0 +1,28 @@
+{
+  "repository": {
+    "id": 1404239931,
+    "owner": "walsamer",
+    "name": "tactus",
+    "url": "https://github.com/walsamer/tactus"
+  },
+  "issue": {
+    "number": 21,
+    "url": "https://github.com/walsamer/tactus/issues/21",
+    "title": "Ingest a checked GitHub Issue revision into a Tactus WorkOrder",
+    "body": "## Objective\n\nProvide the minimal successor WorkSource path needed for the first vertical slice with immutable Issue provenance.\n\n## Acceptance criteria\n\n- [ ] Persist every required source field and exact-body/specification hashes from the baseline contract.\n- [ ] Same revision import is idempotent; edited source does not silently rewrite a running or approved WorkOrder.\n- [ ] Readiness/authorization and freshness are rechecked at claim/dispatch; stale/unavailable source causes a typed hold.\n- [ ] Children preserve parent Issue provenance; completing one child does not close the Issue.\n",
+    "state": "open",
+    "updated_at": "2026-10-10T14:35:38Z",
+    "labels": [
+      "area:control-plane",
+      "fleet:ready",
+      "priority:p0",
+      "type:integration"
+    ],
+    "dependencies": [
+      "https://github.com/walsamer/tactus/issues/3",
+      "https://github.com/walsamer/tactus/issues/4"
+    ],
+    "author": "walsamer",
+    "milestone": null
+  }
+}
