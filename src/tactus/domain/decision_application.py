@@ -43,13 +43,14 @@ and a generic block reason can be attached when #3 lands.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from ._clock import utcnow
 from .decisions import DecisionKind, RouteConstraints, SemanticDecision
+from .human_intervention import HumanInterventionRequest, InterventionReason
 from .records import TransitionAuthority, TransitionRecord
 from .work_order import OpenStatus, WorkOrder, WorkOrderId, WorkOrderState
 
@@ -98,38 +99,6 @@ DECISION_EFFECTS: dict[DecisionKind, DecisionEffect] = {
     DecisionKind.ABORT: DecisionEffect.RETIRE_ABORTED,
     DecisionKind.DECOMPOSE: DecisionEffect.RETIRE_DECOMPOSED,
 }
-
-
-# -- typed human-intervention effect ---------------------------------------
-
-
-class InterventionReason(str, Enum):
-    """The typed human-intervention reasons (Tactus human/domain coordination).
-
-    Mirrors the vocabulary in ``docs/architecture/HUMAN_INTERVENTION.md``. This
-    is a Tactus-owned coordination record, not an Ictus decision.
-    """
-
-    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
-    CLARIFICATION_REQUIRED = "CLARIFICATION_REQUIRED"
-    SECRET_REQUIRED = "SECRET_REQUIRED"
-    EXTERNAL_INPUT_REQUIRED = "EXTERNAL_INPUT_REQUIRED"
-    MANUAL_SELECTION_REQUIRED = "MANUAL_SELECTION_REQUIRED"
-    UNRESOLVED_RECOVERY = "UNRESOLVED_RECOVERY"
-    SCOPE_CHANGE_REQUIRED = "SCOPE_CHANGE_REQUIRED"
-    OTHER = "OTHER"
-
-
-@dataclass(frozen=True, slots=True)
-class HumanInterventionRequest:
-    """A typed, durable human-intervention request created by an ``ESCALATE``."""
-
-    intervention_id: str
-    work_order_id: WorkOrderId
-    reason: InterventionReason
-    summary: str
-    requested_action: str | None = None
-    created_at: datetime = field(default_factory=utcnow)
 
 
 # -- bounded child plan effect ---------------------------------------------
@@ -290,6 +259,7 @@ class DecisionApplier:
         *,
         child_plan: ChildPlan | None = None,
         intervention_reason: InterventionReason = InterventionReason.UNRESOLVED_RECOVERY,
+        intervention_request: HumanInterventionRequest | None = None,
         at: datetime | None = None,
     ) -> DecisionApplicationRecord:
         """Apply ``decision`` to ``work_order`` and emit an audit record.
@@ -297,7 +267,9 @@ class DecisionApplier:
         Recovery decisions require an ``ACTIVE`` Work Order; the Work Order is
         validated before any mutation so a rejected application leaves it
         unchanged. Guard-checked lifecycle/readiness operations are the only
-        mutators.
+        mutators. For ``ESCALATE`` a caller may supply a spec-bound
+        ``intervention_request`` (source/domain revision, expiry, permitted
+        actions); otherwise a minimal request is created.
         """
 
         if not isinstance(work_order, WorkOrder):
@@ -342,12 +314,8 @@ class DecisionApplier:
                 at=applied_at,
             )
         elif effect is DecisionEffect.REOPEN_BLOCKED_INTERVENTION:
-            intervention = HumanInterventionRequest(
-                intervention_id=uuid.uuid4().hex,
-                work_order_id=work_order.id,
-                reason=intervention_reason,
-                summary=f"Ictus ESCALATE ({decision.decision_id})",
-                created_at=applied_at,
+            intervention = self._intervention_request(
+                work_order, decision, intervention_reason, intervention_request, applied_at
             )
             transition = work_order.reopen(
                 OpenStatus.BLOCKED,
@@ -395,6 +363,32 @@ class DecisionApplier:
         )
         self._applications.append(record)
         return record
+
+    def _intervention_request(
+        self,
+        work_order: WorkOrder,
+        decision: SemanticDecision,
+        reason: InterventionReason,
+        supplied: HumanInterventionRequest | None,
+        at: datetime,
+    ) -> HumanInterventionRequest:
+        if supplied is None:
+            return HumanInterventionRequest(
+                intervention_id=uuid.uuid4().hex,
+                work_order_id=work_order.id,
+                reason=reason,
+                summary=f"Ictus ESCALATE ({decision.decision_id})",
+                created_at=at,
+            )
+        if not isinstance(supplied, HumanInterventionRequest):
+            raise DecisionApplicationError(
+                "intervention_request must be a HumanInterventionRequest"
+            )
+        if supplied.work_order_id != work_order.id:
+            raise DecisionApplicationError(
+                "intervention_request targets a different Work Order"
+            )
+        return supplied
 
     def _create_children_durably(
         self, work_order: WorkOrder, child_plan: ChildPlan | None
