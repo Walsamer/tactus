@@ -125,6 +125,7 @@ from .state_snapshot import (
     build_state_snapshot,
     compute_snapshot_digest,
     semantic_budget_from_legacy,
+    to_ictus_legacy_boundary_payload,
     validate_snapshot_profile,
 )
 
@@ -203,6 +204,7 @@ __all__ = [
     "parse_decision",
     "parse_observation",
     "semantic_budget_from_legacy",
+    "to_ictus_legacy_boundary_payload",
     "translate_legacy_budget_facts",
     "validate_snapshot_profile",
 ]

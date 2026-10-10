@@ -1,7 +1,8 @@
 > **Implemented versioned adapter reference.** [Baseline v1 contracts](CROSS_SYSTEM_CONTRACTS.md)
 > govern new work; [reconciliation](BASELINE_V1_RECONCILIATION.md) records the
 > profile, initial-context and validation gaps this adapter closes. The pinned
-> Ictus schemas describe inspected main (Ictus commit `833175d`).
+> Ictus schemas describe inspected main (Ictus commit
+> `e823000c9255b959c2c9516ed4ee85eb13150df2`).
 
 # Tactus → Ictus `StateSnapshot` versioned context adapter
 
@@ -54,7 +55,7 @@ Ictus DecisionProvider              (owns all decision/policy)
 | Item | Value |
 |---|---|
 | Ictus repository | `Walsamer/ictus` |
-| Pinned commit | `833175d` |
+| Pinned commit | `e823000c9255b959c2c9516ed4ee85eb13150df2` |
 | `StateSnapshot` schema | `contracts/state-snapshot.schema.json` |
 | Supported generic `schema_version` | `1` |
 | Tactus fact-profile version | `2` (independent, `snapshot.profile_version`) |
@@ -212,10 +213,57 @@ attempt.number / retry.attempt / retry.budget
   one from the other.
 - Legacy inputs are translated only **explicitly** by
   `translate_legacy_budget_facts()` (and `semantic_budget_from_legacy()` for the
-  Tactus `AttemptHistory` shim). The former mismatch — missing legacy facts
-  defaulting to `0`, so an exhausted `0/0` budget blocked first execution, or
-  the step-retry index masquerading as the semantic count — is covered by the
-  shared fixtures.
+  Tactus `AttemptHistory` shim).
+
+The pinned Ictus `RuleDecisionProvider`/`DefaultPolicyEvaluator` still read the
+legacy `retry.attempt`/`retry.budget` keys. `to_ictus_legacy_boundary_payload()`
+is the explicit **compatibility projection** that maps the canonical semantic
+count/limit onto those keys (additively, preserving the canonical body and
+digest) so the real boundary can be conformance-tested. It fails closed for a
+missing, boolean, negative or inconsistent canonical budget instead of letting
+Ictus default a missing value to `0` — the former mismatch.
+
+## Real pinned Ictus boundary conformance
+
+The cross-repository proof executes the **actual** Ictus binary; no Python
+policy mirror stands in. `integrations/ictus/conformance.py` locates the
+checkout, verifies its exact `HEAD`, and builds `ictus` from that revision into
+a disposable target directory (`cargo build --offline --locked`).
+
+Reproducible command (temporary build/work roots; the target directory is
+created under the temp root and removed unless `--keep-build` is given):
+
+```sh
+TACTUS_ICTUS_ROOT=/path/to/agentic-control \
+  uv run python integrations/ictus/conformance.py \
+  tests/integrations/ictus/data/initial_snapshot.v2.json \
+  tests/integrations/ictus/data/recovery_snapshot.v2.json
+```
+
+The same boundary is exercised by the normal test entry point
+(`uv run pytest`). If the checkout is absent or off-pin the harness raises
+`IctusBoundaryUnavailable`/`IctusPinMismatch`, so the suite **fails visibly**
+rather than skipping.
+
+### Proven original issue-7 criteria
+
+Original issue-7 acceptance item 5 ("shared fixtures run through the real Ictus
+schema/policy boundary and expose the former `retry.attempt`/`retry.budget`
+mismatch") is now proven by `test_real_ictus_boundary.py`:
+
+- the real boundary accepts the observation-free INITIAL fixture and decides the
+  recovery fixture as `REEXECUTE` within budget;
+- the canonical budget is proven at zero, one-remaining and exhausted, and the
+  step-retry index is proven diagnostic-only;
+- the former mismatch is exposed on the real binary: canonical-only facts leave
+  Ictus defaulting to `0/0` (premature `ESCALATE`), while substituting the
+  step-retry index for the semantic count wrongly `REEXECUTE`s an exhausted
+  budget.
+
+Items 1–4 of issue #7 (no fabricated INITIAL observation; correlated recovery
+binding; canonical count/limit with rejected missing/bool/negative values; raw
+backend/grant facts and a deterministic, non-mutating adapter) remain covered by
+`test_state_snapshot.py` and the golden fixtures in `test_profile_fixtures.py`.
 
 ## Stop-condition / representability note
 
@@ -229,14 +277,19 @@ has a valid slot and nothing is dropped or invented.
 - `test_state_snapshot.py` — schema shape, phases, correlation rejection,
   canonical budget facts, raw backend/authorization facts, deterministic
   digest, profile validation, fail-closed input validation and purity;
-- `test_profile_fixtures.py` and `data/*.json` — cross-repository pinned
-  fixtures run through a schema/profile boundary and through the documented
-  policy rule, exposing the former `retry.attempt`/`retry.budget` mismatch.
+- `test_profile_fixtures.py` and `data/*.json` — the shared golden fixtures and
+  the explicit legacy-translation helper;
+- `test_real_ictus_boundary.py` — executes the actual pinned Ictus binary:
+  pin/revision verification, INITIAL/RECOVERY fixtures, the canonical budget
+  matrix, diagnostic-only step retries, fail-closed projection and the former
+  `retry.attempt`/`retry.budget` mismatch;
+- `integrations/ictus/conformance.py` — the bounded real-boundary harness and
+  its reproducible command.
 
 ## Implementation
 
 `src/tactus/integrations/ictus/state_snapshot.py` — `build_state_snapshot()`,
 `SemanticBudget`, `StepRetryDiagnostic`, `SnapshotPhase`,
-`validate_snapshot_profile()`, `compute_snapshot_digest()` and the fact-key
-constants. Domain fact adapters live in
-`src/tactus/integrations/ictus/facts.py`.
+`to_ictus_legacy_boundary_payload()`, `validate_snapshot_profile()`,
+`compute_snapshot_digest()` and the fact-key constants. Domain fact adapters
+live in `src/tactus/integrations/ictus/facts.py`.

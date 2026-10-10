@@ -20,6 +20,10 @@ unmerged. There were no hidden open Ictus implementation issues to preserve.
 | Ictus GitHub/local main | `833175d88adeed59f8e62c14c5e5577580cfdf33` | Generic foundation, tree `0e3dd632ddca6b043a1b1e357f4c55d29189f08c`. |
 | Ictus Fleet integration | `5ee42ea5602703b8aafd8cab9b88e3feb8347087` | FIX-006 generic vocabulary candidate, not merged main. |
 
+> Historical inspection snapshot (2026-10-06). The Ictus revision pinned by the
+> Tactus adapter conformance is now `e823000c9255b959c2c9516ed4ee85eb13150df2`
+> (see [ICTUS_STATE_SNAPSHOT_CONTRACT.md](ICTUS_STATE_SNAPSHOT_CONTRACT.md)).
+
 The local audit `audits/tactus-ictus-dagster/06-original-intent-and-system-design.md`,
 `07-audit-reconciliation.md`, and `08-setup-options-and-decisions.md` and original
 whiteboard were inspected. They are source evidence, not additional canonical
