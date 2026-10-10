@@ -27,6 +27,12 @@ and inbound observation/outbound StateSnapshot adapters. Durable domain storage,
 complete initial decision context, trusted validated-decision application and
 the persistent end-to-end execution path remain implementation work.
 
+A minimal GitHub Issue WorkSource intake path persists immutable source
+provenance (exact-body/specification hashes and a content-derived import key),
+gates new intake on `fleet:ready`, rechecks authorization/freshness at
+claim/dispatch and preserves parent Issue provenance for children. See the
+[WorkSource adapter](docs/architecture/WORK_SOURCE_ADAPTER.md).
+
 Decision application code exists on a Fleet integration ref and requires review
 and completion before merge. The first vertical slice uses a deterministic local
 subprocess. Real agents and Stax follow in M3; directory placeholders do not

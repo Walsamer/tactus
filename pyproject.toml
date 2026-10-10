@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+tactus = "tactus.cli:main"
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
