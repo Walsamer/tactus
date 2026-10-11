@@ -30,4 +30,22 @@ TACTUS_ICTUS_ROOT=/path/to/agentic-control \
 The normal test entry point (`uv run pytest`) executes the same boundary; a
 missing or off-pin checkout fails visibly instead of skipping.
 
+## GitHub Actions
+
+`.github/workflows/ci.yml` provisions the boundary rather than skipping it:
+
+1. checks out Tactus;
+2. checks out `Walsamer/ictus` at the exact pinned commit into `.ictus/`;
+3. verifies `git -C .ictus rev-parse HEAD` against the pin before any build;
+4. installs a stable Rust toolchain and runs `cargo fetch --locked` so the
+   harness's `cargo build --offline --locked` can resolve from the local cache;
+5. exports `TACTUS_ICTUS_ROOT=.ictus` and
+   `TACTUS_ICTUS_TARGET_DIR=.ictus/target` for `uv run pytest` and
+   `scripts/verify-goal.sh`.
+
+The conformance build writes only to the isolated `TACTUS_ICTUS_TARGET_DIR`
+(`.ictus/target`, which Ictus gitignores); the pinned checkout itself stays
+clean. A missing checkout, a pin mismatch, a build failure, a non-JSON envelope
+or a decision-contract regression fails the job; nothing is silently skipped.
+
 See [Architecture Baseline v1](../../docs/architecture/SYSTEM_ARCHITECTURE.md).
