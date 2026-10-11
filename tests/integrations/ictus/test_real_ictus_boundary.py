@@ -415,13 +415,19 @@ def test_former_step_retry_substitution_mismatch_is_exposed_by_real_boundary(
 # -- disposable state ------------------------------------------------------
 
 
-def test_conformance_does_not_dirty_the_ictus_checkout(
-    ictus_boundary: conformance.IctusBoundary,
-) -> None:
-    ictus_boundary.decide(
+def test_conformance_does_not_dirty_the_ictus_checkout() -> None:
+    # The Ictus checkout is shared and may legitimately carry unrelated
+    # uncommitted work from another WorkOrder. Cover the *whole* harness
+    # (resolve, pin-verify, build, decide) and require it to add no tracked or
+    # untracked change, rather than starting from a pristine tree; a genuine
+    # checkout mutation still fails because the status would differ.
+    root = conformance.resolve_ictus_root()
+    before = _git_status(root)
+    boundary = conformance.load_boundary(root)
+    boundary.decide(
         to_ictus_legacy_boundary_payload(pf.build_recovery_snapshot())
     )
-    assert _git_status(ictus_boundary.root) == ""
+    assert _git_status(root) == before
 
 
 def test_fixture_payloads_are_deterministic() -> None:
