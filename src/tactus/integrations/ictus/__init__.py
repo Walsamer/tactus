@@ -67,6 +67,7 @@ from .facts import (
     UnsupportedSnapshotProfileError,
     UnsupportedSnapshotVersionError,
     authorization_grant_fact,
+    authorization_grant_from_human_grant,
     backend_descriptor_fact,
     backend_quota_fact,
     backend_status_fact,
@@ -124,6 +125,7 @@ from .state_snapshot import (
     build_state_snapshot,
     compute_snapshot_digest,
     semantic_budget_from_legacy,
+    to_ictus_legacy_boundary_payload,
     validate_snapshot_profile,
 )
 
@@ -193,6 +195,7 @@ __all__ = [
     "UnsupportedSnapshotProfileError",
     "UnsupportedSnapshotVersionError",
     "authorization_grant_fact",
+    "authorization_grant_from_human_grant",
     "backend_descriptor_fact",
     "backend_quota_fact",
     "backend_status_fact",
@@ -201,6 +204,7 @@ __all__ = [
     "parse_decision",
     "parse_observation",
     "semantic_budget_from_legacy",
+    "to_ictus_legacy_boundary_payload",
     "translate_legacy_budget_facts",
     "validate_snapshot_profile",
 ]

@@ -48,6 +48,7 @@ from tactus.backends.capacity import ProviderCapacityObservation
 from tactus.backends.facts import BackendAdministrativeEnablementFact
 from tactus.backends.health import BackendStatusObservation
 from tactus.backends.registry import BackendDescriptor
+from tactus.domain.human_intervention import HumanGrant
 
 #: The Tactus fact-profile version this module constructs.
 #:
@@ -335,6 +336,33 @@ def authorization_grant_fact(grant: AuthorizationGrant) -> dict[str, Any]:
     return fact
 
 
+def authorization_grant_from_human_grant(grant: HumanGrant) -> AuthorizationGrant:
+    """Project a durable Tactus human grant onto the transport grant fact.
+
+    The projection is verbatim and asserts no sufficiency: Ictus validates that.
+    The bounded scope tuple is rendered deterministically (falling back to the
+    WorkOrder identity) and the typed human action plus resolution identity are
+    carried as evidence so Ictus can require the specific authorization.
+    """
+
+    if not isinstance(grant, HumanGrant):
+        raise StateSnapshotContractError("grant must be a HumanGrant")
+    scope = ",".join(grant.scope) if grant.scope else str(grant.work_order_id)
+    evidence = (
+        f"human-action:{grant.action.value}",
+        f"resolution:{grant.resolution_id}",
+    )
+    return AuthorizationGrant(
+        grant_id=grant.grant_id,
+        scope=scope,
+        actor=grant.actor,
+        issued_at=grant.issued_at,
+        expires_at=grant.expires_at,
+        source_revision=grant.source_revision.value,
+        evidence=evidence,
+    )
+
+
 def to_rfc3339(value: datetime) -> str:
     """Serialize a datetime as an RFC 3339 / ISO 8601 UTC instant."""
 
@@ -400,6 +428,7 @@ __all__ = [
     "UnsupportedSnapshotProfileError",
     "UnsupportedSnapshotVersionError",
     "authorization_grant_fact",
+    "authorization_grant_from_human_grant",
     "backend_descriptor_fact",
     "backend_quota_fact",
     "backend_status_fact",

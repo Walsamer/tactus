@@ -22,3 +22,6 @@ node_modules/
 # Pixi
 .pixi/
 *.lock.bak
+
+# Local pinned Ictus checkout used by CI and the conformance harness
+.ictus/
