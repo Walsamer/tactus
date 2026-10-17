@@ -443,6 +443,52 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         row = self._work_order(_work_order_id(work_order_id))
         return WorkOrderRevision(row["revision"]), WorkOrderState(row["state"]), (OpenStatus(row["readiness"]) if row["readiness"] is not None else None)
 
+    def apply_work_order_transition(
+        self,
+        work_order_id: WorkOrderId | str,
+        *,
+        expected_revision: WorkOrderRevision,
+        state: WorkOrderState,
+        readiness: OpenStatus | None,
+        at: datetime | None = None,
+    ) -> WorkOrderRevision:
+        """Persist a guarded Work Order projection after a validated decision.
+
+        The caller has already applied the domain applier's transition guards.
+        This method only enforces the persistence contract: compare-and-swap the
+        expected revision and keep lifecycle/readiness orthogonal.
+        """
+
+        identifier = _work_order_id(work_order_id)
+        if not isinstance(expected_revision, WorkOrderRevision):
+            raise TypeError("expected_revision must be a WorkOrderRevision")
+        if not isinstance(state, WorkOrderState):
+            raise TypeError("state must be a WorkOrderState")
+        if state is WorkOrderState.OPEN:
+            if readiness not in {OpenStatus.READY, OpenStatus.BLOCKED}:
+                raise ValueError("an OPEN projection requires READY or BLOCKED readiness")
+        elif readiness is not None:
+            raise ValueError("only OPEN Work Orders may carry readiness")
+        applied_at = _timestamp(at if at is not None else utcnow())
+        with self._transaction():
+            updated = self._connection.execute(
+                """UPDATE work_orders
+                SET state = ?, readiness = ?, revision = revision + 1, updated_at = ?
+                WHERE work_order_id = ? AND revision = ?""",
+                (
+                    state.value,
+                    readiness.value if readiness is not None else None,
+                    applied_at,
+                    str(identifier),
+                    expected_revision.value,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise StaleWorkOrderRevisionError(
+                    "WorkOrder revision changed before the projection was applied"
+                )
+            return WorkOrderRevision(expected_revision.value + 1)
+
     def _work_order(self, work_order_id: WorkOrderId) -> sqlite3.Row:
         row = self._connection.execute(
             "SELECT * FROM work_orders WHERE work_order_id = ?", (str(work_order_id),)
