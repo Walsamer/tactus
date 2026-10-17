@@ -124,7 +124,7 @@ def ictus_boundary(tmp_path_factory: pytest.TempPathFactory) -> conformance.Ictu
 
 def test_reviewed_ictus_revision_is_pinned(ictus_boundary: conformance.IctusBoundary) -> None:
     assert ictus_boundary.commit == conformance.PINNED_ICTUS_COMMIT
-    assert conformance.PINNED_ICTUS_COMMIT == "f4581f94906d07decd3aca6ad3e83ae42e6cf9ae"
+    assert conformance.PINNED_ICTUS_COMMIT == "86816d6019af1f23c63428348cd820d706bb0d27"
     assert ictus_boundary.binary.is_file()
 
 
@@ -227,7 +227,9 @@ def test_recovery_fixture_binds_subject_intent_and_attempt(
     assert outcome.policy_decision_kind == "ALLOW"
     assert outcome.executable
     assert outcome.subject_id == "WO-1"
-    assert "(1/3)" in outcome.reason
+    # Ictus 86816d6 (GH-5) reports the re-executable verdict without the (n/m)
+    # counters; the canonical projection still yields REEXECUTE.
+    assert "re-executable WorkerTimeout within the semantic attempt budget" in outcome.reason
 
 
 @pytest.mark.parametrize(
@@ -274,7 +276,12 @@ def test_canonical_budget_matrix_through_real_boundary(
 
     assert outcome.proposal_decision == expected
     assert outcome.policy_decision_kind == "ALLOW"
-    assert f"({attempts}/{limit})" in outcome.reason
+    # Ictus 86816d6 (GH-5) wording: re-executable within budget, or
+    # "exhausted semantic attempt budget (n of m)" at the boundary.
+    if expected == "REEXECUTE":
+        assert "re-executable WorkerTimeout within the semantic attempt budget" in outcome.reason
+    else:
+        assert f"exhausted semantic attempt budget ({attempts} of {limit})" in outcome.reason
 
 
 @pytest.mark.parametrize("step_retry_index", [0, 5])
@@ -378,12 +385,14 @@ def test_former_missing_budget_mismatch_is_exposed_by_real_boundary(
     # Real boundary reading only the canonical facts: legacy retry.* default 0/0.
     unprojected = ictus_boundary.decide(payload)
     assert unprojected.proposal_decision == "ESCALATE"
-    assert "(0/0)" in unprojected.reason
+    # Ictus 86816d6 (GH-5) fails closed on missing semantic-accounting fields
+    # instead of defaulting legacy retry.* to 0/0.
+    assert "missing required field: attempts.semantic / attempts.max_semantic" in unprojected.reason
 
     # The explicit compatibility projection repairs it against the same binary.
     projected = ictus_boundary.decide(to_ictus_legacy_boundary_payload(payload))
     assert projected.proposal_decision == "REEXECUTE"
-    assert "(1/3)" in projected.reason
+    assert "re-executable WorkerTimeout within the semantic attempt budget" in projected.reason
 
 
 def test_former_step_retry_substitution_mismatch_is_exposed_by_real_boundary(
@@ -409,7 +418,7 @@ def test_former_step_retry_substitution_mismatch_is_exposed_by_real_boundary(
     # exhausted.
     right = ictus_boundary.decide(to_ictus_legacy_boundary_payload(exhausted))
     assert right.proposal_decision == "ESCALATE"
-    assert "(3/3)" in right.reason
+    assert "exhausted semantic attempt budget (3 of 3)" in right.reason
 
 
 # -- disposable state ------------------------------------------------------

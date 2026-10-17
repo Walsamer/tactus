@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 #: Exact reviewed Ictus revision this harness validates against.
-PINNED_ICTUS_COMMIT = "f4581f94906d07decd3aca6ad3e83ae42e6cf9ae"
+PINNED_ICTUS_COMMIT = "86816d6019af1f23c63428348cd820d706bb0d27"
 
 #: Repository that owns the pinned revision (documentation only).
 PINNED_ICTUS_REPOSITORY = "Walsamer/ictus"

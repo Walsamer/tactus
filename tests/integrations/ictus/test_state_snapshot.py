@@ -2,7 +2,7 @@
 
 Contract tests validate the emitted payload against the shape of the
 authoritative Ictus ``contracts/state-snapshot.schema.json`` (Ictus commit
-``f4581f94906d07decd3aca6ad3e83ae42e6cf9ae``) without vendoring that file: the
+``86816d6019af1f23c63428348cd820d706bb0d27``) without vendoring that file: the
 ``jsonschema`` package is not a
 Tactus dependency, so the schema constraints that matter at this edge are
 encoded in :func:`_assert_state_snapshot_v1`.
@@ -108,7 +108,7 @@ def _assert_state_snapshot_v1(payload: Any) -> None:
     """Validate the shape of an Ictus ``StateSnapshot`` v1 payload.
 
     Mirrors ``contracts/state-snapshot.schema.json`` at Ictus commit
-    ``f4581f94906d07decd3aca6ad3e83ae42e6cf9ae``.
+    ``86816d6019af1f23c63428348cd820d706bb0d27``.
     """
 
     assert isinstance(payload, dict)
