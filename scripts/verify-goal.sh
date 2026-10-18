@@ -26,7 +26,21 @@ for f in README.md docs/ARCHITECTURE.md docs/DEPENDENCIES.md; do
   fi
 done
 
-# 3. No obvious secret material in tracked files.
+# 3. Agent instructions and pinned-revision references must not drift.
+#    The gate is offline and deterministic; it fails on a stale AGENTS.md pin,
+#    a diverging Ictus pin declaration, a missing ownership plane or a broken
+#    Read-first reference.
+if command -v python3 >/dev/null 2>&1; then
+  if ! python3 scripts/check-agent-consistency.py; then
+    echo "TACTUS_VERIFIER_FAIL: agent consistency" >&2
+    fail=1
+  fi
+else
+  echo "TACTUS_VERIFIER_FAIL: python3 required for agent consistency check" >&2
+  fail=1
+fi
+
+# 4. No obvious secret material in tracked files.
 if grep -rInE \
      --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ \
      --exclude-dir=.pytest_cache --exclude-dir=.pixi \
@@ -36,7 +50,7 @@ if grep -rInE \
   fail=1
 fi
 
-# 4. Python domain tests, when a Python project is present.
+# 5. Python domain tests, when a Python project is present.
 if [ -f pyproject.toml ]; then
   if command -v uv >/dev/null 2>&1; then
     if ! uv run --quiet pytest; then
