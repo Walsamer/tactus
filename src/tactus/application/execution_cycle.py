@@ -37,6 +37,7 @@ from typing import Any, Protocol, runtime_checkable
 from tactus.domain import (
     ClaimToken,
     DagsterRunId,
+    InitialAuthorizationContext,
     DecisionApplicationRecord,
     DecisionApplier,
     DecisionKind,
@@ -667,6 +668,7 @@ class ExecutionCycle:
         expected_revision: WorkOrderRevision,
         at: datetime | None = None,
         child_plan: Any = None,
+        initial_context: InitialAuthorizationContext | None = None,
     ) -> RecoveryApplication:
         """Apply one ALLOWED Ictus recovery decision and persist its projection.
 
@@ -711,6 +713,11 @@ class ExecutionCycle:
         # An *entry* decision authorizes the first attempt, so no attempt exists
         # yet; a recovery decision is bound to the attempt that just failed.
         attempt = self._admission.find_latest_attempt(work_order.id)
+        if attempt is not None and initial_context is not None:
+            raise IntentDecisionError(
+                "an INITIAL context cannot be presented for a Work Order that already "
+                "has a correlated execution attempt"
+            )
         if attempt is None:
             # No attempt exists yet: this can only be the INITIAL authorization
             # that creates the first semantic attempt. Recovery effects
@@ -725,6 +732,20 @@ class ExecutionCycle:
             if next_intent is None:
                 raise IntentDecisionError(
                     "an INITIAL authorization requires the Ictus ExecutionIntent"
+                )
+            if initial_context is None:
+                raise IntentDecisionError(
+                    "INITIAL authorization requires the trusted INITIAL context "
+                    "built from the authoritative snapshot"
+                )
+            if initial_context.phase != "INITIAL":
+                raise IntentDecisionError(
+                    f"INITIAL authorization requires phase INITIAL (got "
+                    f"{initial_context.phase!r})"
+                )
+            if not initial_context.snapshot_id or not initial_context.snapshot_digest:
+                raise IntentDecisionError(
+                    "INITIAL authorization requires a snapshot identity and digest"
                 )
         record = RecoveryDecisionRecord(
             decision_id=decision.decision_id,
@@ -748,6 +769,22 @@ class ExecutionCycle:
 
         def apply_effect(connection: object) -> None:
             # Only executed by the ledger when this decision is not a replay.
+            if initial_context is not None:
+                # Provenance is checked for the *application*, not a replay: a
+                # replay re-presents the same immutable decision but the Work
+                # Order revision has legitimately advanced since.
+                if initial_context.work_order_revision != expected_revision:
+                    raise IntentDecisionError(
+                        "INITIAL context revision does not match the expected Work "
+                        f"Order revision ({initial_context.work_order_revision.value} "
+                        f"!= {expected_revision.value})"
+                    )
+                if initial_context.source_revision != (
+                    self._admission.work_order_source_revision(work_order.id)
+                ):
+                    raise IntentDecisionError(
+                        "INITIAL context source revision does not match the Work Order"
+                    )
             state["application"] = applier.apply(
                 work_order, decision, child_plan=child_plan, at=at
             )

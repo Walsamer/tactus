@@ -180,6 +180,49 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                 "AND name = 'recovery_decision_inbox'"
             ).fetchone()
+            if leftover is not None and current is not None:
+                # Interrupted with both tables present (before or after the row
+                # copy). Reconcile transactionally: identical rows collapse,
+                # a changed digest for the same decision is an immutable-record
+                # conflict, and nothing is dropped until the merge succeeded.
+                for row in self._connection.execute(
+                    """SELECT decision_id, work_order_id, attempt_id,
+                              decision_digest, applied_at
+                       FROM recovery_decision_inbox_v2"""
+                ).fetchall():
+                    existing = self._connection.execute(
+                        "SELECT * FROM recovery_decision_inbox WHERE decision_id = ?",
+                        (row["decision_id"],),
+                    ).fetchone()
+                    if existing is None:
+                        self._connection.execute(
+                            """INSERT INTO recovery_decision_inbox(
+                                   decision_id, work_order_id, attempt_id,
+                                   decision_digest, applied_at)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (
+                                row["decision_id"], row["work_order_id"],
+                                row["attempt_id"], row["decision_digest"],
+                                row["applied_at"],
+                            ),
+                        )
+                        continue
+                    same = (
+                        existing["work_order_id"] == row["work_order_id"]
+                        and existing["attempt_id"] == row["attempt_id"]
+                        and existing["decision_digest"] == row["decision_digest"]
+                    )
+                    if not same:
+                        raise ImmutableRecordConflictError(
+                            "interrupted migration found conflicting recovery "
+                            f"decision records for {row['decision_id']}"
+                        )
+                self._connection.execute("DROP TABLE recovery_decision_inbox_v2")
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                    (_DECISION_ENTRY_MIGRATION_ID,),
+                )
+                return
             if leftover is not None and current is None:
                 # Interrupted after RENAME, before CREATE: resume in place.
                 self._connection.execute(
@@ -499,6 +542,15 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
                 f"Work Order {identifier} has no execution attempt to recover"
             )
         return _attempt_from_row(row)
+
+    def work_order_source_revision(self, work_order_id: WorkOrderId | str) -> SourceRevision:
+        row = self._connection.execute(
+            "SELECT source_revision FROM work_orders WHERE work_order_id = ?",
+            (str(_work_order_id(work_order_id)),),
+        ).fetchone()
+        if row is None:
+            raise RecoveryApplicationError("unknown Work Order")
+        return SourceRevision(str(row["source_revision"]))
 
     def find_latest_attempt(self, work_order_id: WorkOrderId | str) -> DurableAttempt | None:
         """Return the newest attempt, or ``None`` before the first admission."""

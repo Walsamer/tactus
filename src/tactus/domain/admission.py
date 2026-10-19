@@ -338,6 +338,22 @@ class ResultRecord:
 
 
 @dataclass(frozen=True)
+class InitialAuthorizationContext:
+    """Trusted provenance for the *initial* authorization of a Work Order.
+
+    The absence of an execution attempt is not evidence of an INITIAL decision:
+    the caller must present the context it built from the authoritative INITIAL
+    snapshot, and Tactus validates it against the durable Work Order projection.
+    """
+
+    phase: str
+    snapshot_id: str
+    snapshot_digest: str
+    source_revision: SourceRevision
+    work_order_revision: WorkOrderRevision
+
+
+@dataclass(frozen=True)
 class RecoveryDecisionRecord:
     """One validated recovery decision bound to the exact attempt it recovers.
 
@@ -413,6 +429,8 @@ class DurableExecutionAdmissionPort(Protocol):
     def find_latest_attempt(
         self, work_order_id: WorkOrderId | str
     ) -> DurableAttempt | None: ...
+
+    def work_order_source_revision(self, work_order_id: WorkOrderId | str) -> SourceRevision: ...
 
     def apply_recovery_decision(
         self,
