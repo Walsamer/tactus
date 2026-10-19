@@ -254,6 +254,10 @@ class ImmutableRecordConflictError(AdmissionError):
     """A stable record identity was replayed with different immutable content."""
 
 
+class RecoveryApplicationError(AdmissionError):
+    """A validated recovery decision could not be applied transactionally."""
+
+
 class ResultApplicationError(AdmissionError):
     """A result cannot be applied to the referenced durable attempt."""
 
@@ -333,6 +337,23 @@ class ResultRecord:
         object.__setattr__(self, "payload_digest", _require_non_empty(self.payload_digest, "payload_digest"))
 
 
+@dataclass(frozen=True)
+class RecoveryDecisionRecord:
+    """One validated recovery decision bound to the exact attempt it recovers.
+
+    ``decision_id`` is the Ictus decision identity and is the idempotency key:
+    a redelivery with the same digest is a replay, a different digest is an
+    immutable-record conflict. ``expected_revision`` is the Work Order revision
+    the decision was validated against; the projection CAS rejects staleness.
+    """
+
+    decision_id: str
+    work_order_id: WorkOrderId
+    attempt_id: ExecutionAttemptId
+    decision_digest: str
+    expected_revision: WorkOrderRevision
+
+
 @runtime_checkable
 class DurableExecutionAdmissionPort(Protocol):
     """Persistence boundary for fenced admission and restart-safe handoff.
@@ -380,6 +401,16 @@ class DurableExecutionAdmissionPort(Protocol):
     def apply_result(
         self,
         result: ResultRecord,
+        *,
+        apply_domain_effect: Callable[[object], None] | None = None,
+        at: datetime | None = None,
+    ) -> bool: ...
+
+    def latest_attempt(self, work_order_id: WorkOrderId | str) -> DurableAttempt: ...
+
+    def apply_recovery_decision(
+        self,
+        record: RecoveryDecisionRecord,
         *,
         apply_domain_effect: Callable[[object], None] | None = None,
         at: datetime | None = None,

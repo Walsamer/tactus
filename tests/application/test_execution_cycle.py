@@ -8,15 +8,22 @@ from tactus.application import (
     ExecutionCycle,
     IntentDecisionError,
     ObservationCorrelationError,
+    WorkOrderProjectionError,
     parse_execution_decision,
 )
 from tactus.domain import (
+    ChildCreationUnavailableError,
     ClaimToken,
     DagsterRunId,
+    ImmutableRecordConflictError,
+    MissingChildPlanError,
+    StaleWorkOrderRevisionError,
     OpenStatus,
+    RecoveryDecisionRecord,
     SourceRevision,
     TransitionAuthority,
     WorkOrder,
+    WorkOrderId,
     WorkOrderRevision,
     WorkOrderState,
 )
@@ -384,3 +391,180 @@ def test_observation_parser_rejects_unknown_categories_and_versions():
     payload["schema_version"] = 99
     with pytest.raises(Exception, match="schema_version"):
         parse_observation(payload)
+
+
+# -- issue #8: transactional, idempotent recovery application ---------------
+
+
+def _rev(db):
+    return db.work_order_snapshot(WORK_ORDER)[0]
+
+
+def _failed_cycle(tmp_path):
+    """Cycle with an ACTIVE Work Order whose attempt failed (attempt closed)."""
+    cycle, db, work_order, accepted = _cycle(tmp_path)
+    receipt, correlated = _attach_and_correlate(
+        cycle, db, accepted, _observation(category="PROCESS_CRASH")
+    )
+    cycle.apply_observation(
+        correlated, work_order=work_order, expected_revision=WorkOrderRevision(1)
+    )
+    return cycle, db, work_order, accepted, receipt
+
+
+def test_recovery_decision_is_idempotent_on_redelivery(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    envelope = _envelope(
+        proposal_id="proposal-idem-1",
+        intent=_intent(intent_id="intent-2", decision_id="proposal-idem-1"),
+    )
+
+    first = cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=_rev(db)
+    )
+    revision_after_first = db.work_order_snapshot(WORK_ORDER)[0]
+    second = cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=revision_after_first
+    )
+
+    assert first.applied is True
+    assert second.applied is False
+    assert second.application is None
+    assert db.work_order_snapshot(WORK_ORDER)[0] == revision_after_first
+    assert work_order.state is WorkOrderState.OPEN
+
+
+def test_recovery_decision_replay_with_changed_payload_conflicts(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    cycle.apply_recovery_decision(
+        work_order,
+        _envelope(proposal_id="proposal-x", intent=_intent(intent_id="i-2", decision_id="proposal-x")),
+        state_port=db,
+        expected_revision=_rev(db),
+    )
+    with pytest.raises(ImmutableRecordConflictError):
+        cycle.apply_recovery_decision(
+            work_order,
+            _envelope(
+                decision="ROUTE",
+                proposal_id="proposal-x",
+                intent=_intent(intent_id="i-route", decision_id="proposal-x"),
+            ),
+            state_port=db,
+            expected_revision=_rev(db),
+        )
+
+
+def test_recovery_decision_rejects_a_stale_revision_and_changes_nothing(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    before = db.work_order_snapshot(WORK_ORDER)
+    with pytest.raises((WorkOrderProjectionError, StaleWorkOrderRevisionError)):
+        cycle.apply_recovery_decision(
+            work_order,
+            _envelope(proposal_id="proposal-stale", intent=_intent(intent_id="i-2", decision_id="proposal-stale")),
+            state_port=db,
+            expected_revision=WorkOrderRevision(_rev(db).value + 5),
+        )
+    assert db.work_order_snapshot(WORK_ORDER) == before
+    assert work_order.state is WorkOrderState.ACTIVE
+
+
+def test_recovery_decision_escalates_durably_and_closes_in_one_step(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    decision = cycle.apply_recovery_decision(
+        work_order,
+        _envelope(decision="ESCALATE", proposal_id="proposal-esc", include_intent=False),
+        state_port=db,
+        expected_revision=_rev(db),
+    )
+    assert decision.applied is True
+    assert decision.application is not None
+    assert decision.application.intervention is not None
+    assert work_order.state is WorkOrderState.OPEN
+    assert work_order.readiness is OpenStatus.BLOCKED
+    assert db.work_order_snapshot(WORK_ORDER)[1] is WorkOrderState.OPEN
+
+
+def test_recovery_decision_abort_is_terminal_and_audited(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    decision = cycle.apply_recovery_decision(
+        work_order,
+        _envelope(decision="ABORT", proposal_id="proposal-abort", include_intent=False),
+        state_port=db,
+        expected_revision=_rev(db),
+    )
+    assert decision.applied is True
+    assert work_order.state is WorkOrderState.RETIRED
+    assert db.work_order_snapshot(WORK_ORDER)[1] is WorkOrderState.RETIRED
+
+
+def test_decompose_fails_closed_and_leaves_the_ledger_untouched(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    before = db.work_order_snapshot(WORK_ORDER)
+    with pytest.raises((ChildCreationUnavailableError, MissingChildPlanError)):
+        cycle.apply_recovery_decision(
+            work_order,
+            _envelope(decision="DECOMPOSE", proposal_id="proposal-dec", include_intent=False),
+            state_port=db,
+            expected_revision=_rev(db),
+        )
+    assert db.work_order_snapshot(WORK_ORDER) == before
+    assert work_order.state is WorkOrderState.ACTIVE
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox"
+    ).fetchone()[0] == 0
+
+
+def test_decision_effect_and_ledger_roll_back_together_on_fault(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    before = db.work_order_snapshot(WORK_ORDER)
+
+    def explode(_connection):
+        raise RuntimeError("injected fault inside the decision transaction")
+
+    record = RecoveryDecisionRecord(
+        decision_id="proposal-fault",
+        work_order_id=WorkOrderId(WORK_ORDER),
+        attempt_id=accepted.attempt.attempt_id,
+        decision_digest="digest-fault",
+        expected_revision=_rev(db),
+    )
+    with pytest.raises(RuntimeError):
+        db.apply_recovery_decision(record, apply_domain_effect=explode)
+
+    assert db.work_order_snapshot(WORK_ORDER) == before
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox"
+    ).fetchone()[0] == 0
+
+
+def test_applied_decision_survives_restart(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    envelope = _envelope(
+        proposal_id="proposal-restart",
+        intent=_intent(intent_id="i-restart", decision_id="proposal-restart"),
+    )
+    cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=_rev(db)
+    )
+    db.close()
+
+    reopened = SqliteExecutionAdmission(tmp_path / "ledger.sqlite")
+    try:
+        assert reopened._connection.execute(
+            "SELECT COUNT(*) FROM recovery_decision_inbox"
+        ).fetchone()[0] == 1
+        from tactus.domain.work_order import WorkOrder as _WorkOrder
+
+        entity = _WorkOrder.create(WORK_ORDER)
+        reopened_cycle = ExecutionCycle(reopened)
+        replay = reopened_cycle.apply_recovery_decision(
+            entity,
+            envelope,
+            state_port=reopened,
+            expected_revision=reopened.work_order_snapshot(WORK_ORDER)[0],
+        )
+        assert replay.applied is False
+        assert reopened.work_order_snapshot(WORK_ORDER)[1] is WorkOrderState.OPEN
+    finally:
+        reopened.close()
