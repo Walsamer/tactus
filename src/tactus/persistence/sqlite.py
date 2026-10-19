@@ -156,32 +156,63 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         )
 
     def _apply_decision_entry_migration(self) -> None:
+        """Relax the ledger's attempt binding, atomically and resumably.
+
+        SQLite cannot drop a NOT NULL constraint in place, so the table is
+        rebuilt. The rebuild runs as one explicit transaction: an interruption
+        leaves either the old table or the new one, never a renamed half-state.
+        A previous interrupted attempt is detected by the leftover rebuild table
+        and finished instead of being redone.
+        """
+
         applied = self._connection.execute(
             "SELECT 1 FROM schema_migrations WHERE version = ?",
             (_DECISION_ENTRY_MIGRATION_ID,),
         ).fetchone()
         if applied is not None:
             return
-        self._connection.executescript(
-            """
-            ALTER TABLE recovery_decision_inbox RENAME TO recovery_decision_inbox_v2;
-            CREATE TABLE recovery_decision_inbox (
-                decision_id TEXT PRIMARY KEY,
-                work_order_id TEXT NOT NULL REFERENCES work_orders(work_order_id),
-                attempt_id TEXT REFERENCES execution_attempts(attempt_id),
-                decision_digest TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            );
-            INSERT INTO recovery_decision_inbox
-                SELECT decision_id, work_order_id, attempt_id, decision_digest, applied_at
-                FROM recovery_decision_inbox_v2;
-            DROP TABLE recovery_decision_inbox_v2;
-            """
-        )
-        self._connection.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
-            (_DECISION_ENTRY_MIGRATION_ID,),
-        )
+        with self._transaction():
+            leftover = self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'recovery_decision_inbox_v2'"
+            ).fetchone()
+            current = self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'recovery_decision_inbox'"
+            ).fetchone()
+            if leftover is not None and current is None:
+                # Interrupted after RENAME, before CREATE: resume in place.
+                self._connection.execute(
+                    "ALTER TABLE recovery_decision_inbox_v2 "
+                    "RENAME TO recovery_decision_inbox"
+                )
+                leftover = None
+            if leftover is None:
+                self._connection.execute(
+                    "ALTER TABLE recovery_decision_inbox RENAME TO recovery_decision_inbox_v2"
+                )
+                self._connection.execute(
+                    """CREATE TABLE recovery_decision_inbox (
+                        decision_id TEXT PRIMARY KEY,
+                        work_order_id TEXT NOT NULL REFERENCES work_orders(work_order_id),
+                        attempt_id TEXT REFERENCES execution_attempts(attempt_id),
+                        decision_digest TEXT NOT NULL,
+                        applied_at TEXT NOT NULL
+                    )"""
+                )
+                self._connection.execute(
+                    """INSERT INTO recovery_decision_inbox(
+                           decision_id, work_order_id, attempt_id,
+                           decision_digest, applied_at)
+                       SELECT decision_id, work_order_id, attempt_id,
+                              decision_digest, applied_at
+                       FROM recovery_decision_inbox_v2"""
+                )
+                self._connection.execute("DROP TABLE recovery_decision_inbox_v2")
+            self._connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+                (_DECISION_ENTRY_MIGRATION_ID,),
+            )
 
     def _apply_decision_migration(self) -> None:
         applied = self._connection.execute(
