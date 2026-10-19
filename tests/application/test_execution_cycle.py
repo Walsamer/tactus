@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import sqlite3
 from datetime import timedelta
 
 import pytest
@@ -568,3 +570,121 @@ def test_applied_decision_survives_restart(tmp_path):
         assert reopened.work_order_snapshot(WORK_ORDER)[1] is WorkOrderState.OPEN
     finally:
         reopened.close()
+
+
+# -- issue #8 follow-up: faults after the callback still roll the entity back --
+
+
+class _FailingConnection:
+    """Proxy that fails one statement or the commit, after the effect ran."""
+
+    def __init__(self, connection, *, fail_on: str):
+        self._connection = connection
+        self._fail_on = fail_on
+
+    def execute(self, sql, params=()):
+        if self._fail_on in sql:
+            raise sqlite3.OperationalError(f"injected failure: {self._fail_on}")
+        return self._connection.execute(sql, params)
+
+    def fetchone(self):
+        return self._connection.fetchone()
+
+    def fetchall(self):
+        return self._connection.fetchall()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def _decision_envelope(decision_id: str) -> dict:
+    return _envelope(
+        proposal_id=decision_id,
+        intent=_intent(intent_id=f"intent-{decision_id}", decision_id=decision_id),
+    )
+
+
+def _failing_transaction(db, fail_on):
+    real_transaction = db._transaction
+
+    @contextlib.contextmanager
+    def failing_transaction():
+        original = db._connection
+        db._connection = _FailingConnection(original, fail_on=fail_on)
+        try:
+            with real_transaction():
+                yield
+        finally:
+            db._connection = original
+
+    return failing_transaction
+
+
+@pytest.mark.parametrize(
+    "fail_on",
+    [
+        "INSERT INTO recovery_decision_inbox",   # after the effect + projection
+        "COMMIT",                                # after the whole unit of work
+    ],
+)
+def test_recovery_fault_after_the_callback_leaves_no_partial_state(tmp_path, fail_on, monkeypatch):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    before_snapshot = db.work_order_snapshot(WORK_ORDER)
+    before_entity = (work_order.state, work_order.readiness)
+
+    monkeypatch.setattr(db, "_transaction", _failing_transaction(db, fail_on))
+
+    with pytest.raises(sqlite3.OperationalError):
+        cycle.apply_recovery_decision(
+            work_order,
+            _decision_envelope(f"proposal-fault-{fail_on.split()[0].lower()}"),
+            state_port=db,
+            expected_revision=before_snapshot[0],
+        )
+
+    monkeypatch.undo()
+    assert db.work_order_snapshot(WORK_ORDER) == before_snapshot
+    assert (work_order.state, work_order.readiness) == before_entity
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox"
+    ).fetchone()[0] == 0
+
+
+def test_attempt_closure_failure_restores_the_entity(tmp_path, monkeypatch):
+    """The attempt is still open, so the closure UPDATE runs and can fail."""
+    cycle, db, work_order, accepted = _cycle(tmp_path)
+    before_snapshot = db.work_order_snapshot(WORK_ORDER)
+    before_entity = (work_order.state, work_order.readiness)
+
+    monkeypatch.setattr(
+        db, "_transaction", _failing_transaction(db, "UPDATE execution_attempts SET closed_at")
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        cycle.apply_recovery_decision(
+            work_order,
+            _decision_envelope("proposal-fault-closure"),
+            state_port=db,
+            expected_revision=before_snapshot[0],
+        )
+
+    monkeypatch.undo()
+    assert db.work_order_snapshot(WORK_ORDER) == before_snapshot
+    assert (work_order.state, work_order.readiness) == before_entity
+    assert db.latest_attempt(WORK_ORDER).closed_at is None
+
+
+def test_replay_never_authorizes_a_second_dispatch(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    envelope = _decision_envelope("proposal-redispatch")
+
+    first = cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=_rev(db)
+    )
+    replay = cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=_rev(db)
+    )
+
+    assert first.applied is True and first.next_intent is not None
+    assert replay.applied is False
+    assert replay.next_intent is None

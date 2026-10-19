@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import uuid
 from collections.abc import Callable
+import contextlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,10 +179,23 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         try:
             yield
         except BaseException:
-            self._connection.execute("ROLLBACK")
+            self._rollback()
             raise
-        else:
+        try:
             self._connection.execute("COMMIT")
+        except BaseException:
+            # A failed COMMIT must not leave the transaction open: any later
+            # statement on this connection would then run inside the abandoned
+            # transaction and commit it implicitly, publishing effects the
+            # caller was told had failed.
+            self._rollback()
+            raise
+
+    def _rollback(self) -> None:
+        """Roll back, never masking the original failure with a second error."""
+
+        with contextlib.suppress(Exception):
+            self._connection.execute("ROLLBACK")
 
     # WorkOrder persistence is deliberately small: richer source provenance and
     # blockers are owned by their respective application slices.
