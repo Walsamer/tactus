@@ -28,7 +28,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -135,6 +135,15 @@ def _verify_ictus_pin(ictus_root: Path, binary: Path) -> dict[str, Any]:
         "binary": str(binary),
         "binary_sha256": digest,
     }
+
+
+def _fact(snapshot: Mapping[str, Any], key: str) -> str:
+    """Read one snapshot fact; provenance lives in facts, never top-level keys."""
+
+    for fact in snapshot.get("facts") or []:
+        if fact.get("key") == key:
+            return str(fact.get("value") or "")
+    raise ValidationError(f"snapshot is missing required fact {key!r}")
 
 
 def _decide(
@@ -286,6 +295,52 @@ def _bootstrap_snapshot(
     return build_state_snapshot(
         work_order=work_order,
         phase=SnapshotPhase.INITIAL,
+        semantic_budget=semantic_budget,
+        step_retry=step_retry,
+        snapshot_id=snapshot_id,
+        timestamp=now,
+        capability_id=CAPABILITY,
+        dependencies_satisfied=True,
+        source_revision=SOURCE_REVISION,
+        work_order_revision=0,
+    )
+
+
+def _recovery_probe_snapshot(
+    work_order: WorkOrder,
+    *,
+    semantic_budget: SemanticBudget,
+    step_retry: StepRetryDiagnostic,
+    snapshot_id: str,
+    category: str = "PROCESS_CRASH",
+) -> dict[str, Any]:
+    """Genuine RECOVERY snapshot: real observation, correlated attempt, phase."""
+
+    now = _now()
+    observation = parse_observation(
+        {
+            "schema_version": 1,
+            "observation_id": f"obs-{snapshot_id}",
+            "execution_id": f"run-{snapshot_id}",
+            "intent_id": f"intent-{snapshot_id}",
+            "category": category,
+            "observed_at": now.isoformat(),
+            "message": "recovery probe",
+            "evidence": [{"kind": "dagster_run", "uri": f"dagster://runs/{snapshot_id}"}],
+        }
+    )
+    attempt = ExecutionAttempt(
+        attempt_id=ExecutionAttemptId(f"attempt-{snapshot_id}"),
+        work_order_id=work_order.id,
+        intent_id=ExecutionIntentId(f"intent-{snapshot_id}"),
+        dagster_run_id=DagsterRunId(f"run-{snapshot_id}"),
+        accepted_at=now,
+    )
+    return build_state_snapshot(
+        work_order=work_order,
+        phase=SnapshotPhase.RECOVERY,
+        observation=observation,
+        attempt=attempt,
         semantic_budget=semantic_budget,
         step_retry=step_retry,
         snapshot_id=snapshot_id,
@@ -492,8 +547,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         #    decision itself is genuinely computed by Ictus.
         bootstrap = _bootstrap_snapshot(
             work_order,
-            semantic_budget=SemanticBudget(1, 3),
-            step_retry=StepRetryDiagnostic(2),
+            # A genuine INITIAL authorization: no prior semantic attempt and no
+            # step-retry history. A nonzero count here is a *recovery* state and
+            # Ictus now (correctly) refuses to authorize initial execution for it.
+            semantic_budget=SemanticBudget(0, 3),
+            step_retry=StepRetryDiagnostic(0),
             snapshot_id="snapshot-entry",
         )
         bootstrap_payload, bootstrap_decision = _decide(binary, bootstrap)
@@ -510,9 +568,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             state_port=db,
             expected_revision=starting_revision,
             initial_context=InitialAuthorizationContext(
-                phase=bootstrap["phase"],
+                # Phase and digest are *facts*, not top-level keys: the
+                # snapshot's provenance lives in snapshot.phase /
+                # snapshot.digest, so the context is bound to the very snapshot
+                # Ictus decided on.
+                phase=_fact(bootstrap, "snapshot.phase"),
                 snapshot_id=bootstrap["snapshot_id"],
-                snapshot_digest=bootstrap["digest"],
+                snapshot_digest=_fact(bootstrap, "snapshot.digest"),
                 source_revision=SourceRevision(SOURCE_REVISION),
                 work_order_revision=starting_revision,
             ),
@@ -636,7 +698,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             ("exhausted_budget", SemanticBudget(3, 3), StepRetryDiagnostic(0)),
         ):
-            snapshot = _bootstrap_snapshot(
+            snapshot = _recovery_probe_snapshot(
                 work_order,
                 semantic_budget=budget,
                 step_retry=step_retry,
