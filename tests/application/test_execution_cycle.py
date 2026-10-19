@@ -18,6 +18,7 @@ from tactus.domain import (
     ClaimToken,
     DagsterRunId,
     ImmutableRecordConflictError,
+    InitialAuthorizationContext,
     MissingChildPlanError,
     StaleWorkOrderRevisionError,
     OpenStatus,
@@ -604,6 +605,23 @@ def _decision_envelope(decision_id: str) -> dict:
     )
 
 
+def _legacy_decision_row(db, decision_id: str, *, digest: str = "digest-legacy",
+                        work_order_id: str = "WO-LEGACY") -> None:
+    """Insert one historical ledger row with a real parent Work Order."""
+
+    db._connection.execute(
+        "INSERT OR IGNORE INTO work_orders(work_order_id, revision, source_revision,"
+        " state, readiness, updated_at) VALUES (?, 0, ?, 'OPEN', 'READY', 'now')",
+        (work_order_id, SOURCE),
+    )
+    db._connection.execute(
+        """INSERT OR IGNORE INTO recovery_decision_inbox(
+               decision_id, work_order_id, attempt_id, decision_digest, applied_at)
+           VALUES (?, ?, NULL, ?, 'now')""",
+        (decision_id, work_order_id, digest),
+    )
+
+
 def _failing_transaction(db, fail_on):
     real_transaction = db._transaction
 
@@ -712,8 +730,16 @@ def test_entry_decision_applies_before_the_first_attempt(tmp_path):
         target_id="WO-ENTRY",
         intent=_intent(intent_id="intent-entry", decision_id="proposal-entry", work_order_id="WO-ENTRY"),
     )
+    context = InitialAuthorizationContext(
+        phase="INITIAL",
+        snapshot_id="snapshot-initial-entry",
+        snapshot_digest="digest-initial-entry",
+        source_revision=SourceRevision(SOURCE),
+        work_order_revision=WorkOrderRevision(0),
+    )
     applied = cycle.apply_recovery_decision(
-        work_order, envelope, state_port=db, expected_revision=WorkOrderRevision(0)
+        work_order, envelope, state_port=db, expected_revision=WorkOrderRevision(0),
+        initial_context=context,
     )
 
     assert applied.applied is True
@@ -725,7 +751,8 @@ def test_entry_decision_applies_before_the_first_attempt(tmp_path):
     ).fetchone()[0] == 1
 
     replay = cycle.apply_recovery_decision(
-        work_order, envelope, state_port=db, expected_revision=WorkOrderRevision(1)
+        work_order, envelope, state_port=db, expected_revision=WorkOrderRevision(1),
+        initial_context=context,
     )
     assert replay.applied is False and replay.next_intent is None
     db.close()
@@ -807,11 +834,7 @@ def test_entry_migration_is_resumable_after_interruption(tmp_path):
         "WO-MIG", revision=WorkOrderRevision(0), source_revision=SourceRevision(SOURCE),
         state=work_order.state, readiness=work_order.readiness, at=now,
     )
-    db._connection.execute(
-        """INSERT INTO recovery_decision_inbox(
-               decision_id, work_order_id, attempt_id, decision_digest, applied_at)
-           VALUES ('decision-keep', 'WO-MIG', NULL, 'digest-keep', 'now')"""
-    )
+    _legacy_decision_row(db, "decision-keep", digest="digest-keep", work_order_id="WO-MIG")
     # Simulate an interruption *after* RENAME: the rebuild table exists, the
     # real table does not, and the migration is not recorded.
     db._connection.execute(
@@ -843,3 +866,178 @@ def test_entry_migration_is_resumable_after_interruption(tmp_path):
     except Exception:
         reopened.close()
         raise
+
+
+@pytest.mark.parametrize("copy_done", [False, True])
+def test_migration_reconciles_when_both_tables_exist(tmp_path, copy_done):
+    """Interrupted with both tables present, before or after the row copy."""
+    db_path = tmp_path / "both.sqlite"
+    db = SqliteExecutionAdmission(db_path)
+    _legacy_decision_row(db, "decision-both", digest="digest-both", work_order_id="WO-X")
+    db._connection.execute(
+        "ALTER TABLE recovery_decision_inbox RENAME TO recovery_decision_inbox_v2"
+    )
+    db._connection.execute(
+        """CREATE TABLE recovery_decision_inbox (
+            decision_id TEXT PRIMARY KEY,
+            work_order_id TEXT NOT NULL REFERENCES work_orders(work_order_id),
+            attempt_id TEXT REFERENCES execution_attempts(attempt_id),
+            decision_digest TEXT NOT NULL,
+            applied_at TEXT NOT NULL)"""
+    )
+    if copy_done:
+        db._connection.execute(
+            """INSERT INTO recovery_decision_inbox
+               SELECT decision_id, work_order_id, attempt_id, decision_digest, applied_at
+               FROM recovery_decision_inbox_v2"""
+        )
+    db._connection.execute(
+        "DELETE FROM schema_migrations WHERE version = '0003_recovery_decision_entry'"
+    )
+    db.close()
+
+    reopened = SqliteExecutionAdmission(db_path)
+    try:
+        rows = reopened._connection.execute(
+            "SELECT decision_id, decision_digest FROM recovery_decision_inbox"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [("decision-both", "digest-both")]
+        assert reopened._connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'recovery_decision_inbox_v2'"
+        ).fetchone()[0] == 0
+        assert reopened._connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall() == []
+    finally:
+        reopened.close()
+
+
+def test_migration_rejects_conflicting_rows_in_both_tables(tmp_path):
+    db_path = tmp_path / "conflict.sqlite"
+    db = SqliteExecutionAdmission(db_path)
+    _legacy_decision_row(db, "d1", digest="digest-a", work_order_id="WO-X")
+    db._connection.execute("ALTER TABLE recovery_decision_inbox RENAME TO recovery_decision_inbox_v2")
+    db._connection.execute(
+        """CREATE TABLE recovery_decision_inbox (
+            decision_id TEXT PRIMARY KEY,
+            work_order_id TEXT NOT NULL REFERENCES work_orders(work_order_id),
+            attempt_id TEXT REFERENCES execution_attempts(attempt_id),
+            decision_digest TEXT NOT NULL,
+            applied_at TEXT NOT NULL)"""
+    )
+    db._connection.execute(
+        """INSERT INTO recovery_decision_inbox(
+               decision_id, work_order_id, attempt_id, decision_digest, applied_at)
+           VALUES ('d1', 'WO-X', NULL, 'digest-b', 'now')"""
+    )
+    db._connection.execute(
+        "DELETE FROM schema_migrations WHERE version = '0003_recovery_decision_entry'"
+    )
+    db.close()
+
+    with pytest.raises(ImmutableRecordConflictError):
+        SqliteExecutionAdmission(db_path)
+
+
+# -- trusted INITIAL authorization -----------------------------------------
+
+
+def _initial_setup(tmp_path):
+    now = utcnow()
+    db = SqliteExecutionAdmission(tmp_path / "initial.sqlite")
+    work_order = WorkOrder.create("WO-INIT")
+    work_order.admit(reason="imported", authority=TransitionAuthority.OPERATOR, at=now)
+    work_order.set_readiness(OpenStatus.READY)
+    work_order.claim(
+        reason="initial admission", authority=TransitionAuthority.EXECUTION_ADMISSION, at=now
+    )
+    db.register_work_order(
+        "WO-INIT", revision=WorkOrderRevision(0), source_revision=SourceRevision(SOURCE),
+        state=work_order.state, readiness=work_order.readiness, at=now,
+    )
+    return db, work_order, ExecutionCycle(db)
+
+
+def _initial_context(**overrides):
+    values = dict(
+        phase="INITIAL",
+        snapshot_id="snapshot-initial",
+        snapshot_digest="digest-initial",
+        source_revision=SourceRevision(SOURCE),
+        work_order_revision=WorkOrderRevision(0),
+    )
+    values.update(overrides)
+    return InitialAuthorizationContext(**values)
+
+
+def _initial_envelope():
+    return _envelope(
+        proposal_id="proposal-initial",
+        target_id="WO-INIT",
+        intent=_intent(intent_id="intent-init", decision_id="proposal-initial",
+                       work_order_id="WO-INIT"),
+    )
+
+
+def test_initial_authorization_requires_the_trusted_context(tmp_path):
+    db, work_order, cycle = _initial_setup(tmp_path)
+    before = db.work_order_snapshot("WO-INIT")
+
+    with pytest.raises(IntentDecisionError) as ctx:
+        cycle.apply_recovery_decision(
+            work_order, _initial_envelope(), state_port=db, expected_revision=WorkOrderRevision(0)
+        )
+    assert "trusted INITIAL context" in str(ctx.value)
+    assert db.work_order_snapshot("WO-INIT") == before
+    db.close()
+
+
+def test_initial_authorization_rejects_a_forged_phase(tmp_path):
+    db, work_order, cycle = _initial_setup(tmp_path)
+    with pytest.raises(IntentDecisionError) as ctx:
+        cycle.apply_recovery_decision(
+            work_order, _initial_envelope(), state_port=db,
+            expected_revision=WorkOrderRevision(0),
+            initial_context=_initial_context(phase="RECOVERY"),
+        )
+    assert "phase INITIAL" in str(ctx.value)
+    assert db.work_order_snapshot("WO-INIT")[0] == WorkOrderRevision(0)
+    db.close()
+
+
+def test_initial_authorization_rejects_a_stale_source_revision(tmp_path):
+    db, work_order, cycle = _initial_setup(tmp_path)
+    with pytest.raises(IntentDecisionError) as ctx:
+        cycle.apply_recovery_decision(
+            work_order, _initial_envelope(), state_port=db,
+            expected_revision=WorkOrderRevision(0),
+            initial_context=_initial_context(source_revision=SourceRevision("9" * 40)),
+        )
+    assert "source revision" in str(ctx.value)
+    db.close()
+
+
+def test_initial_authorization_rejects_a_stale_work_order_revision(tmp_path):
+    db, work_order, cycle = _initial_setup(tmp_path)
+    with pytest.raises(IntentDecisionError):
+        cycle.apply_recovery_decision(
+            work_order, _initial_envelope(), state_port=db,
+            expected_revision=WorkOrderRevision(3),
+            initial_context=_initial_context(),
+        )
+    assert db.work_order_snapshot("WO-INIT")[0] == WorkOrderRevision(0)
+    db.close()
+
+
+def test_initial_context_is_rejected_once_an_attempt_exists(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    with pytest.raises(IntentDecisionError) as ctx:
+        cycle.apply_recovery_decision(
+            work_order,
+            _decision_envelope("proposal-recovery-after-attempt"),
+            state_port=db,
+            expected_revision=_rev(db),
+            initial_context=_initial_context(),
+        )
+    assert "already has a correlated execution attempt" in str(ctx.value)
+    db.close()

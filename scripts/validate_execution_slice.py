@@ -41,6 +41,7 @@ from tactus.application import (  # noqa: E402
 )
 from tactus.domain import (  # noqa: E402
     ClaimToken,
+    InitialAuthorizationContext,
     DagsterRunId,
     ExecutionAttempt,
     ExecutionAttemptId,
@@ -284,6 +285,47 @@ def _bootstrap_snapshot(
     )
     return build_state_snapshot(
         work_order=work_order,
+        phase=SnapshotPhase.INITIAL,
+        semantic_budget=semantic_budget,
+        step_retry=step_retry,
+        snapshot_id=snapshot_id,
+        timestamp=now,
+        capability_id=CAPABILITY,
+        dependencies_satisfied=True,
+        source_revision=SOURCE_REVISION,
+        work_order_revision=0,
+    )
+
+
+def _unused_bootstrap_snapshot(
+    work_order: WorkOrder,
+    *,
+    semantic_budget: SemanticBudget,
+    step_retry: StepRetryDiagnostic,
+    snapshot_id: str,
+) -> dict[str, Any]:
+    now = _now()
+    observation = parse_observation(
+        {
+            "schema_version": 1,
+            "observation_id": "obs-bootstrap",
+            "execution_id": "bootstrap-run",
+            "intent_id": "bootstrap-intent",
+            "category": "PROCESS_CRASH",
+            "observed_at": now.isoformat(),
+            "message": "bootstrap",
+            "evidence": [{"kind": "dagster_run", "uri": "dagster://runs/bootstrap"}],
+        }
+    )
+    attempt = ExecutionAttempt(
+        attempt_id=ExecutionAttemptId("bootstrap-attempt"),
+        work_order_id=work_order.id,
+        intent_id=ExecutionIntentId("bootstrap-intent"),
+        dagster_run_id=DagsterRunId("bootstrap-run"),
+        accepted_at=now,
+    )
+    return build_state_snapshot(
+        work_order=work_order,
         phase=SnapshotPhase.RECOVERY,
         observation=observation,
         attempt=attempt,
@@ -467,6 +509,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             bootstrap_decision,
             state_port=db,
             expected_revision=starting_revision,
+            initial_context=InitialAuthorizationContext(
+                phase=bootstrap["phase"],
+                snapshot_id=bootstrap["snapshot_id"],
+                snapshot_digest=bootstrap["digest"],
+                source_revision=SourceRevision(SOURCE_REVISION),
+                work_order_revision=starting_revision,
+            ),
         )
         accepted_revision = recovery.work_order_revision
         if accepted_revision is None:
