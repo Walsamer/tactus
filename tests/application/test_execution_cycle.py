@@ -729,3 +729,117 @@ def test_entry_decision_applies_before_the_first_attempt(tmp_path):
     )
     assert replay.applied is False and replay.next_intent is None
     db.close()
+
+
+# -- PR #42 review corrections ---------------------------------------------
+
+
+def test_recovery_snapshot_binds_the_real_attempt(tmp_path):
+    """The RECOVERY snapshot must carry the correlated attempt id, never null."""
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    snapshot = cycle.recovery_snapshot(
+        work_order,
+        observation=parse_observation(_observation(category="PROCESS_CRASH")),
+        attempt=accepted.attempt,
+        submission=receipt,
+        semantic_budget=SemanticBudget(1, 3),
+        step_retry=StepRetryDiagnostic(1),
+        snapshot_id="snapshot-attempt-check",
+        timestamp=utcnow(),
+        capability_id=CAPABILITY,
+        source_revision=SOURCE,
+        work_order_revision=1,
+    )
+    attempt_fact = next(
+        fact for fact in snapshot["facts"] if fact["key"] == "recovery.attempt_id"
+    )
+    assert attempt_fact["value"] == accepted.attempt.attempt_id.value
+
+
+@pytest.mark.parametrize("decision", ["ABORT", "ESCALATE", "DECOMPOSE"])
+def test_recovery_effects_require_a_correlated_attempt(tmp_path, decision):
+    """No attempt ⇒ only the INITIAL authorization is admissible."""
+    now = utcnow()
+    db = SqliteExecutionAdmission(tmp_path / "entry-guard.sqlite")
+    work_order = WorkOrder.create("WO-INITIAL")
+    work_order.admit(reason="imported", authority=TransitionAuthority.OPERATOR, at=now)
+    work_order.set_readiness(OpenStatus.READY)
+    work_order.claim(
+        reason="initial admission", authority=TransitionAuthority.EXECUTION_ADMISSION, at=now
+    )
+    db.register_work_order(
+        "WO-INITIAL", revision=WorkOrderRevision(0),
+        source_revision=SourceRevision(SOURCE), state=work_order.state,
+        readiness=work_order.readiness, at=now,
+    )
+    cycle = ExecutionCycle(db)
+    before = db.work_order_snapshot("WO-INITIAL")
+
+    with pytest.raises(IntentDecisionError) as ctx:
+        cycle.apply_recovery_decision(
+            work_order,
+            _envelope(decision=decision, proposal_id=f"proposal-{decision.lower()}",
+                      target_id="WO-INITIAL", include_intent=False),
+            state_port=db,
+            expected_revision=WorkOrderRevision(0),
+        )
+
+    assert "requires a correlated execution attempt" in str(ctx.value)
+    assert db.work_order_snapshot("WO-INITIAL") == before
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox"
+    ).fetchone()[0] == 0
+    db.close()
+
+
+def test_entry_migration_is_resumable_after_interruption(tmp_path):
+    """A crash between RENAME and DROP must be finished, not redone."""
+    db_path = tmp_path / "resume.sqlite"
+    db = SqliteExecutionAdmission(db_path)
+    now = utcnow()
+    work_order = WorkOrder.create("WO-MIG")
+    work_order.admit(reason="imported", authority=TransitionAuthority.OPERATOR, at=now)
+    work_order.set_readiness(OpenStatus.READY)
+    work_order.claim(
+        reason="admission", authority=TransitionAuthority.EXECUTION_ADMISSION, at=now
+    )
+    db.register_work_order(
+        "WO-MIG", revision=WorkOrderRevision(0), source_revision=SourceRevision(SOURCE),
+        state=work_order.state, readiness=work_order.readiness, at=now,
+    )
+    db._connection.execute(
+        """INSERT INTO recovery_decision_inbox(
+               decision_id, work_order_id, attempt_id, decision_digest, applied_at)
+           VALUES ('decision-keep', 'WO-MIG', NULL, 'digest-keep', 'now')"""
+    )
+    # Simulate an interruption *after* RENAME: the rebuild table exists, the
+    # real table does not, and the migration is not recorded.
+    db._connection.execute(
+        "ALTER TABLE recovery_decision_inbox RENAME TO recovery_decision_inbox_v2"
+    )
+    db._connection.execute(
+        "DELETE FROM schema_migrations WHERE version = '0003_recovery_decision_entry'"
+    )
+    db.close()
+
+    reopened = SqliteExecutionAdmission(db_path)
+    try:
+        assert reopened._connection.execute(
+            "SELECT COUNT(*) FROM recovery_decision_inbox"
+        ).fetchone()[0] == 1
+        assert reopened._connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'recovery_decision_inbox_v2'"
+        ).fetchone()[0] == 0
+        assert reopened._connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = '0003_recovery_decision_entry'"
+        ).fetchone()[0] == 1
+        # Reopening again is a no-op and the row still survives.
+        reopened.close()
+        again = SqliteExecutionAdmission(db_path)
+        assert again._connection.execute(
+            "SELECT decision_id FROM recovery_decision_inbox"
+        ).fetchone()[0] == "decision-keep"
+        again.close()
+    except Exception:
+        reopened.close()
+        raise
