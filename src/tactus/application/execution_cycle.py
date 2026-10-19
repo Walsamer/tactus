@@ -633,7 +633,7 @@ class ExecutionCycle:
                 "recovery requires a durable Dagster receipt"
             )
         correlated_attempt = ExecutionAttempt(
-            attempt_id=None if attempt is None else attempt.attempt_id,
+            attempt_id=attempt.attempt_id,
             work_order_id=attempt.work_order_id,
             intent_id=attempt.intent_id,
             dagster_run_id=submission.dagster_run_id,
@@ -711,6 +711,21 @@ class ExecutionCycle:
         # An *entry* decision authorizes the first attempt, so no attempt exists
         # yet; a recovery decision is bound to the attempt that just failed.
         attempt = self._admission.find_latest_attempt(work_order.id)
+        if attempt is None:
+            # No attempt exists yet: this can only be the INITIAL authorization
+            # that creates the first semantic attempt. Recovery effects
+            # (ESCALATE / ABORT / DECOMPOSE) require a correlated attempt and
+            # must never be reachable without one.
+            if not decision.kind.requires_capability:
+                raise IntentDecisionError(
+                    f"Ictus {decision.kind.value} requires a correlated execution "
+                    "attempt; the absence of an attempt authorizes only the "
+                    "INITIAL execution decision"
+                )
+            if next_intent is None:
+                raise IntentDecisionError(
+                    "an INITIAL authorization requires the Ictus ExecutionIntent"
+                )
         record = RecoveryDecisionRecord(
             decision_id=decision.decision_id,
             work_order_id=work_order.id,
