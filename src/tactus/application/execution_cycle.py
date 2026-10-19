@@ -633,7 +633,7 @@ class ExecutionCycle:
                 "recovery requires a durable Dagster receipt"
             )
         correlated_attempt = ExecutionAttempt(
-            attempt_id=attempt.attempt_id,
+            attempt_id=None if attempt is None else attempt.attempt_id,
             work_order_id=attempt.work_order_id,
             intent_id=attempt.intent_id,
             dagster_run_id=submission.dagster_run_id,
@@ -708,11 +708,13 @@ class ExecutionCycle:
         # terminal outcome or children), the attempt closure and the
         # idempotency row. The live entity is only mutated inside that
         # transaction, so a replay or a rollback never leaves it ahead.
-        attempt = self._admission.latest_attempt(work_order.id)
+        # An *entry* decision authorizes the first attempt, so no attempt exists
+        # yet; a recovery decision is bound to the attempt that just failed.
+        attempt = self._admission.find_latest_attempt(work_order.id)
         record = RecoveryDecisionRecord(
             decision_id=decision.decision_id,
             work_order_id=work_order.id,
-            attempt_id=attempt.attempt_id,
+            attempt_id=None if attempt is None else attempt.attempt_id,
             decision_digest=canonical_digest(
                 {
                     "decision": decision.kind.value,

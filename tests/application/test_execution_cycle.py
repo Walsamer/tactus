@@ -688,3 +688,44 @@ def test_replay_never_authorizes_a_second_dispatch(tmp_path):
     assert first.applied is True and first.next_intent is not None
     assert replay.applied is False
     assert replay.next_intent is None
+
+
+def test_entry_decision_applies_before_the_first_attempt(tmp_path):
+    """The bootstrap decision authorizes attempt #1, so no attempt is bound."""
+    from datetime import timedelta as _td
+
+    now = utcnow()
+    db = SqliteExecutionAdmission(tmp_path / "entry.sqlite")
+    work_order = WorkOrder.create("WO-ENTRY")
+    work_order.admit(reason="imported", authority=TransitionAuthority.OPERATOR, at=now)
+    work_order.set_readiness(OpenStatus.READY)
+    work_order.claim(reason="entry admission", authority=TransitionAuthority.EXECUTION_ADMISSION, at=now)
+    db.register_work_order(
+        "WO-ENTRY", revision=WorkOrderRevision(0),
+        source_revision=SourceRevision(SOURCE), state=work_order.state,
+        readiness=work_order.readiness, at=now,
+    )
+    cycle = ExecutionCycle(db)
+
+    envelope = _envelope(
+        proposal_id="proposal-entry",
+        target_id="WO-ENTRY",
+        intent=_intent(intent_id="intent-entry", decision_id="proposal-entry", work_order_id="WO-ENTRY"),
+    )
+    applied = cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=WorkOrderRevision(0)
+    )
+
+    assert applied.applied is True
+    assert applied.application is not None
+    assert work_order.state is WorkOrderState.OPEN
+    assert work_order.readiness is OpenStatus.READY
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox WHERE attempt_id IS NULL"
+    ).fetchone()[0] == 1
+
+    replay = cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=WorkOrderRevision(1)
+    )
+    assert replay.applied is False and replay.next_intent is None
+    db.close()

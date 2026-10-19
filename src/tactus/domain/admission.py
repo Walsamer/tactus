@@ -349,7 +349,9 @@ class RecoveryDecisionRecord:
 
     decision_id: str
     work_order_id: WorkOrderId
-    attempt_id: ExecutionAttemptId
+    #: ``None`` for an *entry* decision: it authorizes the first attempt, so no
+    #: execution attempt exists to bind (or close) yet.
+    attempt_id: ExecutionAttemptId | None
     decision_digest: str
     expected_revision: WorkOrderRevision
 
@@ -407,6 +409,10 @@ class DurableExecutionAdmissionPort(Protocol):
     ) -> bool: ...
 
     def latest_attempt(self, work_order_id: WorkOrderId | str) -> DurableAttempt: ...
+
+    def find_latest_attempt(
+        self, work_order_id: WorkOrderId | str
+    ) -> DurableAttempt | None: ...
 
     def apply_recovery_decision(
         self,
