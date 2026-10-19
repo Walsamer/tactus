@@ -49,6 +49,7 @@ from tactus.domain import (
     ExecutionIntentId,
     FailureObservation,
     OpenStatus,
+    RecoveryDecisionRecord,
     ResultRecord,
     SemanticDecision,
     SourceRevision,
@@ -317,9 +318,12 @@ class RecoveryApplication:
     """Outcome of applying one validated Ictus recovery decision."""
 
     decision: SemanticDecision
-    application: DecisionApplicationRecord
+    #: ``None`` on an idempotent replay (the decision already applied).
+    application: DecisionApplicationRecord | None
     next_intent: ValidatedExecutionIntent | None
     work_order_revision: WorkOrderRevision | None
+    #: ``False`` when this decision was already applied (idempotent replay).
+    applied: bool = True
 
 
 # -- the cycle --------------------------------------------------------------
@@ -698,30 +702,65 @@ class ExecutionCycle:
                 envelope, expected_work_order_id=work_order.id
             )
 
-        # The existing applier owns every lifecycle/readiness guard. Roll the
-        # live entity back if the durable projection rejects the same effect so
-        # callers never observe an in-memory transition that was not persisted.
-        original = _snapshot_work_order(work_order)
+        # Bind the decision to the exact attempt it recovers and to the
+        # revision it was validated against. Everything below commits in one
+        # transaction: the guarded projection, the domain effect (intervention,
+        # terminal outcome or children), the attempt closure and the
+        # idempotency row. The live entity is only mutated inside that
+        # transaction, so a replay or a rollback never leaves it ahead.
+        attempt = self._admission.latest_attempt(work_order.id)
+        record = RecoveryDecisionRecord(
+            decision_id=decision.decision_id,
+            work_order_id=work_order.id,
+            attempt_id=attempt.attempt_id,
+            decision_digest=canonical_digest(
+                {
+                    "decision": decision.kind.value,
+                    "decision_id": decision.decision_id,
+                    "capability": decision.capability,
+                    "proposal": dict(proposal),
+                    "policy": dict(policy),
+                }
+            ),
+            expected_revision=expected_revision,
+        )
+
         applier = DecisionApplier()
-        try:
-            application = applier.apply(
-                work_order, decision, child_plan=child_plan, at=at
-            )
-            revision = state_port.apply_work_order_transition(
-                work_order.id,
-                expected_revision=expected_revision,
-                state=work_order.state,
-                readiness=work_order.readiness,
-                at=at,
-            )
-        except Exception:
-            _restore_work_order(work_order, original)
-            raise
+        original = _snapshot_work_order(work_order)
+        state = {"application": None}
+
+        def apply_effect(connection: object) -> None:
+            # Only executed by the ledger when this decision is not a replay.
+            try:
+                started_at = None if at is None else at
+                state["application"] = applier.apply(
+                    work_order, decision, child_plan=child_plan, at=started_at
+                )
+                state_port.apply_transition_in(
+                    connection,  # same transaction as the ledger row
+                    work_order.id,
+                    expected_revision=expected_revision,
+                    state=work_order.state,
+                    readiness=work_order.readiness,
+                    at=at,
+                )
+            except BaseException:
+                _restore_work_order(work_order, original)
+                raise
+
+        applied = self._admission.apply_recovery_decision(
+            record, apply_domain_effect=apply_effect, at=at
+        )
+        # ``None`` is a replay: the decision was already applied, so no new
+        # application record and no second mutation.
+        application = state["application"]
+        revision, _, _ = self._admission.work_order_snapshot(work_order.id)
         return RecoveryApplication(
             decision=decision,
             application=application,
             next_intent=next_intent,
             work_order_revision=revision,
+            applied=applied,
         )
 
     # -- durable helpers -------------------------------------------------

@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Iterator
 
 from tactus.domain.admission import (
+    RecoveryApplicationError,
+    RecoveryDecisionRecord,
     ClaimToken,
     ClaimUnavailableError,
     DagsterRunId,
@@ -45,6 +47,9 @@ from tactus.domain.work_order import OpenStatus, WorkOrderState
 
 
 _MIGRATION_ID = "0001_execution_admission"
+#: Recovery-decision idempotency ledger (issue #8). Separate migration id so an
+#: existing local ledger is upgraded in place without replaying the base DDL.
+_DECISION_MIGRATION_ID = "0002_recovery_decision_inbox"
 
 
 def _timestamp(value: datetime) -> str:
@@ -89,8 +94,11 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         applied = self._connection.execute(
             "SELECT 1 FROM schema_migrations WHERE version = ?", (_MIGRATION_ID,)
         ).fetchone()
-        if applied is not None:
-            return
+        if applied is None:
+            self._apply_base_migration()
+        self._apply_decision_migration()
+
+    def _apply_base_migration(self) -> None:
         self._connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS work_orders (
@@ -140,6 +148,28 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         )
         self._connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", (_MIGRATION_ID,)
+        )
+
+    def _apply_decision_migration(self) -> None:
+        applied = self._connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?", (_DECISION_MIGRATION_ID,)
+        ).fetchone()
+        if applied is not None:
+            return
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS recovery_decision_inbox (
+                decision_id TEXT PRIMARY KEY,
+                work_order_id TEXT NOT NULL REFERENCES work_orders(work_order_id),
+                attempt_id TEXT NOT NULL REFERENCES execution_attempts(attempt_id),
+                decision_digest TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            """
+        )
+        self._connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+            (_DECISION_MIGRATION_ID,),
         )
 
     @contextmanager
@@ -378,6 +408,87 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
             if updated.rowcount != 1:
                 raise IneligibleWorkOrderError(f"no active dispatch for submission {identifier}")
 
+    def latest_attempt(self, work_order_id: WorkOrderId | str) -> DurableAttempt:
+        """Return the most recently accepted attempt for a Work Order."""
+
+        identifier = _work_order_id(work_order_id)
+        row = self._connection.execute(
+            """SELECT * FROM execution_attempts WHERE work_order_id = ?
+            ORDER BY accepted_at DESC, attempt_id DESC LIMIT 1""",
+            (str(identifier),),
+        ).fetchone()
+        if row is None:
+            raise RecoveryApplicationError(
+                f"Work Order {identifier} has no execution attempt to recover"
+            )
+        return _attempt_from_row(row)
+
+    def apply_recovery_decision(
+        self,
+        record: RecoveryDecisionRecord,
+        *,
+        apply_domain_effect: Callable[[sqlite3.Connection], None] | None = None,
+        at: datetime | None = None,
+    ) -> bool:
+        """Apply one validated recovery decision exactly once, atomically.
+
+        One ``BEGIN IMMEDIATE`` transaction covers the domain effect (the
+        guarded Work Order projection plus any intervention/terminal record),
+        the closure of the attempt being recovered, and the idempotency ledger
+        row. A redelivery with the same digest is a replay and applies nothing;
+        a redelivery with a changed digest is an immutable-record conflict.
+        """
+
+        if not isinstance(record, RecoveryDecisionRecord):
+            raise TypeError("record must be a RecoveryDecisionRecord")
+        applied_at = at if at is not None else utcnow()
+        with self._transaction():
+            previous = self._connection.execute(
+                "SELECT * FROM recovery_decision_inbox WHERE decision_id = ?",
+                (record.decision_id,),
+            ).fetchone()
+            if previous is not None:
+                if (
+                    previous["attempt_id"] == str(record.attempt_id)
+                    and previous["decision_digest"] == record.decision_digest
+                ):
+                    return False
+                raise ImmutableRecordConflictError(
+                    "recovery decision identity was replayed with a changed payload"
+                )
+            attempt = self._connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?",
+                (str(record.attempt_id),),
+            ).fetchone()
+            if attempt is None:
+                raise RecoveryApplicationError(
+                    "recovery decision references an unknown execution attempt"
+                )
+            if attempt["work_order_id"] != str(record.work_order_id):
+                raise RecoveryApplicationError(
+                    "recovery decision attempt does not belong to the Work Order"
+                )
+            if apply_domain_effect is not None:
+                apply_domain_effect(self._connection)
+            if attempt["closed_at"] is None:
+                self._connection.execute(
+                    "UPDATE execution_attempts SET closed_at = ? WHERE attempt_id = ?",
+                    (_timestamp(applied_at), str(record.attempt_id)),
+                )
+            self._connection.execute(
+                """INSERT INTO recovery_decision_inbox(
+                       decision_id, work_order_id, attempt_id, decision_digest, applied_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    record.decision_id,
+                    str(record.work_order_id),
+                    str(record.attempt_id),
+                    record.decision_digest,
+                    _timestamp(applied_at),
+                ),
+            )
+            return True
+
     def apply_result(
         self,
         result: ResultRecord,
@@ -469,25 +580,62 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
                 raise ValueError("an OPEN projection requires READY or BLOCKED readiness")
         elif readiness is not None:
             raise ValueError("only OPEN Work Orders may carry readiness")
-        applied_at = _timestamp(at if at is not None else utcnow())
         with self._transaction():
-            updated = self._connection.execute(
-                """UPDATE work_orders
-                SET state = ?, readiness = ?, revision = revision + 1, updated_at = ?
-                WHERE work_order_id = ? AND revision = ?""",
-                (
-                    state.value,
-                    readiness.value if readiness is not None else None,
-                    applied_at,
-                    str(identifier),
-                    expected_revision.value,
-                ),
+            return self.apply_transition_in(
+                self._connection,
+                identifier,
+                expected_revision=expected_revision,
+                state=state,
+                readiness=readiness,
+                at=at,
             )
-            if updated.rowcount != 1:
-                raise StaleWorkOrderRevisionError(
-                    "WorkOrder revision changed before the projection was applied"
-                )
-            return WorkOrderRevision(expected_revision.value + 1)
+
+    def apply_transition_in(
+        self,
+        connection: sqlite3.Connection,
+        work_order_id: WorkOrderId | str,
+        *,
+        expected_revision: WorkOrderRevision,
+        state: WorkOrderState,
+        readiness: OpenStatus | None,
+        at: datetime | None = None,
+    ) -> WorkOrderRevision:
+        """Guarded projection CAS executed on a caller-supplied transaction.
+
+        This is the single-write-path primitive shared by
+        :meth:`apply_work_order_transition` and
+        :meth:`apply_recovery_decision`, so a decision effect and its ledger
+        record commit together or not at all.
+        """
+
+        identifier = _work_order_id(work_order_id)
+        if not isinstance(expected_revision, WorkOrderRevision):
+            raise TypeError("expected_revision must be a WorkOrderRevision")
+        if not isinstance(state, WorkOrderState):
+            raise TypeError("state must be a WorkOrderState")
+        if state is WorkOrderState.OPEN:
+            if readiness not in {OpenStatus.READY, OpenStatus.BLOCKED}:
+                raise ValueError("an OPEN projection requires READY or BLOCKED readiness")
+        elif readiness is not None:
+            raise ValueError("only OPEN Work Orders may carry readiness")
+        applied_at = _timestamp(at if at is not None else utcnow())
+        updated = connection.execute(
+            """UPDATE work_orders
+            SET state = ?, readiness = ?, revision = revision + 1, updated_at = ?
+            WHERE work_order_id = ? AND revision = ?""",
+            (
+                state.value,
+                readiness.value if readiness is not None else None,
+                applied_at,
+                str(identifier),
+                expected_revision.value,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise StaleWorkOrderRevisionError(
+                "WorkOrder revision changed before the projection was applied"
+            )
+        return WorkOrderRevision(expected_revision.value + 1)
 
     def _work_order(self, work_order_id: WorkOrderId) -> sqlite3.Row:
         row = self._connection.execute(
