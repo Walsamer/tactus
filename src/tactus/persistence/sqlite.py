@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import uuid
 from collections.abc import Callable
+import contextlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,9 @@ _MIGRATION_ID = "0001_execution_admission"
 #: Recovery-decision idempotency ledger (issue #8). Separate migration id so an
 #: existing local ledger is upgraded in place without replaying the base DDL.
 _DECISION_MIGRATION_ID = "0002_recovery_decision_inbox"
+#: Entry decisions precede the first attempt, so the ledger's attempt binding is
+#: nullable. SQLite cannot relax a NOT NULL constraint in place; rebuild.
+_DECISION_ENTRY_MIGRATION_ID = "0003_recovery_decision_entry"
 
 
 def _timestamp(value: datetime) -> str:
@@ -97,6 +101,7 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         if applied is None:
             self._apply_base_migration()
         self._apply_decision_migration()
+        self._apply_decision_entry_migration()
 
     def _apply_base_migration(self) -> None:
         self._connection.executescript(
@@ -150,6 +155,34 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", (_MIGRATION_ID,)
         )
 
+    def _apply_decision_entry_migration(self) -> None:
+        applied = self._connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (_DECISION_ENTRY_MIGRATION_ID,),
+        ).fetchone()
+        if applied is not None:
+            return
+        self._connection.executescript(
+            """
+            ALTER TABLE recovery_decision_inbox RENAME TO recovery_decision_inbox_v2;
+            CREATE TABLE recovery_decision_inbox (
+                decision_id TEXT PRIMARY KEY,
+                work_order_id TEXT NOT NULL REFERENCES work_orders(work_order_id),
+                attempt_id TEXT REFERENCES execution_attempts(attempt_id),
+                decision_digest TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO recovery_decision_inbox
+                SELECT decision_id, work_order_id, attempt_id, decision_digest, applied_at
+                FROM recovery_decision_inbox_v2;
+            DROP TABLE recovery_decision_inbox_v2;
+            """
+        )
+        self._connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)",
+            (_DECISION_ENTRY_MIGRATION_ID,),
+        )
+
     def _apply_decision_migration(self) -> None:
         applied = self._connection.execute(
             "SELECT 1 FROM schema_migrations WHERE version = ?", (_DECISION_MIGRATION_ID,)
@@ -178,10 +211,23 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
         try:
             yield
         except BaseException:
-            self._connection.execute("ROLLBACK")
+            self._rollback()
             raise
-        else:
+        try:
             self._connection.execute("COMMIT")
+        except BaseException:
+            # A failed COMMIT must not leave the transaction open: any later
+            # statement on this connection would then run inside the abandoned
+            # transaction and commit it implicitly, publishing effects the
+            # caller was told had failed.
+            self._rollback()
+            raise
+
+    def _rollback(self) -> None:
+        """Roll back, never masking the original failure with a second error."""
+
+        with contextlib.suppress(Exception):
+            self._connection.execute("ROLLBACK")
 
     # WorkOrder persistence is deliberately small: richer source provenance and
     # blockers are owned by their respective application slices.
@@ -423,6 +469,17 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
             )
         return _attempt_from_row(row)
 
+    def find_latest_attempt(self, work_order_id: WorkOrderId | str) -> DurableAttempt | None:
+        """Return the newest attempt, or ``None`` before the first admission."""
+
+        identifier = _work_order_id(work_order_id)
+        row = self._connection.execute(
+            """SELECT * FROM execution_attempts WHERE work_order_id = ?
+            ORDER BY accepted_at DESC, attempt_id DESC LIMIT 1""",
+            (str(identifier),),
+        ).fetchone()
+        return None if row is None else _attempt_from_row(row)
+
     def apply_recovery_decision(
         self,
         record: RecoveryDecisionRecord,
@@ -449,28 +506,30 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
             ).fetchone()
             if previous is not None:
                 if (
-                    previous["attempt_id"] == str(record.attempt_id)
+                    previous["attempt_id"] == (None if record.attempt_id is None else str(record.attempt_id))
                     and previous["decision_digest"] == record.decision_digest
                 ):
                     return False
                 raise ImmutableRecordConflictError(
                     "recovery decision identity was replayed with a changed payload"
                 )
-            attempt = self._connection.execute(
-                "SELECT * FROM execution_attempts WHERE attempt_id = ?",
-                (str(record.attempt_id),),
-            ).fetchone()
-            if attempt is None:
-                raise RecoveryApplicationError(
-                    "recovery decision references an unknown execution attempt"
-                )
-            if attempt["work_order_id"] != str(record.work_order_id):
-                raise RecoveryApplicationError(
-                    "recovery decision attempt does not belong to the Work Order"
-                )
+            attempt = None
+            if record.attempt_id is not None:
+                attempt = self._connection.execute(
+                    "SELECT * FROM execution_attempts WHERE attempt_id = ?",
+                    (str(record.attempt_id),),
+                ).fetchone()
+                if attempt is None:
+                    raise RecoveryApplicationError(
+                        "recovery decision references an unknown execution attempt"
+                    )
+                if attempt["work_order_id"] != str(record.work_order_id):
+                    raise RecoveryApplicationError(
+                        "recovery decision attempt does not belong to the Work Order"
+                    )
             if apply_domain_effect is not None:
                 apply_domain_effect(self._connection)
-            if attempt["closed_at"] is None:
+            if attempt is not None and attempt["closed_at"] is None:
                 self._connection.execute(
                     "UPDATE execution_attempts SET closed_at = ? WHERE attempt_id = ?",
                     (_timestamp(applied_at), str(record.attempt_id)),
@@ -482,7 +541,7 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
                 (
                     record.decision_id,
                     str(record.work_order_id),
-                    str(record.attempt_id),
+                    None if record.attempt_id is None else str(record.attempt_id),
                     record.decision_digest,
                     _timestamp(applied_at),
                 ),

@@ -633,7 +633,7 @@ class ExecutionCycle:
                 "recovery requires a durable Dagster receipt"
             )
         correlated_attempt = ExecutionAttempt(
-            attempt_id=attempt.attempt_id,
+            attempt_id=None if attempt is None else attempt.attempt_id,
             work_order_id=attempt.work_order_id,
             intent_id=attempt.intent_id,
             dagster_run_id=submission.dagster_run_id,
@@ -708,11 +708,13 @@ class ExecutionCycle:
         # terminal outcome or children), the attempt closure and the
         # idempotency row. The live entity is only mutated inside that
         # transaction, so a replay or a rollback never leaves it ahead.
-        attempt = self._admission.latest_attempt(work_order.id)
+        # An *entry* decision authorizes the first attempt, so no attempt exists
+        # yet; a recovery decision is bound to the attempt that just failed.
+        attempt = self._admission.find_latest_attempt(work_order.id)
         record = RecoveryDecisionRecord(
             decision_id=decision.decision_id,
             work_order_id=work_order.id,
-            attempt_id=attempt.attempt_id,
+            attempt_id=None if attempt is None else attempt.attempt_id,
             decision_digest=canonical_digest(
                 {
                     "decision": decision.kind.value,
@@ -731,26 +733,30 @@ class ExecutionCycle:
 
         def apply_effect(connection: object) -> None:
             # Only executed by the ledger when this decision is not a replay.
-            try:
-                started_at = None if at is None else at
-                state["application"] = applier.apply(
-                    work_order, decision, child_plan=child_plan, at=started_at
-                )
-                state_port.apply_transition_in(
-                    connection,  # same transaction as the ledger row
-                    work_order.id,
-                    expected_revision=expected_revision,
-                    state=work_order.state,
-                    readiness=work_order.readiness,
-                    at=at,
-                )
-            except BaseException:
-                _restore_work_order(work_order, original)
-                raise
+            state["application"] = applier.apply(
+                work_order, decision, child_plan=child_plan, at=at
+            )
+            state_port.apply_transition_in(
+                connection,  # same transaction as the ledger row
+                work_order.id,
+                expected_revision=expected_revision,
+                state=work_order.state,
+                readiness=work_order.readiness,
+                at=at,
+            )
 
-        applied = self._admission.apply_recovery_decision(
-            record, apply_domain_effect=apply_effect, at=at
-        )
+        # The entity is mutated only inside the transaction, but the transaction
+        # can still fail *after* the callback returns: attempt closure, the
+        # idempotency insert, or COMMIT itself. SQLite rolls those back, so the
+        # in-memory projection must be restored here as well — otherwise the
+        # caller keeps a transition that was never persisted.
+        try:
+            applied = self._admission.apply_recovery_decision(
+                record, apply_domain_effect=apply_effect, at=at
+            )
+        except BaseException:
+            _restore_work_order(work_order, original)
+            raise
         # ``None`` is a replay: the decision was already applied, so no new
         # application record and no second mutation.
         application = state["application"]
@@ -758,7 +764,9 @@ class ExecutionCycle:
         return RecoveryApplication(
             decision=decision,
             application=application,
-            next_intent=next_intent,
+            # A replayed decision authorizes nothing new: the caller must not be
+            # able to redispatch a semantic attempt that was already applied.
+            next_intent=next_intent if applied else None,
             work_order_revision=revision,
             applied=applied,
         )
