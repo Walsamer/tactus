@@ -156,11 +156,22 @@ def test_replace_edges_absent_remove_leaves_graph_unchanged() -> None:
 # -- future extension points ----------------------------------------------
 
 
-def test_high_level_rewrites_are_explicit_todos() -> None:
+def test_split_work_order_is_implemented_and_emits_a_change_record() -> None:
+    # ``split_work_order`` is now implemented for bounded DECOMPOSE
+    # materialization (issue #10); its topology arithmetic is covered in
+    # ``tests/domain/test_decomposition.py``.
     graph = DependencyGraph([dep("A", "B")])
 
-    with pytest.raises(NotImplementedError):
-        graph.split_work_order(WorkOrderId("A"), (WorkOrderId("A-1"),))
+    record = graph.split_work_order(WorkOrderId("B"), (WorkOrderId("B-1"),))
+
+    assert graph.upstream_of(WorkOrderId("B-1")) == (WorkOrderId("A"),)
+    assert record.added == (dep("A", "B-1"),)
+    assert record.removed == (dep("A", "B"),)
+
+
+def test_merge_and_replace_node_remain_explicit_todos() -> None:
+    graph = DependencyGraph([dep("A", "B")])
+
     with pytest.raises(NotImplementedError):
         graph.merge_work_orders((WorkOrderId("A"),), WorkOrderId("A-merged"))
     with pytest.raises(NotImplementedError):
