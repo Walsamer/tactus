@@ -26,6 +26,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from ._clock import utcnow
 from .records import TransitionAuthority
 from .work_order import WorkOrderId
 
@@ -87,6 +88,10 @@ class DependencyChangeRecord:
 
 def _sort_key(work_order_id: WorkOrderId) -> str:
     return work_order_id.value
+
+
+def _edge_sort_key(dependency: "WorkOrderDependency") -> tuple[str, str]:
+    return (dependency.upstream.value, dependency.downstream.value)
 
 
 class DependencyGraph:
@@ -194,16 +199,90 @@ class DependencyGraph:
         self,
         original: WorkOrderId,
         replacements: tuple[WorkOrderId, ...],
-    ) -> None:
-        """TODO: replace one node with multiple replacements.
+        *,
+        authority: TransitionAuthority = TransitionAuthority.RECOVERY,
+        reason: str = "",
+        occurred_at: datetime | None = None,
+    ) -> DependencyChangeRecord:
+        """Replace one node with several replacements, atomically.
 
-        This must preserve and rebuild the original node's upstream/downstream
-        relations, create new Work Orders rather than mutating identities, and
-        eventually emit a ``DependencyChangeRecord``. Exact split semantics
-        belong to the future decomposition/recovery layer.
+        Used by bounded ``DECOMPOSE`` materialization (issue #10). The rewrite
+        preserves the original node's topology: every former upstream node now
+        feeds **each** replacement, and every replacement feeds each former
+        downstream node. Nothing is invented outside the edges the graph
+        already authorised.
+
+        All validation runs against the complete candidate topology before the
+        single commit, so a rejected split leaves the graph untouched. Identities
+        are never mutated: the split node's edges are removed and new nodes are
+        added, rather than rewriting the node in place.
         """
 
-        raise NotImplementedError
+        original_id = (
+            original if isinstance(original, WorkOrderId) else WorkOrderId(original)
+        )
+        normalised: list[WorkOrderId] = []
+        for replacement in replacements:
+            replacement_id = (
+                replacement
+                if isinstance(replacement, WorkOrderId)
+                else WorkOrderId(replacement)
+            )
+            if replacement_id in normalised:
+                raise DuplicateDependencyError(
+                    f"duplicate split replacement: {replacement_id}"
+                )
+            normalised.append(replacement_id)
+
+        if not normalised:
+            raise MissingDependencyError(
+                f"split of {original_id} requires at least one replacement"
+            )
+        if original_id in normalised:
+            raise DuplicateDependencyError(
+                f"a split replacement may not reuse the split identity: {original_id}"
+            )
+
+        replacements_sorted = tuple(sorted(normalised, key=_sort_key))
+        upstream = self.upstream_of(original_id)
+        downstream = self.downstream_of(original_id)
+
+        removed: list[WorkOrderDependency] = []
+        for node in upstream:
+            edge = WorkOrderDependency(upstream=node, downstream=original_id)
+            if edge in self._edges:
+                removed.append(edge)
+        for node in downstream:
+            edge = WorkOrderDependency(upstream=original_id, downstream=node)
+            if edge in self._edges:
+                removed.append(edge)
+
+        added: list[WorkOrderDependency] = []
+        for node in upstream:
+            for replacement in replacements_sorted:
+                edge = WorkOrderDependency(upstream=node, downstream=replacement)
+                if edge not in self._edges:
+                    added.append(edge)
+        for replacement in replacements_sorted:
+            for node in downstream:
+                edge = WorkOrderDependency(upstream=replacement, downstream=node)
+                if edge not in self._edges:
+                    added.append(edge)
+
+        if not removed and not added:
+            raise MissingDependencyError(
+                f"cannot split {original_id}: it has no dependency relations to rewrite"
+            )
+
+        self.replace_edges(remove=removed, add=added)
+
+        return DependencyChangeRecord(
+            removed=tuple(sorted(removed, key=_edge_sort_key)),
+            added=tuple(sorted(added, key=_edge_sort_key)),
+            authority=authority,
+            reason=reason or f"split {original_id} into {len(replacements_sorted)} children",
+            occurred_at=occurred_at or utcnow(),
+        )
 
     def merge_work_orders(
         self,
