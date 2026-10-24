@@ -24,7 +24,9 @@ env:
 jobs:
   python:
     name: python (pytest + verifier)
-    runs-on: ubuntu-latest
+    # Pinned, not ``ubuntu-latest``: the floating label migrates to Ubuntu 26
+    # from 2026-10-19, which would silently change the verification image.
+    runs-on: ubuntu-24.04
     env:
       # Real-boundary conformance reads these; the harness builds the pinned
       # `ictus` binary into the isolated target dir and never touches the
@@ -32,15 +34,15 @@ jobs:
       TACTUS_ICTUS_ROOT: ${{ github.workspace }}/.ictus
       TACTUS_ICTUS_TARGET_DIR: ${{ github.workspace }}/.ictus/target
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
       - name: install (frozen)
         run: uv sync --frozen
 
       - name: checkout pinned Ictus
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: Walsamer/ictus
           ref: 86816d6019af1f23c63428348cd820d706bb0d27
