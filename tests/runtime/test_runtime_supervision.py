@@ -269,21 +269,45 @@ def test_unconfirmed_termination_keeps_the_lock_and_reports_unterminated(tmp_pat
 
 
 def test_recover_terminates_a_process_group_left_by_a_previous_process(tmp_path):
+    """A dead Tactus process leaves an *orphaned* group behind (not our child).
+
+    The process is started by a short-lived helper so it is reparented, which is
+    what actually happens when the supervisor's process dies mid-attempt. A
+    still-parented zombie could never be confirmed from another process, and
+    cannot occur this way.
+    """
     supervisor = _supervisor(tmp_path, "success")
     state = supervisor.state_dir
     state.mkdir(parents=True, exist_ok=True)
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        start_new_session=True,
+
+    helper = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(60)'], start_new_session=True, "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+                "stderr=subprocess.DEVNULL)\n"
+                "print(child.pid, flush=True)\n"
+                "time.sleep(0.2)\n"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
+    assert helper.returncode == 0, helper.stderr
+    pgid = int(helper.stdout.split()[0])
     try:
         (state / "attempt.json").write_text(
             json.dumps(
                 {
                     "attempt_id": "attempt-left-behind",
                     "phase": "running",
-                    "pid": child.pid,
-                    "pgid": child.pid,
+                    "pid": pgid,
+                    "pgid": pgid,
                 }
             )
         )
@@ -291,16 +315,15 @@ def test_recover_terminates_a_process_group_left_by_a_previous_process(tmp_path)
         report = supervisor.recover()
 
         assert report.found is True
-        assert report.recovered is True
+        assert report.recovered is True, report.termination
         assert report.termination is not None and report.termination.confirmed is True
-        assert report.pgid == child.pid
-        assert child.wait(timeout=5) is not None
+        assert report.pgid == pgid
         record = json.loads((state / "attempt.json").read_text())
         assert record["phase"] == "recovered"
         assert record["termination_confirmed"] is True
     finally:
-        if child.poll() is None:
-            terminate_process_group(child.pid, child, 1.0)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
 
 
 def test_recover_is_a_no_op_when_the_last_attempt_finished(tmp_path):
