@@ -130,8 +130,41 @@ durable admission, correlation and decision application.
 | --- | --- | --- |
 | `transient` | execute attempt 1 fails, Dagster retries the step, the run succeeds | one semantic attempt, attempt closed, `IMPLEMENTED` |
 | `terminal` | every execute attempt fails; the run is `FAILURE` and normalizes to `PROCESS_CRASH` | failure observation applied once (attempt closed, Work Order `ACTIVE`), then a real RECOVERY decision (`REEXECUTE`, `ALLOW`, intent present) authorizes exactly one new attempt |
+| `subprocess_failure` | the capability **subprocess** runs and exits non-zero on every attempt | the run is `FAILURE`, normalizes to `PROCESS_CRASH`, and Tactus applies exactly one failure observation |
 | `escalation` | same terminal failure with an exhausted semantic budget (`3/3`) | the real `ESCALATE` decision (no intent) applies one audited `OPEN + BLOCKED` effect with a typed intervention request that survives a process restart |
 | `duplicate` (asserted inside the scenarios above) | resubmitting the same intent returns the same Dagster run ID | replayed observations and replayed decisions apply no second effect |
+
+### The process boundary (literal subprocess hop)
+
+The execute step runs the capability work as **one real OS process** per
+attempt — the hop the acceptance criterion names
+(`independently launched Dagster run -> subprocess -> IMPLEMENTED`):
+
+```text
+dagster-daemon
+  └── code-location server (gRPC)
+        └── execute_op  ──spawn──>  python -I -c <capability-program>
+                                      stdin : {"intent_id", "attempt", "capability", "exit_code"}
+                                      stdout: canonical receipt (intent_id, attempt, payload_sha256)
+                                      cwd   : fresh temp directory, removed afterwards
+                                      env   : PATH only
+```
+
+* **Identity captured:** real `pid`, `executable`, Dagster `run_id` (recorded
+  with the evidence), `intent_id`, `attempt`, `payload_sha256` and
+  `stdout_sha256`.
+* **Bounded:** `timeout=30s` (timeout ⇒ step `Failure`), stdout/stderr captured
+  and truncated at 4096 bytes with an explicit `*_truncated` flag.
+* **Correlated:** the harness asserts the subprocess's `run_id` equals the run
+  that produced the terminal observation, and that the observation is applied
+  (⇒ `IMPLEMENTED`) only after that run reached terminal state.
+* **Unauthorized-intent-neutral:** the exit code never travels in the intent; it
+  is part of the out-of-band control file. The child reads the intent id, it
+  does not rewrite it.
+* **Failure normalization:** a non-zero exit is a step `Failure`, so the run is
+  `FAILURE` and the bridge maps the failed `execute_op` to `PROCESS_CRASH` —
+  the same path as any other terminal execution failure (`subprocess_failure`
+  scenario: four attempts, four distinct pids, exit code 7 each).
 
 ### How the failure is produced without touching authorization
 
@@ -235,8 +268,8 @@ intent-equality digests.
 
 ### What these scenarios do not claim
 
-* They do not execute an agent or a code change; the capability is a bounded
-  no-op whose only variable behaviour is failure.
+* They do not execute an agent or a code change; the capability subprocess is a
+  bounded, deterministic no-op whose only variable behaviour is exit status.
 * They do not prove Tactus-owned PR publication, workspace isolation or
   scheduling (Tactus Issues #22/#23 remain unimplemented and out of scope).
 * The escalation evidence persists as the audited decision row, the guarded

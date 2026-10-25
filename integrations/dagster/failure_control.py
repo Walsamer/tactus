@@ -69,7 +69,12 @@ CONTROL_VERSION = 1
 #: meaningful (i.e. can be made to *stop* failing) while N < 4.
 MAX_INJECTED_ATTEMPTS = 3
 
-_ALLOWED_KEYS = frozenset({"fail_attempts", "fail_hard"})
+_ALLOWED_KEYS = frozenset({"fail_attempts", "fail_hard", "exit_code"})
+
+#: Highest exit status the capability subprocess may be told to return. The
+#: program is a bounded local `python -c`, so anything above 125 is a signal,
+#: not an application exit status.
+MAX_INJECTED_EXIT_CODE = 125
 
 #: Keys that belong to an intent's ``arguments`` in a *different* design. They
 #: are rejected here on purpose: seeing one means somebody is trying to smuggle
@@ -87,26 +92,39 @@ class FailureControlError(RuntimeError):
 class FailureProgramme:
     """How one intent's capability implementation should fail.
 
-    ``fail_attempts=1`` fails the first execute attempt only (Dagster retries
-    and the run succeeds). ``fail_hard=True`` fails every attempt (the run is
-    recorded as failed and produces a terminal observation).
+    Three mutually exclusive shapes:
+
+    * ``fail_attempts=N`` — the execute step fails attempts 1..N, then succeeds
+      (Dagster retries; the run succeeds).
+    * ``fail_hard=True`` — the execute step fails every attempt, before the
+      capability work starts (the run is recorded as failed).
+    * ``exit_code=N`` — the capability *subprocess* runs and returns a non-zero
+      status (the run is recorded as failed after real process work).
+
+    An empty programme injects nothing: the capability subprocess runs normally
+    and exits 0.
     """
 
     fail_attempts: int = 0
     fail_hard: bool = False
+    exit_code: int = 0
 
     @property
     def injects_failure(self) -> bool:
-        return self.fail_hard or self.fail_attempts > 0
+        return self.fail_hard or self.fail_attempts > 0 or self.exit_code > 0
 
     def fails_on(self, attempt: int) -> bool:
-        """Return whether the 1-based ``attempt`` must fail."""
+        """Return whether the 1-based ``attempt`` must fail before the subprocess."""
         if self.fail_hard:
             return True
         return 1 <= attempt <= self.fail_attempts
 
     def as_dict(self) -> dict[str, Any]:
-        return {"fail_attempts": self.fail_attempts, "fail_hard": self.fail_hard}
+        return {
+            "fail_attempts": self.fail_attempts,
+            "fail_hard": self.fail_hard,
+            "exit_code": self.exit_code,
+        }
 
 
 NO_FAILURE = FailureProgramme()
@@ -158,17 +176,31 @@ def _parse_programme(intent_id: str, raw: Any) -> FailureProgramme:
             f"0..{MAX_INJECTED_ATTEMPTS} (the execute step retries at most three times)"
         )
 
-    if fail_hard and fail_attempts:
+    exit_code = raw.get("exit_code", 0)
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
         raise FailureControlError(
-            f"failure programme for intent {intent_id!r} sets both fail_hard and "
-            "fail_attempts; choose one failure shape"
+            f"failure programme for intent {intent_id!r}: exit_code must be an integer"
         )
-    if not fail_hard and fail_attempts == 0:
+    if not 0 <= exit_code <= MAX_INJECTED_EXIT_CODE:
+        raise FailureControlError(
+            f"failure programme for intent {intent_id!r}: exit_code must be within "
+            f"0..{MAX_INJECTED_EXIT_CODE}"
+        )
+
+    shapes = [fail_hard, fail_attempts > 0, exit_code > 0]
+    if sum(shapes) > 1:
+        raise FailureControlError(
+            f"failure programme for intent {intent_id!r} mixes failure shapes "
+            "(fail_hard / fail_attempts / exit_code); choose exactly one"
+        )
+    if not any(shapes):
         raise FailureControlError(
             f"failure programme for intent {intent_id!r} injects nothing; omit the entry "
             "to run the capability normally"
         )
-    return FailureProgramme(fail_attempts=fail_attempts, fail_hard=fail_hard)
+    return FailureProgramme(
+        fail_attempts=fail_attempts, fail_hard=fail_hard, exit_code=exit_code
+    )
 
 
 def load_programmes(path: Path | os.PathLike[str]) -> dict[str, FailureProgramme]:
@@ -228,6 +260,7 @@ def record_attempt(
     attempt: int,
     programme: FailureProgramme,
     outcome: str,
+    details: Mapping[str, Any] | None = None,
 ) -> None:
     """Append one capability attempt to the evidence ledger (best effort).
 
@@ -238,12 +271,14 @@ def record_attempt(
     raw = (os.environ.get(ATTEMPT_LOG_ENV) or "").strip()
     if not raw:
         return
-    entry = {
+    entry: dict[str, Any] = {
         "intent_id": intent_id,
         "attempt": attempt,
         "outcome": outcome,
         "programme": programme.as_dict(),
     }
+    if details is not None:
+        entry["details"] = dict(details)
     path = Path(raw).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:

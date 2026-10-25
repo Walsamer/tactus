@@ -31,6 +31,10 @@ revision, its policy, or an authorized `ExecutionIntent`.
   failure normalizes to `PROCESS_CRASH` and Ictus decides what it means.
 * Nothing here classifies failures, chooses a route, retries semantically or
   originates an `ExecutionObservation`.
+* The capability work is a **real OS subprocess** per attempt: fresh working
+  directory, `PATH`-only environment, 30 s timeout, bounded stdout/stderr, and
+  the real pid/exit code/digests recorded as evidence. A non-zero exit is a
+  step `Failure`, so the run fails and normalizes to `PROCESS_CRASH`.
 
 Reproduce:
 

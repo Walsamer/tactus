@@ -35,11 +35,13 @@ from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from tactus.domain import (
+    DECISION_EFFECTS,
     ClaimToken,
     DagsterRunId,
     InitialAuthorizationContext,
     DecisionApplicationRecord,
     DecisionApplier,
+    DecisionEffect,
     DecisionKind,
     DomainClaim,
     DurableAdmissionRequest,
@@ -713,6 +715,20 @@ class ExecutionCycle:
                 "Ictus recovery decision does not target this Work Order"
             )
         decision = parse_decision(proposal)
+
+        # Fail closed: an ESCALATE decision *is* a typed human-intervention
+        # request, and only this method can persist it in the same transaction
+        # as the guarded projection. Applying one without a store would leave a
+        # blocked Work Order whose request exists only in this process, which no
+        # restart could resolve — so refuse instead of half-applying it.
+        if (
+            DECISION_EFFECTS[decision.kind] is DecisionEffect.REOPEN_BLOCKED_INTERVENTION
+            and intervention_store is None
+        ):
+            raise IntentDecisionError(
+                f"Ictus {decision.kind.value} requires a durable intervention store; "
+                "refusing to apply an escalation that no restart could resolve"
+            )
 
         next_intent: ValidatedExecutionIntent | None = None
         raw_intent = envelope.get("execution_intent")

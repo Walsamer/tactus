@@ -3,10 +3,10 @@
 This is **not** the Ictus execution backend. Ictus ships the production bridge
 (``ictus_dagster``: submission, receipts, result mapping, workflow registry) and
 keeps ownership of the durable-execution contract. This module owns one thing:
-a *capability implementation* that can fail deterministically, so Tactus can
-exercise transient and terminal execution failures against the real bridge
-without touching the pinned Ictus revision or an authorized
-``ExecutionIntent``.
+a *capability implementation* that runs its work in a bounded local
+subprocess and can fail deterministically, so Tactus can exercise transient and
+terminal execution failures against the real bridge without touching the pinned
+Ictus revision or an authorized ``ExecutionIntent``.
 
 Boundary contract (see ``docs/architecture/END_TO_END_EXECUTION_VALIDATION.md``)
 ---------------------------------------------------------------------------
@@ -31,8 +31,16 @@ from the pinned Ictus virtualenv, not by Tactus's own test environment.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
+from typing import Any
 
 from dagster import (
     ConfigurableResource,
@@ -55,11 +63,43 @@ from failure_control import (  # noqa: E402  (path bootstrap above)
     record_attempt,
 )
 
+def hashlib_sha256(text: str) -> str:
+    """SHA-256 of one captured string (evidence digest, never a decision)."""
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+
 #: Intent-id run tag written by the Ictus submission bridge.
 INTENT_TAG = "ictus.intent_id"
 
 #: Mirrors the pinned bridge's own retry budget for the execute step.
 EXECUTE_RETRY_POLICY = RetryPolicy(max_retries=3, delay=0)
+
+#: The capability work runs as a bounded local subprocess: one process per
+#: attempt, in its own throwaway working directory, with a hard timeout and
+#: bounded captured output. This is the execution hop the acceptance criterion
+#: names (`independently launched Dagster run -> subprocess -> IMPLEMENTED`).
+SUBPROCESS_TIMEOUT_SECONDS = 30.0
+MAX_CAPTURE_BYTES = 4096
+
+#: Harmless, deterministic, stdlib-only program. It reads one JSON request on
+#: stdin, prints a canonical receipt (so the caller can prove *this* process ran
+#: for *this* attempt), and exits with the requested status.
+_CAPABILITY_PROGRAM = """
+import hashlib, json, sys
+
+request = json.load(sys.stdin)
+receipt = {
+    "schema_version": 1,
+    "intent_id": request["intent_id"],
+    "attempt": request["attempt"],
+    "capability": request["capability"],
+    "payload_sha256": hashlib.sha256(
+        (str(request["intent_id"]) + ":" + str(request["attempt"])).encode()
+    ).hexdigest(),
+}
+print(json.dumps(receipt, sort_keys=True))
+sys.exit(int(request["exit_code"]))
+"""
 
 
 class CapabilitySettings(ConfigurableResource):
@@ -77,6 +117,88 @@ class CapabilitySettings(ConfigurableResource):
     fail_hard: bool = False
     fail_verify: bool = False
     hold_seconds: float = 0.0
+
+
+def _bounded(text: str, limit: int = MAX_CAPTURE_BYTES) -> tuple[str, bool]:
+    """Bound one captured stream, keeping the head and flagging truncation."""
+    text = text or ""
+    if len(text) <= limit:
+        return text, False
+    return text[:limit] + "... [truncated]", True
+
+
+def _run_capability_subprocess(
+    *, intent_id: str, attempt: int, capability: str, exit_code: int
+) -> dict[str, Any]:
+    """Run the capability work as one bounded, isolated OS process.
+
+    The child gets a minimal environment, its own working directory and a hard
+    timeout; the caller receives the real pid, exit status and bounded captures.
+    The authorized intent is *input* to the child, never modified by it.
+    """
+    request = json.dumps(
+        {
+            "intent_id": intent_id,
+            "attempt": attempt,
+            "capability": capability,
+            "exit_code": exit_code,
+        },
+        sort_keys=True,
+    )
+    workspace = tempfile.mkdtemp(prefix="tactus-capability-")
+    started = time.monotonic()
+    evidence: dict[str, Any] = {
+        "schema_version": 1,
+        "executable": sys.executable,
+        "pid": None,
+        "exit_code": None,
+        "timed_out": False,
+        "duration_ms": 0,
+        "stdout": "",
+        "stderr": "",
+        "stdout_sha256": "",
+        "stdout_bytes": 0,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "request_sha256": hashlib_sha256(request),
+        "command": [Path(sys.executable).name, "-I", "-c", "<capability-program>"],
+        "working_directory_isolated": True,
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-c", _CAPABILITY_PROGRAM],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=workspace,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+    )
+    evidence["pid"] = process.pid
+    try:
+        try:
+            stdout, stderr = process.communicate(request, timeout=SUBPROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            evidence["timed_out"] = True
+            process.kill()
+            stdout, stderr = process.communicate()
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+    stdout, stdout_truncated = _bounded(stdout)
+    stderr, stderr_truncated = _bounded(stderr)
+    evidence.update(
+        {
+            "exit_code": process.returncode,
+            "duration_ms": round((time.monotonic() - started) * 1000, 3),
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_sha256": hashlib_sha256(stdout),
+            "stdout_bytes": len(stdout),
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+        }
+    )
+    return evidence
 
 
 def _programme(context) -> FailureProgramme:
@@ -117,10 +239,46 @@ def execute_op(context, prepared: dict, settings: CapabilitySettings) -> dict:
                 f"{attempt} of {settings.capability}"
             )
         )
-    record_attempt(
-        intent_id=intent_id, attempt=attempt, programme=programme, outcome="succeeded"
+
+    evidence = _run_capability_subprocess(
+        intent_id=intent_id,
+        attempt=attempt,
+        capability=settings.capability,
+        exit_code=programme.exit_code,
     )
-    return {**prepared, "execute_attempts": attempt, "executed": True}
+    # One structured line so the backend's own event log carries the process
+    # boundary; the same payload is mirrored into the attempt ledger.
+    context.log.info(
+        "tactus.capability.subprocess %s", json.dumps(evidence, sort_keys=True)
+    )
+    failed = bool(evidence["timed_out"]) or evidence["exit_code"] != 0
+    record_attempt(
+        intent_id=intent_id,
+        attempt=attempt,
+        programme=programme,
+        outcome="failed" if failed else "succeeded",
+        details={"subprocess": evidence, "run_id": context.run_id},
+    )
+    if evidence["timed_out"]:
+        raise Failure(
+            description=(
+                "tactus capability subprocess timed out after "
+                f"{SUBPROCESS_TIMEOUT_SECONDS:.0f}s"
+            )
+        )
+    if evidence["exit_code"] != 0:
+        raise Failure(
+            description=(
+                f"tactus capability subprocess exited {evidence['exit_code']} "
+                f"(intent {intent_id})"
+            )
+        )
+    return {
+        **prepared,
+        "execute_attempts": attempt,
+        "executed": True,
+        "subprocess": evidence,
+    }
 
 
 @op(ins={"executed": In(dict)}, out=Out(dict))
