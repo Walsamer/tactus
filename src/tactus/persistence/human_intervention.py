@@ -193,33 +193,57 @@ class SqliteHumanIntervention(HumanInterventionPort):
         if not isinstance(request, HumanInterventionRequest):
             raise UnknownInterventionRequestError("request must be a HumanInterventionRequest")
         with self._transaction():
-            existing = self._connection.execute(
-                "SELECT * FROM human_intervention_requests WHERE intervention_id = ?",
-                (request.intervention_id,),
-            ).fetchone()
-            if existing is not None:
-                persisted = _request_from_row(existing)
-                if _request_fingerprint(persisted) != _request_fingerprint(request):
-                    raise ImmutableRequestConflictError(
-                        f"request {request.intervention_id!r} replayed with different content"
-                    )
-                return persisted
-            self._connection.execute(
-                """INSERT INTO human_intervention_requests VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    request.intervention_id,
-                    str(request.work_order_id),
-                    request.reason.value,
-                    request.summary,
-                    request.requested_action,
-                    _encode_seq(request.permitted_actions),
-                    _encode_seq(request.scope),
-                    request.source_revision.value if request.source_revision else None,
-                    request.work_order_revision.value if request.work_order_revision else None,
-                    _timestamp(request.created_at),
-                    _timestamp(request.expires_at) if request.expires_at else None,
-                ),
-            )
+            return self._record_request_in(self._connection, request)
+
+    def record_request_in(
+        self, connection: sqlite3.Connection, request: HumanInterventionRequest
+    ) -> HumanInterventionRequest:
+        """Record a request on a caller-supplied transaction.
+
+        The execution cycle persists the intervention produced by an
+        ``ESCALATE`` decision in the *same* transaction as the guarded Work
+        Order projection and the decision ledger row (the same primitive style
+        as ``SqliteExecutionAdmission.apply_transition_in``). A restart can
+        therefore never observe a blocked Work Order without the typed request
+        that justifies it, and a rolled-back decision leaves no orphan request.
+
+        The store must share the caller's SQLite database file; the caller owns
+        the transaction.
+        """
+        if not isinstance(request, HumanInterventionRequest):
+            raise UnknownInterventionRequestError("request must be a HumanInterventionRequest")
+        return self._record_request_in(connection, request)
+
+    def _record_request_in(
+        self, connection: sqlite3.Connection, request: HumanInterventionRequest
+    ) -> HumanInterventionRequest:
+        existing = connection.execute(
+            "SELECT * FROM human_intervention_requests WHERE intervention_id = ?",
+            (request.intervention_id,),
+        ).fetchone()
+        if existing is not None:
+            persisted = _request_from_row(existing)
+            if _request_fingerprint(persisted) != _request_fingerprint(request):
+                raise ImmutableRequestConflictError(
+                    f"request {request.intervention_id!r} replayed with different content"
+                )
+            return persisted
+        connection.execute(
+            """INSERT INTO human_intervention_requests VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                request.intervention_id,
+                str(request.work_order_id),
+                request.reason.value,
+                request.summary,
+                request.requested_action,
+                _encode_seq(request.permitted_actions),
+                _encode_seq(request.scope),
+                request.source_revision.value if request.source_revision else None,
+                request.work_order_revision.value if request.work_order_revision else None,
+                _timestamp(request.created_at),
+                _timestamp(request.expires_at) if request.expires_at else None,
+            ),
+        )
         return request
 
     def request(self, intervention_id: str) -> HumanInterventionRequest:

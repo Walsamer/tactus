@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -218,3 +219,42 @@ def test_cli_import_issue_writes_database(tmp_path, capsys) -> None:
         == 0
     )
     assert json.loads(capsys.readouterr().out)["created"] is False
+
+
+# -- checked milestone revision (TCT-WO-GH-12 acceptance provenance) ---------
+
+CHECKED_ISSUE = (
+    Path(__file__).resolve().parents[2]
+    / "tests"
+    / "integrations"
+    / "github"
+    / "data"
+    / "issue_12.json"
+)
+
+
+def test_checked_milestone_issue_imports_deterministically(tmp_path):
+    """The recorded Issue #12 revision yields a stable, hold-free Work Order."""
+
+    from tactus.integrations.github import MockGitHubIssueSource
+
+    source = MockGitHubIssueSource.from_files({(REPOSITORY, 12): CHECKED_ISSUE})
+    store = SqliteWorkSource(tmp_path / "work-source.sqlite")
+    try:
+        first = import_issue(source, store, REPOSITORY, 12)
+        again = import_issue(source, store, REPOSITORY, 12)
+
+        assert first.created is True
+        assert again.created is False
+        assert again.work_order_id == first.work_order_id
+        assert str(first.work_order_id).startswith("walsamer-tactus-issue-12-")
+
+        revision = first.provenance.revision
+        assert revision.number == 12
+        assert "fleet:ready" in revision.labels
+        assert revision.issue_state == "open"
+        # Content-derived identity: the Work Order id embeds the spec digest.
+        assert revision.specification_digest[:12] in str(first.work_order_id)
+        assert recheck_source(source, store, first.work_order_id) == ()
+    finally:
+        store.close()

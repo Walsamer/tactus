@@ -1,0 +1,30 @@
+{
+  "repository": {
+    "id": 1404239931,
+    "owner": "walsamer",
+    "name": "tactus",
+    "url": "https://github.com/walsamer/tactus"
+  },
+  "issue": {
+    "number": 12,
+    "url": "https://github.com/walsamer/tactus/issues/12",
+    "title": "Prove the five-scenario Issue to Tactus–Ictus–Dagster vertical slice",
+    "body": "## Objective\n\nDemonstrate one persistent end-to-end control/decision/execution path with no duplicate unsafe execution after restart.\n\n## Architecture owner\n\nCross-system\n\n## Context\n\nKEEP + MODIFY of #12. Reconcile FIX-009 waiting-for-FIX-008 provenance; do not duplicate or automatically resume those existing WorkOrders.\n\nArchitecture Baseline v1 was adopted through [Tactus PR #19](https://github.com/Walsamer/tactus/pull/19) and [Ictus PR #1](https://github.com/Walsamer/ictus/pull/1).\nCurrent implementation is evidence; the merged baseline specifies the target.\n\n## Scope\n\nTactus composition/integration fixtures, local Dagster code location and deterministic subprocess capability, end-to-end scenario runner and evidence documentation. Pin Ictus dependency to reviewed commits.\n\n## Non-goals\n\nNo unrelated feature work, authority transfer, direct main mutation or deployment.\n\n## Interfaces / contracts\n\nInputs: Checked GitHub Issue fixture and source revision, local context/policy/backend facts.\n\nOutputs: Verified WorkOrder outcome, run correlation and persisted artifacts for five scenarios.\n\nOwned state: Tactus composition and domain application; no new policy implementation.\n\nExternal state: Ictus decisions, Dagster execution, local subprocess facts.\n\n## Dependencies\n\n- https://github.com/Walsamer/tactus/issues/8\n- https://github.com/Walsamer/tactus/issues/21\n- https://github.com/Walsamer/ictus/issues/6\n\n## Acceptance criteria\n\n- [ ] Success: Issue → WO → initial snapshot → allowed intent → independently launched Dagster run → subprocess → verified IMPLEMENTED.\n- [ ] Transient failure: Dagster step retry succeeds without increasing semantic-attempt count.\n- [ ] Semantic/backend failure: normalized observation → Ictus RecoveryDecision → Tactus authorized effect; no runtime fallback policy.\n- [ ] Irrecoverable/ambiguous case persists human escalation across restart and accepts only valid typed resolution.\n- [ ] Crash at dispatch/ack/result application and duplicate delivery produce one authorized side effect and one domain application.\n- [ ] Evidence includes source hash, snapshot/decision/intent/attempt/run IDs and assertions for denied/stale/late inputs; Pi/Stax/Metaxy/OpenShell/Kubernetes absent from prerequisites.\n\n## Verification\n\nAdd and document one reproducible scenario-runner command using temporary SQLite/DAGSTER_HOME/workspace roots. Run all five scenarios plus uv run pytest, scripts/verify-goal.sh and the pinned Ictus gate.\n\n## Architecture references\n\n- https://github.com/Walsamer/tactus/blob/main/docs/architecture/SYSTEM_ARCHITECTURE.md\n- https://github.com/Walsamer/tactus/blob/main/docs/architecture/CROSS_SYSTEM_CONTRACTS.md\n- https://github.com/Walsamer/tactus/blob/main/docs/architecture/EXECUTION_AND_RECOVERY.md\n- https://github.com/Walsamer/tactus/blob/main/docs/architecture/MIGRATION_FROM_FLEET.md\n- https://github.com/Walsamer/ictus/blob/main/docs/architecture/BASELINE_V1.md\n\n## Execution handoff\n\nFleet intake is blocked until https://github.com/Walsamer/tactus/issues/20 is complete, project mapping/configuration is approved, and the dependencies above are satisfied. A human may implement after implementation dependencies complete, with explicit assignment to avoid overlap.\n\nGitHub Issue = shared implementation intent. Derived WorkOrders must preserve\nrepository/Issue URL/number/title, source revision, import timestamp and source\nbody/specification hash. One Issue may yield several bounded WorkOrders. Only\n`fleet:ready` authorizes intake; an open Issue or milestone does not. Do not\nsilently execute a changed specification or revive superseded legacy WorkOrders.\n",
+    "state": "open",
+    "updated_at": "2026-10-23T19:20:00Z",
+    "revision": "2026-10-23T19:20:00Z",
+    "labels": [
+      "area:cross-system",
+      "type:test",
+      "priority:p0",
+      "fleet:ready"
+    ],
+    "dependencies": [
+      "https://github.com/Walsamer/tactus/issues/8",
+      "https://github.com/Walsamer/tactus/issues/21",
+      "https://github.com/Walsamer/ictus/issues/6"
+    ],
+    "author": "Walsamer",
+    "milestone": "M2 — Minimal Vertical Slice"
+  }
+}

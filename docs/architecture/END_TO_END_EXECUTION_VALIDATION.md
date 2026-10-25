@@ -172,6 +172,43 @@ including an identical `arguments` map, with `fail_attempts`/`fail_hard`/
 level. `integrations/dagster/failure_control.py` also rejects those spellings so
 they cannot silently reappear as intent arguments.
 
+### Provenance
+
+The slice does not run on an invented Work Order id. Each scenario imports the
+**checked revision** of the milestone GitHub Issue (recorded payload:
+`tests/integrations/github/data/issue_12.json`) through the real
+`import_issue` service, so the Work Order identity, source revision and
+specification digest are all content-derived:
+
+```text
+work_order_id    walsamer-tactus-issue-12-<spec-digest[0:12]>
+source_revision  2026-10-23T19:20:00Z        (the checked Issue revision)
+import_key       walsamer/tactus#12@<spec-digest>
+body_sha256      <sha256 of the checked Issue body>
+```
+
+The harness asserts that re-importing the same revision is idempotent (same
+Work Order, `created=False`) and that `recheck_source` returns no holds, and the
+evidence record carries the Issue number, URL, title, labels, `specification_digest`
+and `body_sha256`. The recorded body hash matches the revision Fleet ingested for
+the same Issue, so the provenance is comparable across the two systems.
+
+### Human intervention durability
+
+An `ESCALATE` decision used to produce a typed
+`HumanInterventionRequest` only in the caller's memory. The execution cycle now
+accepts an `intervention_store`, and records that request **in the same
+transaction** as the guarded Work Order projection and the decision ledger row
+(the same `record_request_in` / `apply_transition_in` primitive style). The
+request identity is derived from the decision (`intervention:<decision_id>`), so
+a replay can never mint a second resolvable request.
+
+The `escalation` scenario therefore proves the full acceptance property: after a
+process restart the request is loaded from durable state, an unpermitted typed
+action is rejected, a valid typed resolution produces exactly one grant, a
+replayed resolution returns the same grant, and a second active resolution is
+refused.
+
 ### Reproduce
 
 ```bash
@@ -191,8 +228,8 @@ intent-equality digests.
 * They do not prove Tactus-owned PR publication, workspace isolation or
   scheduling (Tactus Issues #22/#23 remain unimplemented and out of scope).
 * The escalation evidence persists as the audited decision row, the guarded
-  `OPEN + BLOCKED` projection and the typed intervention on the application
-  record; there is no separate intervention table to restart from.
+  `OPEN + BLOCKED` projection *and* the typed request in the durable
+  human-intervention store (see below); no separate notification channel exists.
 
 ## Scope explicitly left outside this slice
 

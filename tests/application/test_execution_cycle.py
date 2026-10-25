@@ -14,12 +14,18 @@ from tactus.application import (
     parse_execution_decision,
 )
 from tactus.domain import (
+    ActionNotPermittedError,
     ChildCreationUnavailableError,
     ClaimToken,
     DagsterRunId,
+    HumanAction,
+    HumanResolution,
     ImmutableRecordConflictError,
     InitialAuthorizationContext,
+    InterventionReason,
     MissingChildPlanError,
+    RequestAlreadyResolvedError,
+    UnknownInterventionRequestError,
     StaleWorkOrderRevisionError,
     OpenStatus,
     RecoveryDecisionRecord,
@@ -36,6 +42,7 @@ from tactus.integrations.ictus import (
     StepRetryDiagnostic,
     parse_observation,
 )
+from tactus.persistence.human_intervention import SqliteHumanIntervention
 from tactus.persistence.sqlite import SqliteExecutionAdmission
 
 
@@ -1040,4 +1047,137 @@ def test_initial_context_is_rejected_once_an_attempt_exists(tmp_path):
             initial_context=_initial_context(),
         )
     assert "already has a correlated execution attempt" in str(ctx.value)
+    db.close()
+
+
+# -- durable escalation requests (TCT-WO-GH-12 M2 acceptance) ----------------
+
+
+def _escalate_with_store(cycle, db, work_order, store, *, proposal_id="proposal-esc"):
+    return cycle.apply_recovery_decision(
+        work_order,
+        _envelope(decision="ESCALATE", proposal_id=proposal_id, include_intent=False),
+        state_port=db,
+        expected_revision=_rev(db),
+        intervention_store=store,
+    )
+
+
+def _resolution(
+    intervention_id,
+    *,
+    resolution_id="resolution-1",
+    action=HumanAction.APPROVE,
+    work_order_revision=WorkOrderRevision(2),
+):
+    return HumanResolution(
+        resolution_id=resolution_id,
+        intervention_id=intervention_id,
+        work_order_id=WorkOrderId(WORK_ORDER),
+        actor="operator",
+        action=action,
+        resolved_at=utcnow(),
+        source_revision=SourceRevision(SOURCE),
+        work_order_revision=work_order_revision,
+        evidence=("operator resolved the escalation",),
+    )
+
+
+def test_escalation_records_a_durable_resolvable_intervention_request(tmp_path):
+    """The ESCALATE effect's typed request must survive a restart and be resolvable."""
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    store_path = tmp_path / "ledger.sqlite"
+    interventions = SqliteHumanIntervention(store_path)
+    decision = _escalate_with_store(cycle, db, work_order, interventions)
+    assert decision.applied is True
+    assert decision.application.intervention is not None
+    intervention_id = decision.application.intervention.intervention_id
+    assert intervention_id == "intervention:proposal-esc"
+    assert work_order.state is WorkOrderState.OPEN
+    assert work_order.readiness is OpenStatus.BLOCKED
+    assert db.work_order_snapshot(WORK_ORDER)[1] is WorkOrderState.OPEN
+    db.close()
+    interventions.close()
+
+    # Restart: a fresh connection set reconstructs the request from durable state.
+    reopened_db = SqliteExecutionAdmission(store_path)
+    reopened = SqliteHumanIntervention(store_path)
+    try:
+        request = reopened.request(intervention_id)
+        assert request.reason is InterventionReason.UNRESOLVED_RECOVERY
+        assert request.work_order_id == WorkOrderId(WORK_ORDER)
+        assert HumanAction.APPROVE in request.permitted_actions
+
+        resolution = _resolution(intervention_id)
+        stored, grant = reopened.resolve(
+            resolution,
+            current_source_revision=SourceRevision(SOURCE),
+            current_work_order_revision=WorkOrderRevision(2),
+        )
+        assert stored.resolution_id == "resolution-1"
+        assert grant.intervention_id == intervention_id
+        assert grant.work_order_id == WorkOrderId(WORK_ORDER)
+        assert grant.action is HumanAction.APPROVE
+
+        # A duplicate resolution is idempotent for the same identity and
+        # rejected for a new one: one request owns at most one active grant.
+        _, replay_grant = reopened.resolve(
+            resolution,
+            current_source_revision=SourceRevision(SOURCE),
+            current_work_order_revision=WorkOrderRevision(2),
+        )
+        assert replay_grant.grant_id == grant.grant_id
+        with pytest.raises(RequestAlreadyResolvedError):
+            reopened.resolve(
+                _resolution(intervention_id, resolution_id="resolution-2"),
+                current_source_revision=SourceRevision(SOURCE),
+                current_work_order_revision=WorkOrderRevision(2),
+            )
+    finally:
+        reopened.close()
+        reopened_db.close()
+
+
+def test_escalation_request_rejects_an_unpermitted_typed_action(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    interventions = SqliteHumanIntervention(tmp_path / "ledger.sqlite")
+    decision = _escalate_with_store(cycle, db, work_order, interventions)
+    intervention_id = decision.application.intervention.intervention_id
+
+    with pytest.raises(ActionNotPermittedError):
+        interventions.resolve(
+            _resolution(intervention_id, action=HumanAction.AUTHORIZE_SCOPE_CHANGE),
+            current_source_revision=SourceRevision(SOURCE),
+            current_work_order_revision=WorkOrderRevision(2),
+        )
+    assert interventions.resolutions_for(intervention_id) == ()
+    db.close()
+    interventions.close()
+
+
+def test_escalation_request_and_decision_roll_back_together(tmp_path):
+    """A failure while recording the request must leave no half-applied escalation."""
+
+    class ExplodingInterventions:
+        def record_request_in(self, connection, request):  # noqa: ARG002 - test stub
+            raise RuntimeError("injected intervention write failure")
+
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    before = db.work_order_snapshot(WORK_ORDER)
+
+    with pytest.raises(RuntimeError, match="injected intervention write failure"):
+        _escalate_with_store(cycle, db, work_order, ExplodingInterventions())
+
+    assert db.work_order_snapshot(WORK_ORDER) == before
+    assert work_order.state is WorkOrderState.ACTIVE
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox"
+    ).fetchone()[0] == 0  # the escalation decision was rolled back
+    # The rolled-back transaction left no request behind either.
+    orphan = SqliteHumanIntervention(tmp_path / "ledger.sqlite")
+    try:
+        with pytest.raises(UnknownInterventionRequestError):
+            orphan.request("intervention:proposal-esc")
+    finally:
+        orphan.close()
     db.close()
