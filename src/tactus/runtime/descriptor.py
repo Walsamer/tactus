@@ -136,6 +136,19 @@ def preflight(
         raise RuntimePreflightError(
             f"runtime {descriptor.runtime_id!r}: executable is not executable: {executable}"
         )
+    # The runtime we probe must be the runtime we launch: a descriptor whose
+    # argv[0] or preflight_argv[0] names a different file could silently verify
+    # one executable and run another.
+    for label, candidate in (
+        ("argv[0]", descriptor.argv[0]),
+        ("preflight_argv[0]", descriptor.preflight_argv[0]),
+    ):
+        if Path(candidate).resolve() != executable.resolve():
+            raise RuntimePreflightError(
+                f"runtime {descriptor.runtime_id!r}: {label} ({candidate}) is not the "
+                f"pinned executable ({executable}); refusing to probe one binary and "
+                "launch another"
+            )
 
     try:
         completed = subprocess.run(
