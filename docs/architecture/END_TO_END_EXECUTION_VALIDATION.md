@@ -211,8 +211,20 @@ refused.
 
 ### Reproduce
 
+One command runs the whole M2 acceptance set: the verifier (pytest plus the
+pinned-Ictus conformance gate), the success/restart slice and all failure
+scenarios.
+
 ```bash
-TACTUS_ICTUS_ROOT=/path/to/agentic-control   scripts/run-failure-scenarios.sh   --evidence /tmp/tactus-failure-scenarios-evidence.json
+TACTUS_ICTUS_ROOT=/path/to/agentic-control scripts/run-acceptance.sh
+```
+
+The failure scenarios alone:
+
+```bash
+TACTUS_ICTUS_ROOT=/path/to/agentic-control \
+  scripts/run-failure-scenarios.sh \
+  --evidence /tmp/tactus-failure-scenarios-evidence.json
 ```
 
 Each scenario gets its own temporary SQLite ledger, `DAGSTER_HOME`, workspace and
