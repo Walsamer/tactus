@@ -63,6 +63,6 @@ repository from a Tactus Work Order.
 
 ## State
 
-`main` pins Ictus at `86816d6019af1f23c63428348cd820d706bb0d27`, advanced via
+`main` pins Ictus at `e7419210d5bdfec3169e375d4957077951cc231c`, advanced via
 PR #37 (`chore(ictus): advance the pinned Ictus revision to 86816d6`).
 Never float the pin; advance it only through an authorized Work Order.

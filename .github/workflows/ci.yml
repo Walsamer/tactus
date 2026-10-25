@@ -19,7 +19,7 @@ env:
   # checkout HEAD and fails visibly on any mismatch; the workflow also checks it
   # explicitly before any build runs.
   ICTUS_REPOSITORY: Walsamer/ictus
-  ICTUS_COMMIT: 86816d6019af1f23c63428348cd820d706bb0d27
+  ICTUS_COMMIT: e7419210d5bdfec3169e375d4957077951cc231c
 
 jobs:
   python:
@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: Walsamer/ictus
-          ref: 86816d6019af1f23c63428348cd820d706bb0d27
+          ref: e7419210d5bdfec3169e375d4957077951cc231c
           path: .ictus
 
       - name: verify pinned Ictus revision
@@ -72,8 +72,8 @@ jobs:
         run: uv run --frozen pytest -q
 
       # Human-auditable evidence that the real binary decided the canonical
-      # fixtures (INITIAL -> ESCALATE, RECOVERY -> REEXECUTE). Reuses the binary
-      # the pytest session built in the isolated target dir.
+      # fixtures (INITIAL -> EXECUTE_CAPABILITY, RECOVERY -> REEXECUTE). Reuses
+      # the binary the pytest session built in the isolated target dir.
       - name: real-boundary conformance report
         run: |
           uv run --frozen python integrations/ictus/conformance.py \
