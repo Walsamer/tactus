@@ -16,6 +16,7 @@ from tactus.runtime.descriptor import (
 )
 from tactus.runtime.supervision import (
     RecoveryReport,
+    RuntimeRecoveryRequired,
     RuntimeContractError,
     RuntimeEvidence,
     RuntimeLimits,
@@ -25,6 +26,7 @@ from tactus.runtime.supervision import (
     TerminationReport,
     WriterLock,
     WriterLockError,
+    process_start_marker,
     terminate_process_group,
 )
 from tactus.runtime.workspace import (
@@ -38,6 +40,7 @@ from tactus.runtime.workspace import (
 __all__ = [
     "REQUEST_PLACEHOLDER",
     "RecoveryReport",
+    "RuntimeRecoveryRequired",
     "RuntimeContractError",
     "RuntimeDescriptor",
     "RuntimeEvidence",
@@ -55,6 +58,7 @@ __all__ = [
     "normalize_changed_path",
     "patch_header_paths",
     "preflight",
+    "process_start_marker",
     "terminate_process_group",
     "validate_changed_paths",
 ]

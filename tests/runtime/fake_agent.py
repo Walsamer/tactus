@@ -14,6 +14,7 @@ ignore-term    spawn a grandchild that ignores SIGTERM, then sleep
 unterminated   like ignore-term (used with an injected non-confirming terminator)
 bad-scope      report a changed path outside the allowed scope
 wide-patch     produce a patch larger than the configured limit
+huge-result    produce a result.json larger than the configured limit
 undeclared     patch touches a file the result did not declare
 no-result      exit 0 without writing anything
 failed         report ``status: failed`` with a reason, exit 0
@@ -100,6 +101,20 @@ def main(argv: list[str]) -> int:
             PATCH + "--- a/src/other.py\n+++ b/src/other.py\n@@ -1 +1 @@\n-a\n+b\n",
             encoding="utf-8",
         )
+        return 0
+    if mode == "huge-result":
+        (output_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "completed",
+                    "changed_paths": ["src/example.py"],
+                    "summary": "x" * 5000,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
         return 0
     if mode == "wide-patch":
         _write(output_dir, status="completed", changed=["src/example.py"], summary="wide")
