@@ -66,7 +66,14 @@ ISSUE_FIXTURE = (
 #: Keys that must never appear inside an authorized intent (they are the
 #: out-of-band failure-control surface, not an intent contract).
 FORBIDDEN_INTENT_KEYS = frozenset(
-    {"fail_attempts", "fail_hard", "fail_until_attempt", "fail_verify", "hold_seconds"}
+    {
+        "fail_attempts",
+        "fail_hard",
+        "fail_until_attempt",
+        "fail_verify",
+        "hold_seconds",
+        "exit_code",
+    }
 )
 
 if str(SRC_ROOT) not in sys.path:
@@ -786,8 +793,30 @@ def scenario_transient(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         raise ValidationError(f"unexpected capability attempt ledger: {attempts}")
     if [entry["attempt"] for entry in attempts] != [1, 2]:
         raise ValidationError(f"unexpected Dagster attempt numbers: {attempts}")
+    first_detail = attempts[0].get("details") or {}
+    if "subprocess" in first_detail:
+        raise ValidationError(
+            "the injected step failure must fail before the capability subprocess starts"
+        )
+    subprocess_evidence = (attempts[1].get("details") or {}).get("subprocess")
+    if not isinstance(subprocess_evidence, Mapping):
+        raise ValidationError("the successful attempt recorded no capability subprocess")
+    if subprocess_evidence.get("exit_code") != 0:
+        raise ValidationError(f"capability subprocess did not succeed: {subprocess_evidence}")
+    if subprocess_evidence.get("timed_out"):
+        raise ValidationError("capability subprocess timed out")
+    if not isinstance(subprocess_evidence.get("pid"), int) or subprocess_evidence["pid"] <= 0:
+        raise ValidationError(f"capability subprocess recorded no real pid: {subprocess_evidence}")
+    if accepted.intent.intent_id.value not in str(subprocess_evidence.get("stdout", "")):
+        raise ValidationError(
+            "the capability subprocess output does not identify the authorized intent"
+        )
 
     runs = _run_count(env["instance"], submission, accepted.intent.intent_id.value)
+    if (attempts[1].get("details") or {}).get("run_id") != (runs[0] if len(runs) == 1 else None):
+        raise ValidationError(
+            "the capability subprocess did not run inside the run that produced the outcome"
+        )
     step_events = _step_events(env["instance"], runs[0]) if len(runs) == 1 else {}
     if step_events.get("STEP_UP_FOR_RETRY", 0) != 1:
         raise ValidationError(
@@ -811,6 +840,8 @@ def scenario_transient(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         "dagster_run_ids": runs,
         "dagster_run_count": len(runs),
         "capability_attempts": attempts,
+        "capability_subprocess": subprocess_evidence,
+        "subprocess_ran_before_implemented": True,
         "dagster_step_events": step_events,
         "step_retries": step_events.get("STEP_UP_FOR_RETRY", 0),
         "semantic_attempts": counts["execution_attempts"],
@@ -857,6 +888,10 @@ def scenario_terminal(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
     ]
     if len(attempts) != 4 or {entry["outcome"] for entry in attempts} != {"failed"}:
         raise ValidationError(f"expected four failed attempts, got {attempts}")
+    if any((entry.get("details") or {}).get("subprocess") for entry in attempts):
+        raise ValidationError(
+            "a step-level failure (fail_hard) must not start the capability subprocess"
+        )
     run_ids = _run_count(env["instance"], submission, accepted.intent.intent_id.value)
     step_events = _step_events(env["instance"], run_ids[0]) if len(run_ids) == 1 else {}
     if step_events.get("STEP_UP_FOR_RETRY", 0) != 3:
@@ -960,6 +995,96 @@ def scenario_terminal(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
     }
 
 
+def scenario_subprocess_failure(
+    env: dict[str, Any], *, binary: Path
+) -> dict[str, Any]:
+    """A real capability subprocess exits non-zero; normalization still holds.
+
+    This is the terminal-failure path *through* the process boundary: every
+    attempt spawns a real OS process, the process returns a non-zero status, and
+    the execution result still normalizes to ``PROCESS_CRASH`` (Ictus decides
+    what that means; Tactus only applies the validated effect).
+    """
+    db: SqliteExecutionAdmission = env["db"]
+    submission = env["submission"]
+
+    admitted = _admit(
+        env,
+        binary=binary,
+        capability=CAPABILITY,
+        snapshot_id="snapshot-subprocess-entry",
+        programme=env["programme"],
+    )
+    _attach(env, admitted)
+    accepted = admitted["accepted"]
+    status = _wait_terminal(
+        submission, admitted["receipt"], instance=env["instance"], timeout=180
+    )
+    if status["result"]["status"] != "failed":
+        raise ValidationError(
+            "subprocess-failure scenario did not fail: "
+            + json.dumps(status["result"], sort_keys=True)
+        )
+    observed = _observe(env, admitted, status)
+    if observed["category"] != "PROCESS_CRASH":
+        raise ValidationError(f"unexpected category: {observed['category']}")
+    if observed["work_order_state"] != "ACTIVE":
+        raise ValidationError("a failed subprocess must leave the Work Order ACTIVE")
+    if not observed["attempt_closed"]:
+        raise ValidationError("a failed subprocess must close the attempt")
+
+    attempts = [
+        entry
+        for entry in _read_attempt_log(env["attempt_log"])
+        if entry["intent_id"] == accepted.intent.intent_id.value
+    ]
+    if len(attempts) != 4:
+        raise ValidationError(f"expected four attempts, got {len(attempts)}")
+    evidence = []
+    for entry in attempts:
+        detail = entry.get("details") or {}
+        subprocess_evidence = detail.get("subprocess")
+        if not isinstance(subprocess_evidence, Mapping):
+            raise ValidationError(
+                f"attempt {entry['attempt']} ran no capability subprocess"
+            )
+        if subprocess_evidence.get("timed_out"):
+            raise ValidationError("the capability subprocess timed out")
+        if subprocess_evidence.get("exit_code") != 7:
+            raise ValidationError(
+                f"attempt {entry['attempt']} exited "
+                f"{subprocess_evidence.get('exit_code')}, expected 7"
+            )
+        if not isinstance(subprocess_evidence.get("pid"), int) or subprocess_evidence["pid"] <= 0:
+            raise ValidationError("the capability subprocess recorded no real pid")
+        evidence.append(subprocess_evidence)
+
+    runs = _run_count(env["instance"], submission, accepted.intent.intent_id.value)
+    if len(runs) != 1:
+        raise ValidationError(f"expected exactly one Dagster run, found {runs}")
+    run_ids = {(entry.get("details") or {}).get("run_id") for entry in attempts}
+    if run_ids != {runs[0]}:
+        raise ValidationError(
+            f"capability subprocesses ran outside the run under test: {run_ids}"
+        )
+    counts = _counts(db)
+    if counts["execution_attempts"] != 1 or counts["result_inbox"] != 1:
+        raise ValidationError(f"unexpected durable counts after subprocess failure: {counts}")
+
+    return {
+        "scenario": "subprocess_failure",
+        "dagster_run_ids": runs,
+        "capability_attempts": attempts,
+        "capability_subprocess": evidence[-1],
+        "subprocess_exit_codes": [item["exit_code"] for item in evidence],
+        "distinct_subprocess_pids": len({item["pid"] for item in evidence}),
+        "terminal_observation": observed,
+        "durable_counts": counts,
+        "provenance": admitted["provenance"],
+        "intent_invariant": admitted["intent_invariant"],
+    }
+
+
 def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
     """Exhausted budget ⇒ Ictus ESCALATE ⇒ one audited OPEN+BLOCKED effect."""
     db: SqliteExecutionAdmission = env["db"]
@@ -1030,7 +1155,13 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
     if state_after_restart[1].value != "OPEN":
         raise ValidationError(f"escalation did not survive restart: {state_after_restart}")
     replay = env["cycle"].apply_recovery_decision(
-        admitted["work_order"], envelope, state_port=reopened, expected_revision=revision
+        admitted["work_order"],
+        envelope,
+        state_port=reopened,
+        expected_revision=revision,
+        # The contract is unconditional: an ESCALATE decision always names its
+        # durable store, including when the call is (correctly) a replay.
+        intervention_store=interventions,
     )
     if replay.applied or replay.next_intent is not None:
         raise ValidationError("replayed ESCALATE applied a second effect after restart")
@@ -1135,6 +1266,7 @@ SCENARIO_CONTROL: dict[str, dict[str, Any]] = {
     # after authorization (the programme is keyed by the authorized intent id).
     "transient": {"fail_attempts": 1},
     "terminal": {"fail_hard": True},
+    "subprocess_failure": {"exit_code": 7},
     "escalation": {"fail_hard": True},
 }
 
@@ -1157,6 +1289,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 results[name] = _evidence_safe(scenario_transient(env, binary=binary))
             elif name == "terminal":
                 results[name] = _evidence_safe(scenario_terminal(env, binary=binary))
+            elif name == "subprocess_failure":
+                results[name] = _evidence_safe(
+                    scenario_subprocess_failure(env, binary=binary)
+                )
             elif name == "escalation":
                 results[name] = _evidence_safe(scenario_escalation(env, binary=binary))
             else:  # pragma: no cover - argparse restricts the choices
@@ -1210,7 +1346,7 @@ def main(argv: list[str] | None = None) -> int:
         "--scenarios",
         nargs="+",
         choices=sorted(SCENARIO_CONTROL),
-        default=["transient", "terminal", "escalation"],
+        default=["transient", "terminal", "subprocess_failure", "escalation"],
     )
     args = parser.parse_args(argv)
     if not args.ictus_root:

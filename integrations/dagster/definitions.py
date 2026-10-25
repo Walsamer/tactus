@@ -3,10 +3,10 @@
 This is **not** the Ictus execution backend. Ictus ships the production bridge
 (``ictus_dagster``: submission, receipts, result mapping, workflow registry) and
 keeps ownership of the durable-execution contract. This module owns one thing:
-a *capability implementation* that can fail deterministically, so Tactus can
-exercise transient and terminal execution failures against the real bridge
-without touching the pinned Ictus revision or an authorized
-``ExecutionIntent``.
+a *capability implementation* that runs its work in a bounded local
+subprocess and can fail deterministically, so Tactus can exercise transient and
+terminal execution failures against the real bridge without touching the pinned
+Ictus revision or an authorized ``ExecutionIntent``.
 
 Boundary contract (see ``docs/architecture/END_TO_END_EXECUTION_VALIDATION.md``)
 ---------------------------------------------------------------------------
@@ -31,6 +31,7 @@ from the pinned Ictus virtualenv, not by Tactus's own test environment.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -49,17 +50,32 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:  # loaded by path (`python_file`) by the daemon
     sys.path.insert(0, str(_HERE))
 
+from capability_process import (  # noqa: E402  (path bootstrap above)
+    MAX_CAPTURE_BYTES,
+    SUBPROCESS_TIMEOUT_SECONDS,
+    run_capability_subprocess,
+)
 from failure_control import (  # noqa: E402  (path bootstrap above)
     FailureProgramme,
     programme_for_intent,
     record_attempt,
 )
 
+
 #: Intent-id run tag written by the Ictus submission bridge.
 INTENT_TAG = "ictus.intent_id"
 
 #: Mirrors the pinned bridge's own retry budget for the execute step.
 EXECUTE_RETRY_POLICY = RetryPolicy(max_retries=3, delay=0)
+
+#: The capability work runs as one bounded local subprocess per attempt:
+#: a fresh working directory, a minimal environment, a hard deadline and
+#: incrementally bounded captures. See :mod:`capability_process` — and note that
+#: this is process hygiene, not a sandbox (no filesystem/network boundary).
+SUBPROCESS_LIMITS = {
+    "timeout_seconds": SUBPROCESS_TIMEOUT_SECONDS,
+    "max_capture_bytes": MAX_CAPTURE_BYTES,
+}
 
 
 class CapabilitySettings(ConfigurableResource):
@@ -117,10 +133,46 @@ def execute_op(context, prepared: dict, settings: CapabilitySettings) -> dict:
                 f"{attempt} of {settings.capability}"
             )
         )
-    record_attempt(
-        intent_id=intent_id, attempt=attempt, programme=programme, outcome="succeeded"
+
+    evidence = run_capability_subprocess(
+        intent_id=intent_id,
+        attempt=attempt,
+        capability=settings.capability,
+        exit_code=programme.exit_code,
     )
-    return {**prepared, "execute_attempts": attempt, "executed": True}
+    # One structured line so the backend's own event log carries the process
+    # boundary; the same payload is mirrored into the attempt ledger.
+    context.log.info(
+        "tactus.capability.subprocess %s", json.dumps(evidence, sort_keys=True)
+    )
+    failed = bool(evidence["timed_out"]) or evidence["exit_code"] != 0
+    record_attempt(
+        intent_id=intent_id,
+        attempt=attempt,
+        programme=programme,
+        outcome="failed" if failed else "succeeded",
+        details={"subprocess": evidence, "run_id": context.run_id},
+    )
+    if evidence["timed_out"]:
+        raise Failure(
+            description=(
+                "tactus capability subprocess timed out after "
+                f"{SUBPROCESS_TIMEOUT_SECONDS:.0f}s"
+            )
+        )
+    if evidence["exit_code"] != 0:
+        raise Failure(
+            description=(
+                f"tactus capability subprocess exited {evidence['exit_code']} "
+                f"(intent {intent_id})"
+            )
+        )
+    return {
+        **prepared,
+        "execute_attempts": attempt,
+        "executed": True,
+        "subprocess": evidence,
+    }
 
 
 @op(ins={"executed": In(dict)}, out=Out(dict))

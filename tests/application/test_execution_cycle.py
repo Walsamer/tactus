@@ -486,6 +486,7 @@ def test_recovery_decision_escalates_durably_and_closes_in_one_step(tmp_path):
         _envelope(decision="ESCALATE", proposal_id="proposal-esc", include_intent=False),
         state_port=db,
         expected_revision=_rev(db),
+        intervention_store=SqliteHumanIntervention(tmp_path / "ledger.sqlite"),
     )
     assert decision.applied is True
     assert decision.application is not None
@@ -816,6 +817,9 @@ def test_recovery_effects_require_a_correlated_attempt(tmp_path, decision):
                       target_id="WO-INITIAL", include_intent=False),
             state_port=db,
             expected_revision=WorkOrderRevision(0),
+            intervention_store=(
+                SqliteHumanIntervention(tmp_path / "entry-guard.sqlite") if decision == "ESCALATE" else None
+            ),
         )
 
     assert "requires a correlated execution attempt" in str(ctx.value)
@@ -1180,4 +1184,27 @@ def test_escalation_request_and_decision_roll_back_together(tmp_path):
             orphan.request("intervention:proposal-esc")
     finally:
         orphan.close()
+    db.close()
+
+
+def test_escalation_without_a_durable_store_fails_closed(tmp_path):
+    """An escalation must never be applied where no restart could resolve it."""
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    before = db.work_order_snapshot(WORK_ORDER)
+
+    with pytest.raises(IntentDecisionError, match="requires a durable intervention store"):
+        cycle.apply_recovery_decision(
+            work_order,
+            _envelope(
+                decision="ESCALATE", proposal_id="proposal-esc", include_intent=False
+            ),
+            state_port=db,
+            expected_revision=_rev(db),
+        )
+
+    assert db.work_order_snapshot(WORK_ORDER) == before
+    assert work_order.state is WorkOrderState.ACTIVE
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox"
+    ).fetchone()[0] == 0
     db.close()

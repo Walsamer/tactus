@@ -75,6 +75,19 @@ def test_terminal_programme_fails_every_attempt(tmp_path, monkeypatch):
     assert [programme.fails_on(attempt) for attempt in (1, 2, 3, 4)] == [True] * 4
 
 
+def test_subprocess_exit_code_programme_runs_the_capability(tmp_path, monkeypatch):
+    """A non-zero exit code is a *post-subprocess* failure shape, not a step failure."""
+    path = _write(tmp_path, _control(("intent:three", {"exit_code": 7})))
+    monkeypatch.setenv(fc.CONTROL_PATH_ENV, str(path))
+
+    programme = fc.programme_for_intent("intent:three")
+    assert programme.exit_code == 7
+    assert programme.injects_failure is True
+    # It must not short-circuit the step: the capability subprocess still runs.
+    assert programme.fails_on(1) is False
+    assert programme.fails_on(4) is False
+
+
 def test_unlisted_intent_gets_no_programme(tmp_path, monkeypatch):
     path = _write(tmp_path, _control(("intent:one", {"fail_attempts": 1})))
     monkeypatch.setenv(fc.CONTROL_PATH_ENV, str(path))
@@ -93,12 +106,18 @@ def test_attempts_beyond_the_retry_budget_are_rejected(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "body, message",
     (
-        ({"fail_hard": True, "fail_attempts": 1}, "choose one failure shape"),
+        ({"fail_hard": True, "fail_attempts": 1}, "mixes failure shapes"),
+        ({"fail_hard": True, "exit_code": 7}, "mixes failure shapes"),
+        ({"fail_attempts": 1, "exit_code": 7}, "mixes failure shapes"),
         ({"fail_attempts": 0}, "injects nothing"),
         ({}, "is empty"),
         ({"fail_attempts": "1"}, "must be an integer"),
         ({"fail_hard": "yes"}, "must be a boolean"),
         ({"fail_always": True}, "unknown key"),
+        ({"exit_code": 0}, "injects nothing"),
+        ({"exit_code": 126}, "exit_code must be within"),
+        ({"exit_code": "7"}, "exit_code must be an integer"),
+        ({"exit_code": True}, "exit_code must be an integer"),
     ),
 )
 def test_invalid_programmes_fail_closed(tmp_path, monkeypatch, body, message):
