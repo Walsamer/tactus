@@ -681,6 +681,17 @@ def _observe(
         denials.append({"case": "intent_mismatch", "denied": type(exc).__name__})
     else:  # pragma: no cover - contract failure
         raise ValidationError("a mismatched intent was correlated")
+    try:
+        cycle.correlate(
+            observation,
+            attempt_id=accepted.attempt.attempt_id,
+            submission_id=accepted.submission.submission_id,
+            expected_intent_digest="0" * 64,
+        )
+    except ObservationCorrelationError as exc:
+        denials.append({"case": "stale_intent_digest", "denied": type(exc).__name__})
+    else:  # pragma: no cover - contract failure
+        raise ValidationError("a stale intent digest was correlated")
 
     correlated = cycle.correlate(
         observation,
@@ -698,6 +709,16 @@ def _observe(
     replay = cycle.apply_observation(correlated)
     if replay.applied:
         raise ValidationError("duplicate observation delivery applied a second effect")
+    try:
+        cycle.correlate(
+            observation,
+            attempt_id=accepted.attempt.attempt_id,
+            submission_id=accepted.submission.submission_id,
+        )
+    except ObservationCorrelationError as exc:
+        denials.append({"case": "late_after_closure", "denied": type(exc).__name__})
+    else:  # pragma: no cover - contract failure
+        raise ValidationError("a late observation was correlated after attempt closure")
     return {
         "category": category,
         "result": result,
@@ -1094,6 +1115,7 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
 
     return {
         "scenario": "escalation",
+        "terminal_observation": observed,
         "terminal_observation_category": observed["category"],
         "recovery_proposal_decision": envelope["proposal"]["decision"],
         "execution_intent_present": False,
@@ -1155,6 +1177,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "generated_at": _now().isoformat(),
         "result": "passed",
         "versions": {"python": sys.version, "ictus": pin},
+        "prerequisites": {
+            "requires": [
+                "pinned Ictus checkout (TACTUS_ICTUS_ROOT)",
+                "its virtualenv with dagster + ictus_dagster",
+                "prebuilt target/debug/ictus binary",
+                "Tactus's own src/ on PYTHONPATH",
+            ],
+            "absent": ["pi", "stax", "metaxy", "openshell", "kubernetes"],
+        },
         "invariant": (
             "submitted ExecutionIntent == Ictus-authorized ExecutionIntent; "
             "failure control is out-of-band and bounded"
