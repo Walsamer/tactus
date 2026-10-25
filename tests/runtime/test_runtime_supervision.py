@@ -88,19 +88,49 @@ def _write_record(supervisor: RuntimeSupervisor, payload: dict) -> None:
     supervisor.attempt_record_path.write_text(json.dumps(payload))
 
 
-def _live_group() -> tuple[int, subprocess.Popen]:
-    """Start an orphan-to-be process group and return (pgid, handle)."""
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+def _alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def _live_group() -> int:
+    """Start an *orphaned* process group and return its pgid.
+
+    Started by a short-lived helper so the process is reparented — exactly what
+    happens when the supervising process dies mid-attempt. A still-parented child
+    would remain a zombie after SIGKILL and could never be confirmed on Linux.
+    """
+    helper = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import subprocess, sys\n"
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(60)'], start_new_session=True, "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+                "stderr=subprocess.DEVNULL)\n"
+                "print(child.pid, flush=True)\n"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
+    assert helper.returncode == 0, helper.stderr
+    pgid = int(helper.stdout.split()[0])
     deadline = time.monotonic() + 5
-    while process_start_marker(child.pid) is None and time.monotonic() < deadline:
+    while process_start_marker(pgid) is None and time.monotonic() < deadline:
         time.sleep(0.02)
-    return child.pid, child
+    return pgid
+
+
+def _kill_group(pgid: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 # -- success -----------------------------------------------------------------
@@ -355,7 +385,7 @@ def test_unconfirmed_termination_keeps_the_lock_and_reports_unterminated(tmp_pat
 def test_unterminated_attempt_blocks_a_new_writer_when_recovery_cannot_verify(tmp_path):
     """The hold survives until recovery is verified or an operator resolves it."""
     supervisor = _supervisor(tmp_path, "success", start_marker=lambda _pid: None)
-    pgid, child = _live_group()
+    pgid = _live_group()
     try:
         _write_record(
             supervisor,
@@ -371,10 +401,10 @@ def test_unterminated_attempt_blocks_a_new_writer_when_recovery_cannot_verify(tm
         with pytest.raises(RuntimeRecoveryRequired, match="unresolved|unterminated"):
             supervisor.run(_request("attempt-2"))
 
-        assert child.poll() is None, "an unverified group must not be signalled"
+        assert _alive(pgid) is True, "an unverified group must not be signalled"
         assert json.loads(supervisor.attempt_record_path.read_text())["phase"] == "unresolved"
     finally:
-        terminate_process_group(pgid, child, 1.0)
+        _kill_group(pgid)
 
 
 # -- concurrency -------------------------------------------------------------
@@ -419,7 +449,7 @@ def test_concurrent_attempt_cannot_touch_the_first_attempts_state(tmp_path):
 
 def test_recover_terminates_a_verified_leftover_group(tmp_path):
     supervisor = _supervisor(tmp_path, "success")
-    pgid, child = _live_group()
+    pgid = _live_group()
     try:
         _write_record(
             supervisor,
@@ -438,18 +468,17 @@ def test_recover_terminates_a_verified_leftover_group(tmp_path):
         assert report.recovered is True, report.termination
         assert report.signalled is True
         assert report.termination is not None and report.termination.confirmed is True
-        assert child.wait(timeout=5) is not None
+        assert _alive(pgid) is False
         record = json.loads(supervisor.attempt_record_path.read_text())
         assert record["phase"] == "recovered"
     finally:
-        if child.poll() is None:
-            terminate_process_group(pgid, child, 1.0)
+        _kill_group(pgid)
 
 
 def test_recover_never_signals_a_reused_pgid(tmp_path):
     """A recorded pgid may now belong to an unrelated process: never signal it."""
     supervisor = _supervisor(tmp_path, "success")
-    pgid, child = _live_group()
+    pgid = _live_group()
     try:
         _write_record(
             supervisor,
@@ -467,14 +496,14 @@ def test_recover_never_signals_a_reused_pgid(tmp_path):
         assert report.phase == "recovered"
         assert report.reused_pgid is True
         assert report.signalled is False
-        assert child.poll() is None, "an unrelated process group was signalled"
+        assert _alive(pgid) is True, "an unrelated process group was signalled"
     finally:
-        terminate_process_group(pgid, child, 1.0)
+        _kill_group(pgid)
 
 
 def test_recover_marks_unverifiable_identity_as_unresolved(tmp_path):
     supervisor = _supervisor(tmp_path, "success", start_marker=lambda _pid: None)
-    pgid, child = _live_group()
+    pgid = _live_group()
     try:
         _write_record(
             supervisor,
@@ -492,10 +521,10 @@ def test_recover_marks_unverifiable_identity_as_unresolved(tmp_path):
         assert report.phase == "unresolved"
         assert report.requires_operator is True
         assert report.signalled is False
-        assert child.poll() is None
+        assert _alive(pgid) is True
         assert json.loads(supervisor.attempt_record_path.read_text())["phase"] == "unresolved"
     finally:
-        terminate_process_group(pgid, child, 1.0)
+        _kill_group(pgid)
 
 
 def test_crash_while_spawning_blocks_new_writers(tmp_path):
