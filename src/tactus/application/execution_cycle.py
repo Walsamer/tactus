@@ -49,6 +49,7 @@ from tactus.domain import (
     ExecutionAttemptId,
     ExecutionIntentId,
     FailureObservation,
+    HumanInterventionRequest,
     OpenStatus,
     RecoveryDecisionRecord,
     ResultRecord,
@@ -92,6 +93,19 @@ class ObservationCorrelationError(ExecutionCycleError):
 
 class WorkOrderProjectionError(ExecutionCycleError):
     """The durable Work Order projection cannot accept the requested effect."""
+
+
+@runtime_checkable
+class InterventionRequestPort(Protocol):
+    """Durable boundary for the typed request an ESCALATE effect creates.
+
+    Only the in-transaction write is needed here: the decision ledger owns the
+    transaction, so the intervention is recorded on the same connection.
+    """
+
+    def record_request_in(
+        self, connection: object, request: HumanInterventionRequest
+    ) -> HumanInterventionRequest: ...
 
 
 @runtime_checkable
@@ -669,12 +683,19 @@ class ExecutionCycle:
         at: datetime | None = None,
         child_plan: Any = None,
         initial_context: InitialAuthorizationContext | None = None,
+        intervention_store: InterventionRequestPort | None = None,
     ) -> RecoveryApplication:
         """Apply one ALLOWED Ictus recovery decision and persist its projection.
 
         The decision vocabulary and mapping stay in the existing domain applier;
         this method only binds the envelope subject to the Work Order and writes
         the resulting guarded state/readiness to the durable projection.
+
+        When the decision is ``ESCALATE`` the applier builds a typed
+        ``HumanInterventionRequest``. Supplying ``intervention_store`` records
+        that request in the same transaction as the projection and the decision
+        ledger row, so the escalation stays resolvable after a restart instead
+        of existing only in the caller's memory.
         """
 
         if not isinstance(envelope, Mapping):
@@ -788,6 +809,9 @@ class ExecutionCycle:
             state["application"] = applier.apply(
                 work_order, decision, child_plan=child_plan, at=at
             )
+            intervention = state["application"].intervention
+            if intervention is not None and intervention_store is not None:
+                intervention_store.record_request_in(connection, intervention)
             state_port.apply_transition_in(
                 connection,  # same transaction as the ledger row
                 work_order.id,

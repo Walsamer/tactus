@@ -54,8 +54,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 CODE_LOCATION = "tactus-local-test-capability"
 CAPABILITY = "demo.verify"
-SOURCE_REVISION = "source:work-order:failures:v1"
 INTENT_ARGUMENT_KEY = "arguments"
+#: Checked revision of the milestone Issue. The acceptance slice runs on a Work
+#: Order whose identity, source revision and specification digest are derived
+#: from this recorded payload by the real import service.
+ISSUE_REPOSITORY = "walsamer/tactus"
+ISSUE_NUMBER = 12
+ISSUE_FIXTURE = (
+    REPO_ROOT / "tests" / "integrations" / "github" / "data" / "issue_12.json"
+)
 #: Keys that must never appear inside an authorized intent (they are the
 #: out-of-band failure-control surface, not an intent contract).
 FORBIDDEN_INTENT_KEYS = frozenset(
@@ -70,10 +77,14 @@ from tactus.application import (  # noqa: E402
     ObservationCorrelationError,
 )
 from tactus.domain import (  # noqa: E402
+    ActionNotPermittedError,
     ClaimToken,
     DagsterRunId,
+    HumanAction,
+    HumanResolution,
     InitialAuthorizationContext,
     OpenStatus,
+    RequestAlreadyResolvedError,
     SourceRevision,
     TransitionAuthority,
     WorkOrder,
@@ -88,6 +99,9 @@ from tactus.integrations.ictus import (  # noqa: E402
     build_state_snapshot,
     parse_observation,
     to_ictus_legacy_boundary_payload,
+)
+from tactus.persistence.human_intervention import (  # noqa: E402
+    SqliteHumanIntervention,
 )
 from tactus.persistence.sqlite import SqliteExecutionAdmission  # noqa: E402
 
@@ -281,32 +295,81 @@ def _counts(db: SqliteExecutionAdmission) -> dict[str, int]:
     }
 
 
-def _bootstrap_work_order(db: SqliteExecutionAdmission, work_order_id: str) -> tuple[WorkOrder, WorkOrderRevision]:
-    now = _now()
-    work_order = WorkOrder.create(work_order_id)
-    work_order.admit(
-        reason="bounded execution-failure validation",
-        authority=TransitionAuthority.OPERATOR,
-        at=now,
+def _import_checked_issue(env: dict[str, Any]) -> tuple[WorkOrder, SourceRevision, dict[str, Any]]:
+    """Import the checked Issue revision into a real, provenance-bound Work Order.
+
+    The slice must not run on an invented Work Order id: the id, the source
+    revision and the specification digest all come from the recorded GitHub
+    Issue revision through the real import service, and the import must be
+    idempotent with no source holds.
+    """
+    if not ISSUE_FIXTURE.is_file():
+        raise ValidationError(f"checked Issue fixture is missing: {ISSUE_FIXTURE}")
+
+    from tactus.application import import_issue, recheck_source
+    from tactus.integrations.github import MockGitHubIssueSource
+
+    source = MockGitHubIssueSource.from_files(
+        {(ISSUE_REPOSITORY, ISSUE_NUMBER): ISSUE_FIXTURE}
     )
+    work_source = env["work_source"]
+    imported = import_issue(source, work_source, ISSUE_REPOSITORY, ISSUE_NUMBER)
+    if not imported.created:
+        raise ValidationError("a fresh ledger did not create the Work Order on import")
+    reimported = import_issue(source, work_source, ISSUE_REPOSITORY, ISSUE_NUMBER)
+    if reimported.created or reimported.work_order_id != imported.work_order_id:
+        raise ValidationError("re-importing the same Issue revision was not idempotent")
+    holds = recheck_source(source, work_source, imported.work_order_id)
+    if holds:
+        raise ValidationError(
+            "the checked Issue revision is held: "
+            f"{[hold.reason.value for hold in holds]}"
+        )
+
+    revision = imported.provenance.revision
+    source_revision = revision.source_revision
+    now = _now()
+    work_order = imported.work_order
     work_order.set_readiness(OpenStatus.READY)
     work_order.claim(
-        reason="simulated recovered Work Order entering the failure validation slice",
-        at=now,
+        reason="checked Issue revision entering the acceptance slice", at=now
     )
-    db.register_work_order(
-        work_order_id,
+    env["db"].register_work_order(
+        work_order.id,
         revision=WorkOrderRevision(0),
-        source_revision=SourceRevision(SOURCE_REVISION),
+        source_revision=source_revision,
         state=work_order.state,
         readiness=None,
         at=now,
     )
-    return work_order, WorkOrderRevision(0)
+    evidence = {
+        "issue": {
+            "repository": ISSUE_REPOSITORY,
+            "number": ISSUE_NUMBER,
+            "url": revision.url,
+            "title": revision.title,
+            "updated_at": revision.updated_at.isoformat(),
+            "labels": list(revision.labels),
+            "state": revision.issue_state,
+        },
+        "work_order_id": str(imported.work_order_id),
+        "import_key": imported.provenance.import_key.value,
+        "source_revision": source_revision.value,
+        "specification_digest": revision.specification_digest,
+        "body_sha256": revision.body_sha256,
+        "created": imported.created,
+        "reimport_idempotent": True,
+        "source_holds": [],
+    }
+    return work_order, source_revision, evidence
 
 
 def _initial_snapshot(
-    work_order: WorkOrder, *, capability: str, snapshot_id: str
+    work_order: WorkOrder,
+    *,
+    capability: str,
+    snapshot_id: str,
+    source_revision: SourceRevision,
 ) -> dict[str, Any]:
     """Genuine INITIAL authorization context (no prior attempt, no observation)."""
     return build_state_snapshot(
@@ -318,7 +381,7 @@ def _initial_snapshot(
         timestamp=_now(),
         capability_id=capability,
         dependencies_satisfied=True,
-        source_revision=SOURCE_REVISION,
+        source_revision=source_revision.value,
         work_order_revision=0,
     )
 
@@ -435,8 +498,11 @@ def _environment(
     instance = DagsterInstance.get()
     log_path = work_root / "dagster-daemon.log"
     daemon, handle = _start_daemon(ictus_root, workspace, work_root, log_path)
+    from tactus.persistence import SqliteWorkSource
+
     db_path = work_root / "tactus-ledger.sqlite"
     db = SqliteExecutionAdmission(db_path)
+    work_source = SqliteWorkSource(db_path)
     cycle = ExecutionCycle(db)
     try:
         yield {
@@ -452,9 +518,14 @@ def _environment(
             "dagster_version": dagster_version,
             "db_path": db_path,
             "db": db,
+            "work_source": work_source,
             "cycle": cycle,
         }
     finally:
+        with contextlib.suppress(Exception):
+            env_work_source = locals().get("work_source")
+            if env_work_source is not None:
+                env_work_source.close()
         with contextlib.suppress(Exception):
             db.close()
         _terminate(daemon)
@@ -475,14 +546,18 @@ def _admit(
     and is keyed by the resulting intent id; it can therefore only ever affect
     the capability implementation, never the authorization result.
     """
-    work_order_id = f"WO-FAILURE-{env['scenario'].upper()}"
     db: SqliteExecutionAdmission = env["db"]
     cycle: ExecutionCycle = env["cycle"]
     submission = env["submission"]
 
-    work_order, starting_revision = _bootstrap_work_order(db, work_order_id)
+    work_order, source_revision, provenance = _import_checked_issue(env)
+    work_order_id = str(work_order.id)
+    starting_revision = WorkOrderRevision(0)
     snapshot = _initial_snapshot(
-        work_order, capability=capability, snapshot_id=snapshot_id
+        work_order,
+        capability=capability,
+        snapshot_id=snapshot_id,
+        source_revision=source_revision,
     )
     _, envelope = _decide(binary, snapshot)
     if envelope["policy_decision"]["decision"] != "ALLOW":
@@ -500,7 +575,7 @@ def _admit(
             phase=_fact(snapshot, "snapshot.phase"),
             snapshot_id=snapshot["snapshot_id"],
             snapshot_digest=_fact(snapshot, "snapshot.digest"),
-            source_revision=SourceRevision(SOURCE_REVISION),
+            source_revision=source_revision,
             work_order_revision=starting_revision,
         ),
     )
@@ -521,7 +596,7 @@ def _admit(
     accepted = cycle.accept(
         claim,
         envelope,
-        source_revision=SOURCE_REVISION,
+        source_revision=source_revision,
         work_order=work_order,
         at=now,
     )
@@ -545,6 +620,8 @@ def _admit(
         "receipt": receipt,
         "revision": db.work_order_snapshot(work_order_id)[0],
         "claim_expiry": claim_expiry,
+        "source_revision": source_revision,
+        "provenance": provenance,
         "intent_invariant": invariant,
     }
 
@@ -604,6 +681,17 @@ def _observe(
         denials.append({"case": "intent_mismatch", "denied": type(exc).__name__})
     else:  # pragma: no cover - contract failure
         raise ValidationError("a mismatched intent was correlated")
+    try:
+        cycle.correlate(
+            observation,
+            attempt_id=accepted.attempt.attempt_id,
+            submission_id=accepted.submission.submission_id,
+            expected_intent_digest="0" * 64,
+        )
+    except ObservationCorrelationError as exc:
+        denials.append({"case": "stale_intent_digest", "denied": type(exc).__name__})
+    else:  # pragma: no cover - contract failure
+        raise ValidationError("a stale intent digest was correlated")
 
     correlated = cycle.correlate(
         observation,
@@ -621,6 +709,16 @@ def _observe(
     replay = cycle.apply_observation(correlated)
     if replay.applied:
         raise ValidationError("duplicate observation delivery applied a second effect")
+    try:
+        cycle.correlate(
+            observation,
+            attempt_id=accepted.attempt.attempt_id,
+            submission_id=accepted.submission.submission_id,
+        )
+    except ObservationCorrelationError as exc:
+        denials.append({"case": "late_after_closure", "denied": type(exc).__name__})
+    else:  # pragma: no cover - contract failure
+        raise ValidationError("a late observation was correlated after attempt closure")
     return {
         "category": category,
         "result": result,
@@ -719,6 +817,7 @@ def scenario_transient(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         "semantic_attempt_count_unchanged": counts["execution_attempts"] == 1,
         "observation": observed,
         "durable_counts": counts,
+        "provenance": admitted["provenance"],
         "intent_invariant": admitted["intent_invariant"],
     }
 
@@ -778,7 +877,7 @@ def scenario_terminal(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         snapshot_id="snapshot-terminal-recovery",
         timestamp=_now(),
         capability_id=CAPABILITY,
-        source_revision=SOURCE_REVISION,
+        source_revision=admitted["source_revision"].value,
         work_order_revision=1,
     )
     _, envelope = _decide(binary, snapshot)
@@ -823,7 +922,7 @@ def scenario_terminal(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
     second = cycle.accept(
         claim,
         envelope,
-        source_revision=SOURCE_REVISION,
+        source_revision=admitted["source_revision"],
         work_order=admitted["work_order"],
         at=now,
     )
@@ -856,6 +955,7 @@ def scenario_terminal(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
             "submission_id": second.submission.submission_id.value,
         },
         "durable_counts": counts,
+        "provenance": admitted["provenance"],
         "intent_invariant": invariant,
     }
 
@@ -891,7 +991,7 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         snapshot_id="snapshot-escalation-recovery",
         timestamp=_now(),
         capability_id=CAPABILITY,
-        source_revision=SOURCE_REVISION,
+        source_revision=admitted["source_revision"].value,
         work_order_revision=1,
     )
     _, envelope = _decide(binary, snapshot)
@@ -905,13 +1005,19 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         raise ValidationError("an ESCALATE decision carried an ExecutionIntent")
 
     revision = db.work_order_snapshot(admitted["work_order_id"])[0]
+    interventions = SqliteHumanIntervention(env["db_path"])
     escalation = cycle.apply_recovery_decision(
-        admitted["work_order"], envelope, state_port=db, expected_revision=revision
+        admitted["work_order"],
+        envelope,
+        state_port=db,
+        expected_revision=revision,
+        intervention_store=interventions,
     )
     if not escalation.applied or escalation.next_intent is not None:
         raise ValidationError("ESCALATE must apply once and authorize no intent")
     if escalation.application is None or escalation.application.intervention is None:
         raise ValidationError("ESCALATE did not create a typed human-intervention request")
+    intervention_id = escalation.application.intervention.intervention_id
     if admitted["work_order"].readiness is not OpenStatus.BLOCKED:
         raise ValidationError("ESCALATE did not leave the Work Order OPEN+BLOCKED")
 
@@ -932,8 +1038,84 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
     if counts["recovery_decision_inbox"] != 2:
         raise ValidationError(f"restart duplicated the escalation record: {counts}")
 
+    # The typed request must be reconstructible from durable state alone and
+    # must accept only a valid typed resolution (AC: escalations persist across
+    # restart and accept only valid typed resolution).
+    interventions.close()
+    interventions = SqliteHumanIntervention(env["db_path"])
+    request = interventions.request(intervention_id)
+    if request.work_order_id != admitted["work_order"].id:
+        raise ValidationError("the persisted request targets a different Work Order")
+    current_revision = state_after_restart[0]
+    now = _now()
+
+    def resolution(resolution_id: str, action: HumanAction) -> HumanResolution:
+        return HumanResolution(
+            resolution_id=resolution_id,
+            intervention_id=intervention_id,
+            work_order_id=request.work_order_id,
+            actor="operator",
+            action=action,
+            resolved_at=now,
+            source_revision=admitted["source_revision"],
+            work_order_revision=current_revision,
+            evidence=("operator resolved the persisted escalation",),
+        )
+
+    denials: list[dict[str, str]] = []
+    try:
+        interventions.resolve(
+            resolution("resolution-scope-change", HumanAction.AUTHORIZE_SCOPE_CHANGE),
+            current_source_revision=admitted["source_revision"],
+            current_work_order_revision=current_revision,
+        )
+    except ActionNotPermittedError as exc:
+        denials.append({"case": "unpermitted_action", "denied": type(exc).__name__})
+    else:
+        raise ValidationError("an unpermitted typed action was accepted")
+
+    accepted_resolution = resolution("resolution-approve", HumanAction.APPROVE)
+    _, grant = interventions.resolve(
+        accepted_resolution,
+        current_source_revision=admitted["source_revision"],
+        current_work_order_revision=current_revision,
+    )
+    _, replay_grant = interventions.resolve(
+        accepted_resolution,
+        current_source_revision=admitted["source_revision"],
+        current_work_order_revision=current_revision,
+    )
+    if replay_grant.grant_id != grant.grant_id:
+        raise ValidationError("a replayed resolution produced a second grant")
+    try:
+        interventions.resolve(
+            resolution("resolution-second", HumanAction.APPROVE),
+            current_source_revision=admitted["source_revision"],
+            current_work_order_revision=current_revision,
+        )
+    except RequestAlreadyResolvedError as exc:
+        denials.append({"case": "second_active_resolution", "denied": type(exc).__name__})
+    else:
+        raise ValidationError("a second active resolution was accepted")
+    if len(interventions.resolutions_for(intervention_id)) != 1:
+        raise ValidationError("a request ended up with more than one resolution")
+    intervention_evidence = {
+        "intervention_id": intervention_id,
+        "reason": request.reason.value,
+        "summary": request.summary,
+        "permitted_actions": [action.value for action in request.permitted_actions],
+        "resolved_action": grant.action.value,
+        "grant_id": grant.grant_id,
+        "grant_replay_same_id": replay_grant.grant_id == grant.grant_id,
+        "resolutions_recorded": len(interventions.resolutions_for(intervention_id)),
+        "denials": denials,
+        "recoverable_after_restart": True,
+    }
+    interventions.close()
+
     return {
         "scenario": "escalation",
+        "terminal_observation": observed,
         "terminal_observation_category": observed["category"],
         "recovery_proposal_decision": envelope["proposal"]["decision"],
         "execution_intent_present": False,
@@ -942,6 +1124,8 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         "work_order_blocked_after_restart": True,
         "replay_applied_after_restart": replay.applied,
         "durable_counts_after_restart": counts,
+        "intervention": intervention_evidence,
+        "provenance": admitted["provenance"],
         "intent_invariant": admitted["intent_invariant"],
     }
 
@@ -993,6 +1177,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "generated_at": _now().isoformat(),
         "result": "passed",
         "versions": {"python": sys.version, "ictus": pin},
+        "prerequisites": {
+            "requires": [
+                "pinned Ictus checkout (TACTUS_ICTUS_ROOT)",
+                "its virtualenv with dagster + ictus_dagster",
+                "prebuilt target/debug/ictus binary",
+                "Tactus's own src/ on PYTHONPATH",
+            ],
+            "absent": ["pi", "stax", "metaxy", "openshell", "kubernetes"],
+        },
         "invariant": (
             "submitted ExecutionIntent == Ictus-authorized ExecutionIntent; "
             "failure control is out-of-band and bounded"

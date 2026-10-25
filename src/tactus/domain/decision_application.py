@@ -373,8 +373,12 @@ class DecisionApplier:
         at: datetime,
     ) -> HumanInterventionRequest:
         if supplied is None:
+            # Identity is derived from the decision, not generated: one
+            # ESCALATE decision owns exactly one intervention request, so a
+            # decision replay (or the bounded retry that follows it) cannot
+            # mint a second, resolvable request identity.
             return HumanInterventionRequest(
-                intervention_id=uuid.uuid4().hex,
+                intervention_id=f"intervention:{decision.decision_id}",
                 work_order_id=work_order.id,
                 reason=reason,
                 summary=f"Ictus ESCALATE ({decision.decision_id})",
