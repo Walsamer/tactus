@@ -124,7 +124,7 @@ def ictus_boundary(tmp_path_factory: pytest.TempPathFactory) -> conformance.Ictu
 
 def test_reviewed_ictus_revision_is_pinned(ictus_boundary: conformance.IctusBoundary) -> None:
     assert ictus_boundary.commit == conformance.PINNED_ICTUS_COMMIT
-    assert conformance.PINNED_ICTUS_COMMIT == "86816d6019af1f23c63428348cd820d706bb0d27"
+    assert conformance.PINNED_ICTUS_COMMIT == "e7419210d5bdfec3169e375d4957077951cc231c"
     assert ictus_boundary.binary.is_file()
 
 
@@ -187,7 +187,10 @@ def test_initial_phase_rejects_a_fabricated_observation() -> None:
 @pytest.mark.parametrize(
     ("name", "decision"),
     [
-        ("initial_snapshot.v2.json", "ESCALATE"),
+        # The pin now includes Ictus #18/#19, which authorize INITIAL execution
+        # explicitly instead of escalating a snapshot that carries no execution
+        # observation. Before the advance this fixture decided ESCALATE.
+        ("initial_snapshot.v2.json", "EXECUTE_CAPABILITY"),
         ("recovery_snapshot.v2.json", "REEXECUTE"),
     ],
 )
