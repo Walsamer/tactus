@@ -147,14 +147,18 @@ dagster-daemon
                                       stdin : {"intent_id", "attempt", "capability", "exit_code"}
                                       stdout: canonical receipt (intent_id, attempt, payload_sha256)
                                       cwd   : fresh temp directory, removed afterwards
-                                      env   : PATH only
+                                      env   : PATH only (hygiene, not a sandbox)
 ```
 
 * **Identity captured:** real `pid`, `executable`, Dagster `run_id` (recorded
   with the evidence), `intent_id`, `attempt`, `payload_sha256` and
   `stdout_sha256`.
-* **Bounded:** `timeout=30s` (timeout ⇒ step `Failure`), stdout/stderr captured
-  and truncated at 4096 bytes with an explicit `*_truncated` flag.
+* **Bounded while reading:** each stream is read incrementally and at most
+  4096 bytes are retained; a child that floods either stream is cut at the cap
+  (`output_limit_exceeded=true`), killed and reaped — the module never buffers
+  an unbounded capture and then slices it. The 30 s deadline covers the whole
+  exchange, and a timeout kills and reaps the child and returns the partial
+  capture.
 * **Correlated:** the harness asserts the subprocess's `run_id` equals the run
   that produced the terminal observation, and that the observation is applied
   (⇒ `IMPLEMENTED`) only after that run reached terminal state.
@@ -165,6 +169,12 @@ dagster-daemon
   `FAILURE` and the bridge maps the failed `execute_op` to `PROCESS_CRASH` —
   the same path as any other terminal execution failure (`subprocess_failure`
   scenario: four attempts, four distinct pids, exit code 7 each).
+* **Not a sandbox:** the child runs as the same OS account as the Dagster
+  daemon, with the same filesystem and network reach. A minimal environment and
+  `python -I` prevent inherited interpreter configuration; they do **not**
+  enforce a filesystem or network boundary. The evidence record says so
+  explicitly (`isolation: "none …"`), and the working directory is described as
+  a fresh temporary directory rather than an isolated one.
 
 ### How the failure is produced without touching authorization
 

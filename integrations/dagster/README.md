@@ -31,10 +31,16 @@ revision, its policy, or an authorized `ExecutionIntent`.
   failure normalizes to `PROCESS_CRASH` and Ictus decides what it means.
 * Nothing here classifies failures, chooses a route, retries semantically or
   originates an `ExecutionObservation`.
-* The capability work is a **real OS subprocess** per attempt: fresh working
-  directory, `PATH`-only environment, 30 s timeout, bounded stdout/stderr, and
-  the real pid/exit code/digests recorded as evidence. A non-zero exit is a
-  step `Failure`, so the run fails and normalizes to `PROCESS_CRASH`.
+* The capability work is a **real OS subprocess** per attempt
+  (`capability_process.py`): fresh temporary working directory, minimal
+  `PATH`-only environment, 30 s deadline, captures bounded **while reading**
+  (4096 bytes per stream, then the child is killed and reaped), and the real
+  pid/exit code/digests recorded as evidence. A non-zero exit is a step
+  `Failure`, so the run fails and normalizes to `PROCESS_CRASH`.
+* **This is process hygiene, not a sandbox.** The child runs as the same OS
+  account with the same filesystem and network reach; `python -I` only prevents
+  inherited interpreter configuration. No filesystem or network isolation is
+  claimed, and the evidence record states `isolation: none`.
 
 Reproduce:
 

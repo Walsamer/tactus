@@ -31,16 +31,9 @@ from the pinned Ictus virtualenv, not by Tactus's own test environment.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
 from pathlib import Path
-from typing import Any
 
 from dagster import (
     ConfigurableResource,
@@ -57,15 +50,16 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:  # loaded by path (`python_file`) by the daemon
     sys.path.insert(0, str(_HERE))
 
+from capability_process import (  # noqa: E402  (path bootstrap above)
+    MAX_CAPTURE_BYTES,
+    SUBPROCESS_TIMEOUT_SECONDS,
+    run_capability_subprocess,
+)
 from failure_control import (  # noqa: E402  (path bootstrap above)
     FailureProgramme,
     programme_for_intent,
     record_attempt,
 )
-
-def hashlib_sha256(text: str) -> str:
-    """SHA-256 of one captured string (evidence digest, never a decision)."""
-    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
 #: Intent-id run tag written by the Ictus submission bridge.
@@ -74,32 +68,14 @@ INTENT_TAG = "ictus.intent_id"
 #: Mirrors the pinned bridge's own retry budget for the execute step.
 EXECUTE_RETRY_POLICY = RetryPolicy(max_retries=3, delay=0)
 
-#: The capability work runs as a bounded local subprocess: one process per
-#: attempt, in its own throwaway working directory, with a hard timeout and
-#: bounded captured output. This is the execution hop the acceptance criterion
-#: names (`independently launched Dagster run -> subprocess -> IMPLEMENTED`).
-SUBPROCESS_TIMEOUT_SECONDS = 30.0
-MAX_CAPTURE_BYTES = 4096
-
-#: Harmless, deterministic, stdlib-only program. It reads one JSON request on
-#: stdin, prints a canonical receipt (so the caller can prove *this* process ran
-#: for *this* attempt), and exits with the requested status.
-_CAPABILITY_PROGRAM = """
-import hashlib, json, sys
-
-request = json.load(sys.stdin)
-receipt = {
-    "schema_version": 1,
-    "intent_id": request["intent_id"],
-    "attempt": request["attempt"],
-    "capability": request["capability"],
-    "payload_sha256": hashlib.sha256(
-        (str(request["intent_id"]) + ":" + str(request["attempt"])).encode()
-    ).hexdigest(),
+#: The capability work runs as one bounded local subprocess per attempt:
+#: a fresh working directory, a minimal environment, a hard deadline and
+#: incrementally bounded captures. See :mod:`capability_process` — and note that
+#: this is process hygiene, not a sandbox (no filesystem/network boundary).
+SUBPROCESS_LIMITS = {
+    "timeout_seconds": SUBPROCESS_TIMEOUT_SECONDS,
+    "max_capture_bytes": MAX_CAPTURE_BYTES,
 }
-print(json.dumps(receipt, sort_keys=True))
-sys.exit(int(request["exit_code"]))
-"""
 
 
 class CapabilitySettings(ConfigurableResource):
@@ -117,88 +93,6 @@ class CapabilitySettings(ConfigurableResource):
     fail_hard: bool = False
     fail_verify: bool = False
     hold_seconds: float = 0.0
-
-
-def _bounded(text: str, limit: int = MAX_CAPTURE_BYTES) -> tuple[str, bool]:
-    """Bound one captured stream, keeping the head and flagging truncation."""
-    text = text or ""
-    if len(text) <= limit:
-        return text, False
-    return text[:limit] + "... [truncated]", True
-
-
-def _run_capability_subprocess(
-    *, intent_id: str, attempt: int, capability: str, exit_code: int
-) -> dict[str, Any]:
-    """Run the capability work as one bounded, isolated OS process.
-
-    The child gets a minimal environment, its own working directory and a hard
-    timeout; the caller receives the real pid, exit status and bounded captures.
-    The authorized intent is *input* to the child, never modified by it.
-    """
-    request = json.dumps(
-        {
-            "intent_id": intent_id,
-            "attempt": attempt,
-            "capability": capability,
-            "exit_code": exit_code,
-        },
-        sort_keys=True,
-    )
-    workspace = tempfile.mkdtemp(prefix="tactus-capability-")
-    started = time.monotonic()
-    evidence: dict[str, Any] = {
-        "schema_version": 1,
-        "executable": sys.executable,
-        "pid": None,
-        "exit_code": None,
-        "timed_out": False,
-        "duration_ms": 0,
-        "stdout": "",
-        "stderr": "",
-        "stdout_sha256": "",
-        "stdout_bytes": 0,
-        "stdout_truncated": False,
-        "stderr_truncated": False,
-        "request_sha256": hashlib_sha256(request),
-        "command": [Path(sys.executable).name, "-I", "-c", "<capability-program>"],
-        "working_directory_isolated": True,
-    }
-    process = subprocess.Popen(
-        [sys.executable, "-I", "-c", _CAPABILITY_PROGRAM],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=workspace,
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-    )
-    evidence["pid"] = process.pid
-    try:
-        try:
-            stdout, stderr = process.communicate(request, timeout=SUBPROCESS_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            evidence["timed_out"] = True
-            process.kill()
-            stdout, stderr = process.communicate()
-    finally:
-        shutil.rmtree(workspace, ignore_errors=True)
-
-    stdout, stdout_truncated = _bounded(stdout)
-    stderr, stderr_truncated = _bounded(stderr)
-    evidence.update(
-        {
-            "exit_code": process.returncode,
-            "duration_ms": round((time.monotonic() - started) * 1000, 3),
-            "stdout": stdout,
-            "stderr": stderr,
-            "stdout_sha256": hashlib_sha256(stdout),
-            "stdout_bytes": len(stdout),
-            "stdout_truncated": stdout_truncated,
-            "stderr_truncated": stderr_truncated,
-        }
-    )
-    return evidence
 
 
 def _programme(context) -> FailureProgramme:
@@ -240,7 +134,7 @@ def execute_op(context, prepared: dict, settings: CapabilitySettings) -> dict:
             )
         )
 
-    evidence = _run_capability_subprocess(
+    evidence = run_capability_subprocess(
         intent_id=intent_id,
         attempt=attempt,
         capability=settings.capability,
