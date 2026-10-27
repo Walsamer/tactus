@@ -1,10 +1,10 @@
-"""Stax source-control adapter boundary (preflight only).
+"""Stax source-control adapter boundary (preflight and workspace lifecycle).
 
-This package does not create workspaces, publish branches/PRs, update Stax or
-manage Fleet pools. It owns the exact Stax pin and a fail-closed preflight that
-must succeed before any later workspace/publication capability may use Stax.
+This package owns the exact Stax pin, a fail-closed preflight, and the
+Git-isolated workspace lifecycle (create/path/list/remove) for one semantic
+attempt. It does not publish branches/PRs, run ``stax lane``/``stax update`` or
+manage Fleet pools. Workspace isolation is a Git boundary, not an OS sandbox.
 """
-
 from .pin import (
     PINNED_STAX,
     STAX_EXECUTABLE_SHA256,
@@ -15,6 +15,32 @@ from .pin import (
     STAX_UPSTREAM,
     STAX_VERSION,
     StaxPin,
+)
+from .workspace import (
+    WORKSPACE_NAME_PREFIX,
+    WORKSPACE_STATE_DIR,
+    StaxWorkspaceError,
+    StaxWorkspacePort,
+    WorkspaceBoundaryError,
+    WorkspaceCommandError,
+    WorkspaceContainmentError,
+    WorkspaceCreateError,
+    WorkspaceDirtyError,
+    WorkspaceIdentity,
+    WorkspaceIdentityConflictError,
+    WorkspaceInUseError,
+    WorkspaceLease,
+    WorkspaceNotFoundError,
+    WorkspaceOwnershipError,
+    WorkspacePreflightError,
+    WorkspaceRecord,
+    WorkspaceRemoval,
+    WorkspaceRemoveError,
+    WorkspaceRequest,
+    WorkspaceRequestError,
+    WorkspaceSourceDriftError,
+    WorkspaceStateError,
+    WorkspaceUnsupportedPlatformError,
 )
 from .preflight import (
     CommandResult,
@@ -43,6 +69,30 @@ from .preflight import (
 )
 
 __all__ = [
+    "WORKSPACE_NAME_PREFIX",
+    "WORKSPACE_STATE_DIR",
+    "StaxWorkspaceError",
+    "StaxWorkspacePort",
+    "WorkspaceBoundaryError",
+    "WorkspaceCommandError",
+    "WorkspaceContainmentError",
+    "WorkspaceCreateError",
+    "WorkspaceDirtyError",
+    "WorkspaceIdentity",
+    "WorkspaceIdentityConflictError",
+    "WorkspaceInUseError",
+    "WorkspaceLease",
+    "WorkspaceNotFoundError",
+    "WorkspaceOwnershipError",
+    "WorkspacePreflightError",
+    "WorkspaceRecord",
+    "WorkspaceRemoval",
+    "WorkspaceRemoveError",
+    "WorkspaceRequest",
+    "WorkspaceRequestError",
+    "WorkspaceSourceDriftError",
+    "WorkspaceStateError",
+    "WorkspaceUnsupportedPlatformError",
     "CommandResult",
     "CommandRunner",
     "PINNED_STAX",
