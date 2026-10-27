@@ -1,0 +1,78 @@
+"""Stax source-control adapter boundary (preflight only).
+
+This package does not create workspaces, publish branches/PRs, update Stax or
+manage Fleet pools. It owns the exact Stax pin and a fail-closed preflight that
+must succeed before any later workspace/publication capability may use Stax.
+"""
+
+from .pin import (
+    PINNED_STAX,
+    STAX_EXECUTABLE_SHA256,
+    STAX_RELEASE_ASSET,
+    STAX_RELEASE_ASSET_SHA256,
+    STAX_RELEASE_TAG,
+    STAX_SUPPORTED_PLATFORM,
+    STAX_UPSTREAM,
+    STAX_VERSION,
+    StaxPin,
+)
+from .preflight import (
+    CommandResult,
+    CommandRunner,
+    StaxCommandExecutionError,
+    StaxExecutableDigestMismatchError,
+    StaxExecutableNotAbsoluteError,
+    StaxExecutableNotFoundError,
+    StaxExecutableNotExecutableError,
+    StaxExecutableReadError,
+    StaxExecutableSymlinkError,
+    StaxMalformedDoctorOutputError,
+    StaxMalformedVersionError,
+    StaxPlatformError,
+    StaxPreflight,
+    StaxPreflightError,
+    StaxPreflightResult,
+    StaxRepositoryNotInitializedError,
+    StaxRepositoryNotFoundError,
+    StaxUnsupportedPlatformError,
+    StaxVersionMismatchError,
+    SubprocessCommandRunner,
+    current_platform,
+    parse_stax_version,
+    sha256_file,
+)
+
+__all__ = [
+    "CommandResult",
+    "CommandRunner",
+    "PINNED_STAX",
+    "STAX_EXECUTABLE_SHA256",
+    "STAX_RELEASE_ASSET",
+    "STAX_RELEASE_ASSET_SHA256",
+    "STAX_RELEASE_TAG",
+    "STAX_SUPPORTED_PLATFORM",
+    "STAX_UPSTREAM",
+    "STAX_VERSION",
+    "StaxCommandExecutionError",
+    "StaxExecutableDigestMismatchError",
+    "StaxExecutableNotAbsoluteError",
+    "StaxExecutableNotFoundError",
+    "StaxExecutableNotExecutableError",
+    "StaxExecutableReadError",
+    "StaxExecutableSymlinkError",
+    "StaxMalformedDoctorOutputError",
+    "StaxMalformedVersionError",
+    "StaxPin",
+    "StaxPlatformError",
+    "StaxPreflight",
+    "StaxPreflightError",
+    "StaxPreflightResult",
+    "StaxRepositoryNotInitializedError",
+    "StaxRepositoryNotFoundError",
+    "StaxUnsupportedPlatformError",
+    "StaxVersionMismatchError",
+    "SubprocessCommandRunner",
+    "current_platform",
+    "parse_stax_version",
+    "sha256_file",
+]
