@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "adapter": "tactus.integrations.stax",
+  "upstream": "cesarferreira/stax",
+  "version": "0.113.1",
+  "release_tag": "v0.113.1",
+  "supported_platform": "aarch64-apple-darwin",
+  "release_asset": "stax-aarch64-apple-darwin.tar.gz",
+  "release_asset_sha256": "865f69488b3cc6daf2a259c842bd0c6a6c0dc5b69b70b4fd3d5aae12213293a2",
+  "executable": "stax",
+  "executable_sha256": "41c69735dcffd06749fcc10d945f08dab66bd7372cc800b1b8e3a607b180eee2"
+}
