@@ -5,6 +5,12 @@ Order does not push a branch, open a pull request, call GitHub, read a real
 credential or wire a live Stax publication command. It defines the boundary a
 later Stax publication adapter must use.
 
+Local source-control preparation is implemented separately in
+`tactus.integrations.stax.source_control`. A prepared change records
+`ImplementationOutcome.VERIFIED`/`REUSED` and always reports
+`PublicationEligibility.NOT_ELIGIBLE`; it has no credential or transport path
+and creates only local refs. A later publisher must still pass this guard.
+
 Normative ownership context:
 
 - [Ownership boundaries](OWNERSHIP_BOUNDARIES.md)

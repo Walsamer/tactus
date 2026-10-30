@@ -1,9 +1,10 @@
 # Stax adapter boundary
 
-Status: M3 preflight and Git-isolated workspace lifecycle. Tactus owns the
-pin, verification, and deterministic `create`/`path`/`list`/`remove` operations
-for one attempt. It does not publish branches/PRs, launch agents or drive an
-execution lane.
+Status: M3 preflight, Git-isolated workspace lifecycle, and local source-control
+preparation. Tactus owns the pin, verification, deterministic
+`create`/`path`/`list`/`remove` operations, and the fail-closed preparation of a
+verified patch on a local review branch. It does not push, publish branches/PRs,
+launch agents or drive an execution lane.
 
 Stax is a third-party CLI (`cesarferreira/stax`) for stacked Git branches and
 pull requests. Tactus treats it as an external, pinned capability behind an
@@ -131,9 +132,68 @@ create/reuse, identity conflicts, source drift, concurrent leases, containment
 escapes, dirty preservation, off-pin refusal and removal without running a real
 Stax binary, Git, network or canonical checkout.
 
+## Source-control preparation (no publication)
+
+`src/tactus/integrations/stax/source_control.py` defines the Tactus-owned
+`SourceControlPort` for moving from a *verified implementation* to a *staged
+local review branch*. It is deliberately downstream of, and separate from,
+publication authorization.
+
+`ChangePreparationRequest` binds the complete preparation fact set:
+
+| Field | Meaning |
+|---|---|
+| `change_id` | Caller's stable semantic change identity. |
+| `work_order_id` | Tactus Work Order being prepared. |
+| `repository` | Absolute disposable repository path. |
+| `source_revision` | Exact commit the verified implementation was produced from. |
+| `base_revision` | Exact commit the review branch must start at. It must equal `source_revision`. |
+| `patch` / `patch_digest` | Exact patch bytes and their exact lowercase SHA-256. |
+| `review_branch` | Authorized review branch under `agent/tactus/`. |
+| `attempt_id` | Optional workspace identity; defaults to a value derived from `change_id`. |
+
+Preparation is fail-closed and ordered:
+
+1. the patch bytes are hashed and must equal `patch_digest` **before** any
+   workspace is created;
+2. `source_revision` and `base_revision` must be the same exact commit, the
+   base commit must exist in the repository, and the review branch must be a
+   safe `agent/tactus/...` name that is not `main`/`master`;
+3. `StaxWorkspacePort` provisions or reuses the one Git worktree for the
+   attempt;
+4. the workspace must be clean and at the exact base commit; a dirty or drifted
+   workspace raises a typed refusal and is preserved, never reset or stashed;
+5. the patch is persisted under the state root and applied atomically with
+   `git apply --index`; it must change at least one path;
+6. a local commit is created with a single parent equal to `base_revision`, and
+   the exact `refs/heads/<review_branch>` ref is created from that commit. An
+   existing branch with different content is a conflict; the adapter never
+   force-updates it; and
+7. a content-addressed manifest records the request fingerprint, review branch
+   and staged commit.
+
+Repeating the identical request returns the original branch/commit with
+`ImplementationOutcome.REUSED` and does not create a second workspace or commit.
+Reusing the same `change_id` with any different fact raises
+`ChangeIdentityConflictError`.
+
+`PreparedChange` keeps two outcomes explicitly separate:
+
+- `ImplementationVerification` reports `VERIFIED` or `REUSED` together with the
+  exact source/base revisions, patch digest and staged commit; and
+- `PublicationEligibility` is always `NOT_ELIGIBLE`. Verified implementation is
+  **not** publication authority. The port has no publish method, no credential,
+  no transport and no remote-facing Git command.
+
+The disposable test suite creates a real temporary Git repository and worktree,
+stages a real patch, and asserts that `refs/heads/main` is unchanged. It also
+covers digest/source/base mismatches, dirty-workspace preservation, patch-apply
+failure, branch conflicts, stable reuse and conflicting requests. No remote,
+credential, live Stax binary or canonical checkout is used.
+
 ## Typed failures
 
-All failures derive from `StaxPreflightError`:
+Preflight failures derive from `StaxPreflightError`:
 
 | Failure | Meaning |
 |---|---|
@@ -153,6 +213,13 @@ All failures derive from `StaxPreflightError`:
 
 There is no boolean "ok" shortcut and no fallback path. A caller that cannot
 satisfy preflight must stop or escalate; it must not invoke Git instead.
+
+Source-control preparation refusals derive from `SourceControlError`:
+`PatchDigestMismatchError`, `RevisionBindingError`,
+`SourceRevisionMismatchError`, `ReviewBranchError`,
+`ReviewBranchConflictError`, `DirtyWorkspaceError`, `PatchApplyError`,
+`ChangeIdentityConflictError` and `PreparedChangeStateError`. Every refusal is
+fail-closed and leaves user work in place.
 
 ## Doctor and validate behavior
 
@@ -178,6 +245,9 @@ workspace or Fleet pool is touched.
 
 - No lane/agent launching, real-agent execution or OS-sandbox claim.
 - No stack restack, submit, PR publication or merge.
+- No `git push`, `git fetch`, remote access or credential handling in the
+  source-control preparation port.
 - No automatic Stax update or skill refresh.
 - No Fleet workspace/pool reuse, Ictus policy or credentials.
-- No writes to the canonical checkout and no forced cleanup.
+- No writes to the canonical checkout, no force-update of an existing review
+  branch and no forced cleanup.
