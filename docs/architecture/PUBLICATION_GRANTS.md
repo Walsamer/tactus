@@ -5,6 +5,10 @@ Order does not push a branch, open a pull request, call GitHub, read a real
 credential or wire a live Stax publication command. It defines the boundary a
 later Stax publication adapter must use.
 
+The durable, idempotent publication port built on this guard is documented in
+[Mocked publication](MOCKED_PUBLICATION.md). It consumes the same grant and
+credential interfaces against a fake GitHub transport, with no live path.
+
 Local source-control preparation is implemented separately in
 `tactus.integrations.stax.source_control`. A prepared change records
 `ImplementationOutcome.VERIFIED`/`REUSED` and always reports
