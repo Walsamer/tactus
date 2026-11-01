@@ -11,15 +11,34 @@ create/reuse, failure and reconciliation behaviour without touching GitHub:
   conflicts, duplicate pull requests and a lost create acknowledgment.
 
 Every mutation is recorded as a :class:`RemoteOperation`. ``network_calls`` is
-always zero: the fake cannot accidentally become a live transport. A future
-live adapter must be a separate, reviewed implementation behind the same
-protocol.
+always zero: the fake cannot accidentally become a live transport.
+
+The vocabulary it speaks — the transport contract, its value objects and its
+typed failures — lives in :mod:`tactus.integrations.github.transport`, so the
+live transport and this fake are different implementations of exactly one
+contract rather than two dialects. The public names below are re-exported here
+because that is where callers have always imported them from.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING
+
+from .transport import (
+    GitHubAcknowledgmentLostError,
+    GitHubBaseMovedError,
+    GitHubBranchConflictError,
+    GitHubDuplicatePullRequestError,
+    GitHubPermissionDeniedError,
+    GitHubPullRequest,
+    GitHubTransport,
+    GitHubTransportContract,
+    GitHubTransportError,
+    RemoteOperation,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from tactus.publication.guard import PublicationCredential
 
 __all__ = [
     "FAKE_GITHUB_CONTRACT_ID",
@@ -37,6 +56,7 @@ __all__ = [
     "RemoteOperation",
 ]
 
+from .transport import GitHubTransport  # noqa: F401  (re-exported; see __all__)
 
 FAKE_GITHUB_CONTRACT_ID = "tactus.integrations.github.fake/v1"
 FAKE_GITHUB_VERSION = "1.0.0"
@@ -51,187 +71,6 @@ def _require_text(value: str, label: str) -> str:
     if not value:
         raise ValueError(f"{label} must be a non-empty string")
     return value
-
-
-# -- errors ---------------------------------------------------------------
-
-
-class GitHubTransportError(RuntimeError):
-    """Base class for typed fake-transport failures."""
-
-
-class GitHubPermissionDeniedError(GitHubTransportError):
-    """The simulated credential may not perform the requested operation."""
-
-    def __init__(self, operation: str, repository: str) -> None:
-        self.operation = operation
-        self.repository = repository
-        super().__init__(
-            f"fake GitHub denied {operation!r} on {repository!r}"
-        )
-
-
-class GitHubBaseMovedError(GitHubTransportError):
-    """The destination base ref moved away from the authorized revision."""
-
-    def __init__(self, expected: str, actual: str | None) -> None:
-        self.expected = expected
-        self.actual = actual
-        super().__init__(
-            "fake GitHub base ref is no longer at the authorized revision: "
-            f"expected {expected!r}, found {actual!r}"
-        )
-
-
-class GitHubBranchConflictError(GitHubTransportError):
-    """A remote branch exists at a different revision than the verified one."""
-
-    def __init__(self, branch: str, expected: str, actual: str | None) -> None:
-        self.branch = branch
-        self.expected = expected
-        self.actual = actual
-        super().__init__(
-            f"fake GitHub branch {branch!r} is at {actual!r}; expected {expected!r}"
-        )
-
-
-class GitHubDuplicatePullRequestError(GitHubTransportError):
-    """More than one open pull request matches the same head/base pair."""
-
-    def __init__(self, pull_requests: tuple["GitHubPullRequest", ...]) -> None:
-        self.pull_requests = pull_requests
-        super().__init__(
-            "fake GitHub found multiple pull requests for one head/base pair: "
-            + ", ".join(str(pr.url) for pr in pull_requests)
-        )
-
-
-class GitHubAcknowledgmentLostError(GitHubTransportError):
-    """Creation may have happened, but GitHub did not acknowledge it.
-
-    The fake records the created pull request *before* raising so a caller can
-    prove it reconciles through a read instead of blindly retrying a mutation.
-    """
-
-    def __init__(self, pull_request: "GitHubPullRequest | None") -> None:
-        self.pull_request = pull_request
-        super().__init__(
-            "fake GitHub lost the pull-request creation acknowledgment"
-            + (f" for {pull_request.url}" if pull_request is not None else "")
-        )
-
-
-# -- value objects --------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class GitHubTransportContract:
-    """Versioned, machine-readable fake-transport contract."""
-
-    contract_id: str = FAKE_GITHUB_CONTRACT_ID
-    version: str = FAKE_GITHUB_VERSION
-    transport: str = "fake"
-    live: bool = False
-    network: bool = False
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "contract_id": self.contract_id,
-            "version": self.version,
-            "transport": self.transport,
-            "live": self.live,
-            "network": self.network,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class RemoteOperation:
-    """One simulated remote mutation, recorded for boundary assertions."""
-
-    kind: str
-    repository: str
-    target: str
-    revision: str | None = None
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "kind": self.kind,
-            "repository": self.repository,
-            "target": self.target,
-            "revision": self.revision,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class GitHubPullRequest:
-    """A fake pull request with no credential or network material."""
-
-    number: int
-    url: str
-    repository: str
-    head_branch: str
-    base_branch: str
-    head_revision: str
-    base_revision: str
-    publication_id: str
-    title: str
-    body: str
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "number": self.number,
-            "url": self.url,
-            "repository": self.repository,
-            "head_branch": self.head_branch,
-            "base_branch": self.base_branch,
-            "head_revision": self.head_revision,
-            "base_revision": self.base_revision,
-            "publication_id": self.publication_id,
-            "title": self.title,
-        }
-
-
-@runtime_checkable
-class GitHubTransport(Protocol):
-    """The narrow fake-GitHub surface the publication port consumes."""
-
-    @property
-    def contract(self) -> GitHubTransportContract: ...
-
-    @property
-    def network_calls(self) -> int: ...
-
-    @property
-    def operations(self) -> tuple[RemoteOperation, ...]: ...
-
-    def branch_revision(self, repository: str, branch: str) -> str | None: ...
-
-    def base_revision(self, repository: str, branch: str) -> str | None: ...
-
-    def find_pull_requests(
-        self,
-        repository: str,
-        *,
-        head_branch: str,
-        base_branch: str,
-    ) -> tuple[GitHubPullRequest, ...]: ...
-
-    def ensure_branch(
-        self, repository: str, branch: str, revision: str
-    ) -> str: ...
-
-    def create_pull_request(
-        self,
-        repository: str,
-        *,
-        head_branch: str,
-        base_branch: str,
-        head_revision: str,
-        expected_base_revision: str,
-        publication_id: str,
-        title: str,
-        body: str,
-    ) -> GitHubPullRequest: ...
 
 
 class FakeGitHubTransport:
@@ -252,10 +91,18 @@ class FakeGitHubTransport:
         self._pull_requests: list[GitHubPullRequest] = []
         self._operations: list[RemoteOperation] = []
         self._reads = 0
+        self._credentials_bound = 0
         self._permission_denied = permission_denied
         self._lose_next_acknowledgment = lose_next_acknowledgment
         self._next_number = 1
-        self._contract = GitHubTransportContract()
+        self._contract = GitHubTransportContract(
+            contract_id=FAKE_GITHUB_CONTRACT_ID,
+            version=FAKE_GITHUB_VERSION,
+            transport="fake",
+            live=False,
+            network=False,
+            reads_require_credential=False,
+        )
 
     # -- contract / evidence ---------------------------------------------
 
@@ -274,6 +121,12 @@ class FakeGitHubTransport:
         return self._reads
 
     @property
+    def credentials_bound(self) -> int:
+        """How many credentials were bound; the fake keeps no material."""
+
+        return self._credentials_bound
+
+    @property
     def operations(self) -> tuple[RemoteOperation, ...]:
         return tuple(self._operations)
 
@@ -283,6 +136,15 @@ class FakeGitHubTransport:
 
     def clear_operations(self) -> None:
         self._operations.clear()
+
+    def bind_credential(self, credential: "PublicationCredential") -> None:
+        """Accept the resolved handle and retain nothing.
+
+        The fake has no remote to authenticate against, so it only records that
+        a credential reached the transport boundary for this attempt.
+        """
+
+        self._credentials_bound += 1
 
     def _record(self, kind: str, repository: str, target: str, revision: str | None = None) -> None:
         self._operations.append(

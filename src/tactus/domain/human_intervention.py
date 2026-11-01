@@ -128,6 +128,11 @@ class HumanAction(str, Enum):
     explicitly permits them and the binding is fresh. They record an
     authorization for Ictus to revalidate; they never establish readiness by
     themselves.
+
+    ``PUBLISH`` is the explicit publication authorization: it records that a
+    human authorized opening one review pull request for this exact
+    specification. It is not a lifecycle transition and not an Ictus decision;
+    ``tactus.publication`` restates it as a bounded publication grant.
     """
 
     APPROVE = "APPROVE"
@@ -136,6 +141,7 @@ class HumanAction(str, Enum):
     ACKNOWLEDGE = "ACKNOWLEDGE"
     AUTHORIZE_SCOPE_CHANGE = "AUTHORIZE_SCOPE_CHANGE"
     AUTHORIZE_ROUTE_CHANGE = "AUTHORIZE_ROUTE_CHANGE"
+    PUBLISH = "PUBLISH"
 
 
 #: Default typed actions a request permits when none are stated explicitly.

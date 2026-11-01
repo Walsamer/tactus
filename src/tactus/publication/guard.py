@@ -100,6 +100,18 @@ class PublicationCredential:
         provider = f", provider={self.provider_id!r}" if self.provider_id else ""
         return f"PublicationCredential(<redacted>{provider})"
 
+    def reveal(self) -> str:
+        """Return the credential material for the transport boundary only.
+
+        Only the transport bound for one authorized publication may call this,
+        and only to authenticate its own remote operations. The material must
+        never reach argv, a log line, an exception message, evidence, a child
+        process environment or any durable record: put it in the environment of
+        one subprocess or one header, and nowhere else.
+        """
+
+        return self._material
+
     def __str__(self) -> str:
         return "<redacted publication credential>"
 
