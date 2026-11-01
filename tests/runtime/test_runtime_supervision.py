@@ -1169,12 +1169,20 @@ def test_a_state_directory_inside_the_workspace_is_refused_when_contained(tmp_pa
         )
 
 
-def test_a_blind_sweep_never_reads_as_clear(tmp_path, monkeypatch):
-    """'Nothing found' from a sweep that cannot see a marker is not evidence."""
+def test_an_unavailable_survivor_check_never_reads_as_clear(tmp_path, monkeypatch):
+    """'Nothing found' by a check that could not run is not evidence."""
     import tactus.runtime.supervision as supervision_module
 
+    def unavailable(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(supervision_module, "workspace_holders", unavailable)
     monkeypatch.setattr(
-        supervision_module, "sweep_is_visible", lambda **_: (False, "planted marker invisible")
+        supervision_module,
+        "residual_processes",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            supervision_module.ContainmentError("ps unavailable")
+        ),
     )
     supervisor = _containment_supervisor(tmp_path, "success")
     evidence = supervisor.run(_request())
@@ -1185,8 +1193,36 @@ def test_a_blind_sweep_never_reads_as_clear(tmp_path, monkeypatch):
     assert evidence.containment.get("sweep") == "unverifiable"
 
     # A later attempt must refuse rather than assume the previous one recovered.
-    monkeypatch.setattr(
-        supervision_module, "sweep_is_visible", lambda **_: (False, "planted marker invisible")
-    )
     with pytest.raises(RuntimeRecoveryRequired, match="sweep"):
         _containment_supervisor(tmp_path, "success").run(_request(attempt_id="attempt-2"))
+
+
+def test_a_survivor_is_found_even_when_its_environment_is_invisible(tmp_path):
+    """The holder check catches a platform-binary survivor the marker check misses."""
+    import subprocess as sp
+
+    root = _git_workspace(tmp_path)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "detach-shell", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        result_contract="workspace-diff",
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor,
+        Workspace(root=root, allowed_scope=("src",)),
+        state_dir=tmp_path / "state",
+    )
+    evidence = supervisor.run(_request())
+    survivors = list(evidence.containment.get("survivors") or [])
+    try:
+        assert evidence.termination.confirmed is False
+        assert evidence.containment.get("sweep") == "survivors"
+        assert any(item.get("matched_by") == "workspace-holder" for item in survivors), survivors
+    finally:
+        for item in survivors:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(item["pid"], signal.SIGKILL)

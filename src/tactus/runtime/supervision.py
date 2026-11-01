@@ -67,9 +67,10 @@ from typing import Any, Callable, Mapping, Sequence
 from tactus.runtime.containment import (
     ContainmentError,
     ContainmentPolicy,
+    ProcessRef,
     residual_processes,
     run_self_test,
-    sweep_is_visible,
+    workspace_holders,
 )
 from tactus.runtime.descriptor import (
     RuntimeDescriptor,
@@ -614,23 +615,24 @@ class RuntimeSupervisor:
             if state_dir is not None
             else (workspace.root / ".tactus-runtime").resolve()
         )
-        if containment is not None:
-            # Attempt state inside the workspace would be inside the write
-            # allowlist: the child could rewrite its own recovery record, and the
-            # "write outside the workspace" probe would land in an allowed path.
+        if containment is not None or descriptor.result_contract == "workspace-diff":
+            # Attempt state inside the workspace is wrong twice over: the child
+            # could rewrite its own recovery record (containment), and a
+            # workspace-diff account would stage the supervisor's own state as if
+            # the agent had changed it.
             state_root = Path(self._state_dir)
             if state_root == workspace.root or workspace.root in state_root.parents:
                 raise RuntimeSupervisionError(
                     f"the state directory {state_root} is inside the workspace "
-                    f"{workspace.root}; a contained attempt needs its state outside "
-                    "the write allowlist"
+                    f"{workspace.root}; attempt state must live outside the workspace "
+                    "(the write allowlist, and the workspace diff)"
                 )
         self._terminate = terminate or terminate_process_group
         self._workspace_paths = workspace_paths
         self._start_marker = start_marker or process_start_marker
         self._cancel = threading.Event()
         self._cancel_reason = ""
-        self._sweep_visible: tuple[bool, str] | None = None
+        self._attempt_dir: Path | None = None
         self._base_revision: str | None = None
         self._sweep_detail = ""
 
@@ -656,28 +658,52 @@ class RuntimeSupervisor:
     def containment(self) -> ContainmentPolicy | None:
         return self._containment
 
-    def _sweep(self, marker: str) -> tuple[Any, ...] | None:
-        """Processes still carrying the attempt marker; None if unverifiable.
+    def _survivors(
+        self, marker: str, attempt_dir: Path | None = None
+    ) -> tuple[tuple[ProcessRef, ...] | None, str]:
+        """What still belongs to this attempt, from two independent observations.
 
-        An empty result is only meaningful when this host's process table can show
-        a marker at all: ``ps -E`` does not expose the environment of every binary,
-        so "nothing found" from a blind sweep must never be read as "nothing alive".
+        The marker check reads ``ps -E`` and is therefore only as good as the
+        process table's willingness to show a child's environment (macOS hides it
+        for some binaries). The holder check asks ``lsof`` which processes still
+        have the workspace or the attempt directory open or as their working
+        directory, which does not depend on the environment at all. A leftover
+        helper normally shows up in the second even when the first cannot see it.
+
+        Returns ``(survivors, note)``; ``survivors is None`` means neither check
+        could be performed, which must never be read as "nothing is alive".
         """
-        visible, detail = self._sweep_visibility()
-        if not visible:
-            self._sweep_detail = detail
-            return None
+        notes: list[str] = []
+        watched = [self._workspace.root]
+        candidate = attempt_dir if attempt_dir is not None else self._attempt_dir
+        if candidate is not None:
+            watched.append(Path(candidate))
         try:
-            return tuple(residual_processes(marker))
+            holders = workspace_holders(watched)
         except ContainmentError as exc:
-            self._sweep_detail = str(exc)
-            return None
-
-    def _sweep_visibility(self) -> tuple[bool, str]:
-        """Whether a planted marker is visible to the sweep (measured once)."""
-        if self._sweep_visible is None:
-            self._sweep_visible = sweep_is_visible()
-        return self._sweep_visible
+            holders = None
+            notes.append(f"holder check unavailable: {exc}")
+        if holders is None and not any("holder check" in note for note in notes):
+            notes.append("holder check unavailable on this host")
+        try:
+            marked = tuple(residual_processes(marker))
+        except ContainmentError as exc:
+            marked = None
+            notes.append(f"marker check unavailable: {exc}")
+        if marked is None:
+            notes.append("marker check unavailable")
+        elif not marked:
+            notes.append("no marker visible (the process table may hide environments)")
+        combined: list[ProcessRef] = []
+        for group in (holders or (), marked or ()):
+            for source in group:
+                if source.pid not in {item.pid for item in combined}:
+                    combined.append(source)
+        if combined:
+            return (tuple(combined), "; ".join(notes))
+        if holders is None and marked is None:
+            return (None, "; ".join(notes))
+        return (tuple(), "; ".join(notes))
 
     @property
     def attempt_record_path(self) -> Path:
@@ -736,6 +762,8 @@ class RuntimeSupervisor:
                 )
 
             attempt_dir, output_dir = self._create_attempt_dir(request.attempt_id)
+            self._attempt_dir = attempt_dir
+            self._base_revision = None
             attempt_marker = attempt_dir.name
             record_owned = True
             request_path = attempt_dir / REQUEST_FILE
@@ -965,7 +993,8 @@ class RuntimeSupervisor:
                     # Termination stays unconfirmed until nothing carries the
                     # attempt marker, so the writer lock cannot be handed over
                     # while any part of the attempt is still alive.
-                    survivors = self._sweep(attempt_marker)
+                    survivors, note = self._survivors(attempt_marker, attempt_dir)
+                    containment_evidence["sweep_note"] = note
                     if survivors is None:
                         containment_evidence["sweep"] = "unverifiable"
                         termination = replace(termination, confirmed=False)
@@ -973,6 +1002,7 @@ class RuntimeSupervisor:
                         containment_evidence["survivors"] = [
                             item.as_dict() for item in survivors
                         ]
+                        containment_evidence["sweep"] = "survivors"
                         termination = replace(termination, confirmed=False, alive_after=True)
                     else:
                         containment_evidence["sweep"] = "clear"
@@ -1130,7 +1160,11 @@ class RuntimeSupervisor:
         # its group. That is never "recovered" — it needs an operator.
         recorded_attempt_marker = str(record.get("attempt_marker") or "")
         if recorded_attempt_marker:
-            survivors = self._sweep(recorded_attempt_marker)
+            recorded_dir = record.get("attempt_dir")
+            survivors, _note = self._survivors(
+                recorded_attempt_marker,
+                Path(recorded_dir) if isinstance(recorded_dir, str) and recorded_dir else None,
+            )
             if survivors is None:
                 self._mark(
                     record,

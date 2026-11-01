@@ -85,7 +85,7 @@ from tactus.runtime.containment import (  # noqa: E402  (after the sys.path boot
     SelfTestResult,
     describe_host,
     residual_processes,
-    sweep_is_visible,
+    workspace_holders,
     run_self_test,
 )
 from tactus.runtime.descriptor import (  # noqa: E402
@@ -1543,7 +1543,7 @@ def _host_record() -> dict[str, Any]:
     }
 
 
-def _survivor_sweep(marker: str) -> dict[str, Any]:
+def _survivor_sweep(marker: str, workspace: Path, attempt_dir: Path) -> dict[str, Any]:
     """Nothing of the attempt may still be running once the attempt is over.
 
     An empty result only counts when this host's process table can show a marker
@@ -1552,23 +1552,34 @@ def _survivor_sweep(marker: str) -> dict[str, Any]:
     """
     if not marker:
         return {"marker": "", "verified": False, "reason": "no attempt marker recorded"}
-    visible, detail = sweep_is_visible()
-    if not visible:
+    notes: list[str] = []
+    try:
+        holders = workspace_holders([workspace, attempt_dir])
+    except ContainmentError as exc:
+        holders = None
+        notes.append(f"holder check unavailable: {exc}")
+    try:
+        marked = residual_processes(marker)
+    except ContainmentError as exc:
+        marked = None
+        notes.append(f"marker check unavailable: {exc}")
+    found = {item.pid: item for item in (holders or ())}
+    for item in marked or ():
+        found.setdefault(item.pid, item)
+    if not found and holders is None and marked is None:
         return {
             "marker": marker,
             "verified": False,
-            "reason": f"the sweep cannot see a planted marker: {detail}",
+            "reason": "; ".join(notes) or "no survivor check could run",
             "processes": [],
         }
-    try:
-        survivors = residual_processes(marker)
-    except ContainmentError as exc:
-        return {"marker": marker, "verified": False, "reason": str(exc), "processes": []}
     return {
         "marker": marker,
         "verified": True,
-        "clear": not survivors,
-        "processes": [item.as_dict() for item in survivors],
+        "clear": not found,
+        "processes": [item.as_dict() for item in found.values()],
+        "checks": {"workspace_holders": holders is not None, "marker": marked is not None},
+        "notes": "; ".join(notes),
     }
 
 
@@ -1786,7 +1797,11 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
         snapshot_after = snapshot_roots(pin)
         supervisor_path = run_dir / SUPERVISOR_EVIDENCE_FILE
         _write_json(supervisor_path, attempt.as_dict())
-        survivors = _survivor_sweep(str(attempt.containment.get("attempt_marker", "")))
+        survivors = _survivor_sweep(
+            str(attempt.containment.get("attempt_marker", "")),
+            workspace,
+            Path(attempt.attempt_dir),
+        )
         patch = collect_patch(workspace=workspace, allowed=contained, run_dir=run_dir)
         push = run_push_probe(
             policy=policy, workspace=workspace, attempt_dir=run_dir / "push-attempt"

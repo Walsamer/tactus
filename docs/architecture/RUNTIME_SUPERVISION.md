@@ -217,12 +217,15 @@ closure is the testable claim above rather than a promise:
    host (see [`CONTAINMENT.md`](CONTAINMENT.md)), not asserted by a test here.
 4. **Termination authority** — whole-group SIGTERM/SIGKILL plus the attempt-marker
    sweep, so a detached helper keeps the workspace owned instead of being missed.
-   The sweep is only trusted once a planted marker is demonstrably visible: macOS
-   `ps -E` hides the environment of some binaries, so an empty result from an
-   unproven sweep is recorded `unverifiable` and keeps the lock
-   (`tests/runtime/test_runtime_supervision.py::test_a_blind_sweep_never_reads_as_clear`).
-   A survivor that clears its own environment is *not* caught by this check; it is
-   a hygiene gate against stray helpers, not an adversarial boundary.
+   Two independent checks run: the attempt-marker sweep (`ps -E`, which on macOS
+   hides the environment of some binaries) and `lsof` holders of the workspace and
+   attempt directory (which does not depend on the environment, and catches a
+   detached helper that inherited the workspace as its cwd —
+   `tests/runtime/test_runtime_supervision.py::test_a_survivor_is_found_even_when_its_environment_is_invisible`).
+   If neither check can run, the result is `unverifiable` and the lock stays held
+   (`…::test_an_unavailable_survivor_check_never_reads_as_clear`). A survivor that
+   holds none of those paths and exposes no environment is not detectable: the
+   checks are a hygiene gate against stray helpers, not an adversarial boundary.
 
 What is still open, and why no real agent is started:
 

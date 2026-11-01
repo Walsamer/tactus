@@ -206,6 +206,11 @@ class AgentRuntimePin:
             raise AgentRuntimePinError("runtime pin must declare a non-empty allowed_scope")
         if not self.argv or not self.preflight_argv:
             raise AgentRuntimePinError("runtime pin must declare argv and preflight_argv")
+        if self.result_contract not in ("agent-artifacts", "workspace-diff"):
+            raise AgentRuntimePinError(
+                "runtime pin result_contract must be 'agent-artifacts' or "
+                f"'workspace-diff', not {self.result_contract!r}"
+            )
 
     def descriptor(self) -> RuntimeDescriptor:
         """The exact descriptor the supervisor will execute."""

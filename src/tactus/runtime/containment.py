@@ -62,6 +62,7 @@ __all__ = [
     "redact_process_command",
     "residual_processes",
     "run_self_test",
+    "workspace_holders",
     "sweep_is_visible",
     "which_launcher",
 ]
@@ -419,6 +420,53 @@ def sweep_is_visible(*, timeout: float = 10.0) -> tuple[bool, str]:
             control.terminate()
         with contextlib.suppress(Exception):
             control.wait(timeout=5)
+
+
+LSOF_PATH = "/usr/sbin/lsof"
+
+
+def workspace_holders(
+    paths: Sequence[Path], *, timeout: float = 20.0
+) -> tuple[ProcessRef, ...] | None:
+    """Processes holding a path open or using it as their working directory.
+
+    This is the marker-independent half of the survivor check: an agent's leftover
+    helper usually still sits in the workspace (as cwd or with a file open), and
+    that is observable even where ``ps -E`` hides the environment. ``None`` means
+    the check could not be performed, which must never be read as "nothing there".
+    """
+
+    if not os.access(LSOF_PATH, os.X_OK):
+        return None
+    here = os.getpid()
+    found: dict[int, ProcessRef] = {}
+    for candidate in paths:
+        target = Path(candidate)
+        if not target.exists():
+            continue
+        try:
+            completed = subprocess.run(
+                [LSOF_PATH, "-w", "-n", "-F", "pc", "+D", str(target)],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ContainmentUnavailable(f"holder check unavailable: {exc}") from exc
+        if completed.returncode not in (0, 1):
+            return None
+        pid: int | None = None
+        for line in completed.stdout.splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line.startswith("c") and pid is not None:
+                if pid == here:
+                    continue
+                found.setdefault(
+                    pid,
+                    ProcessRef(pid=pid, argv=line[1:], matched_by="workspace-holder"),
+                )
+    return tuple(found.values())
 
 
 def residual_processes(marker: str, *, timeout: float = 5.0) -> tuple[ProcessRef, ...]:
@@ -806,4 +854,4 @@ def which_launcher(name: str = "sandbox-exec") -> Launcher | None:
     found = shutil.which(name)
     if not found:
         return None
-    return Launcher(path=Path(found), argv_prefix=(found, "-f", "{profile}"))
+    return Launcher.for_path(found)

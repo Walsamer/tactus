@@ -115,6 +115,18 @@ def main(argv: list[str]) -> int:
             check=True,
         )
         return 0
+    if mode == "detach-shell":
+        # A detached /bin/sh helper with the workspace as cwd: `ps -E` does not
+        # show its environment, so only the holder check can find it.
+        subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 120"],
+            start_new_session=True,
+            cwd=str(Path(request["workspace"]["root"])),
+        )
+        (Path(request["workspace"]["root"]) / "src" / "example.py").write_text(
+            "x = 4\n", encoding="utf-8"
+        )
+        return 0
     if mode == "edit-outside":
         workspace = Path(request["workspace"]["root"])
         (workspace / "outside.py").write_text("nope = 1\n", encoding="utf-8")
