@@ -78,6 +78,7 @@ def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
     denied = tmp_path / "denied"
     denied.mkdir()
     (denied / "credentials.txt").write_text("must stay unreadable\n", encoding="utf-8")
+    (denied / "home").mkdir()
 
     launcher = Path(SANDBOX) if SANDBOX is not None else Path("/usr/bin/sandbox-exec")
     pin = {
@@ -122,9 +123,12 @@ def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
         "containment": {
             "egress": {"mode": "open"},
             "allowances": ["ipc-posix-shm"],
+            # Denials are self-contained: the operator's real home is denied by
+            # the shipped pin, but a test that included it would fail wherever
+            # pytest's temporary directory happens to live inside it.
             "denied_roots": [
                 {"path": str(denied), "reason": "a credential store beside the run"},
-                {"path": "~", "reason": "the operator's home", "snapshot_depth": 1},
+                {"path": str(denied / "home"), "reason": "a home-shaped directory"},
             ],
         },
         "limits": {
@@ -297,23 +301,26 @@ def test_fixture_repository_initialises_and_the_denial_matrix_holds(
     assert checks["runtime_probe_through_launcher"]["ok"] is True
     assert checks["runtime_probe_through_launcher"]["detail"].strip() == "fake-canary 1.0.0"
 
-    # 3. Nothing of the run touched the real $HOME: the staged runtime, the
-    #    workspace, the child's HOME and the evidence are all outside it, while
-    #    $HOME is still denied by the profile that was proven above.
-    home = Path.home().resolve()
+    # 3. The run keeps its state to itself: the staged runtime, the workspace, the
+    #    child's HOME and the evidence all live under this test's directory, the
+    #    child gets an attempt-local HOME (never the operator's), and none of them
+    #    sits inside a configured denied root.
     staged = Path(evidence["staging"]["executable"]).resolve()
     assert staged.is_relative_to(tmp_path / "stage")
-    assert not staged.is_relative_to(home)
+    denied_roots = [Path(root["path"]) for root in evidence["pin"]["denied_roots"]]
     for run_path in (
         Path(evidence["workspace"]["root"]),
         Path(matrix["attempt_dir"]),
         Path(matrix["attempt_home"]),
         evidence_path,
     ):
-        assert not run_path.resolve().is_relative_to(home)
+        resolved = run_path.resolve()
+        assert resolved.is_relative_to(tmp_path)
+        for root in denied_roots:
+            assert not resolved.is_relative_to(root.resolve()), (resolved, root)
     assert Path(matrix["attempt_home"]).is_relative_to(tmp_path)
-    denied_roots = [root["path"] for root in evidence["pin"]["denied_roots"]]
-    assert str(home) in denied_roots
+    assert Path(matrix["attempt_home"]).resolve() != Path.home().resolve()
+    assert denied_roots, "the pin must deny something for the matrix to be meaningful"
 
 
 @requires_seatbelt
@@ -402,3 +409,46 @@ def test_the_survivor_sweep_finds_a_helper_holding_the_workspace(tmp_path):
     finally:
         helper.kill()
         helper.wait(timeout=10)
+
+
+@requires_seatbelt
+def test_a_workspace_inside_a_denied_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary is the pin's own list, not a hard-coded $HOME."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    pin = _pin(tmp_path)
+    inside_denied = tmp_path / "denied" / "workspace"
+    code = command.main(
+        [
+            "--dry-run",
+            "--approve",
+            "--operator",
+            "tester",
+            *_arguments(tmp_path, pin),
+            "--workspace-root",
+            str(inside_denied),
+        ]
+    )
+    assert code != 0
+
+
+@requires_seatbelt
+def test_a_staging_root_inside_a_denied_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    pin = _pin(tmp_path)
+    inside_denied = tmp_path / "denied" / "runtime-root"
+    code = command.main(
+        [
+            "--dry-run",
+            "--approve",
+            "--operator",
+            "tester",
+            *_arguments(tmp_path, pin),
+            "--runtime-root",
+            str(inside_denied),
+        ]
+    )
+    assert code != 0

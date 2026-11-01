@@ -698,14 +698,24 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _refuse_inside_home(path: Path, what: str) -> None:
-    home = Path.home().resolve()
+def _refuse_inside_denied_root(
+    path: Path, what: str, denied_roots: Sequence[DeniedRoot]
+) -> None:
+    """Refuse a path the pin's own profile denies.
+
+    This is the pin's list, not a hard-coded ``$HOME``: the boundary is whatever
+    the pin says it is, so a pin that denies ``$HOME`` (the shipped one does)
+    refuses a staging root inside it, and a pin with narrower denials is judged on
+    its own terms.
+    """
     candidate = Path(path).expanduser().resolve()
-    if candidate == home or home in candidate.parents:
-        raise CanaryError(
-            f"{what} {candidate} is inside $HOME ({home}), which the containment "
-            "profile denies; put it outside $HOME"
-        )
+    for root in denied_roots:
+        if candidate == root.path or root.path in candidate.parents:
+            raise CanaryError(
+                f"{what} {candidate} is inside the denied root {root.path} "
+                f"({root.reason}), which the containment profile denies; put it "
+                "outside every denied root"
+            )
 
 
 def stage_runtime(pin: CanaryPin, runtime_root: str | os.PathLike[str]) -> StagedRuntime:
@@ -717,7 +727,7 @@ def stage_runtime(pin: CanaryPin, runtime_root: str | os.PathLike[str]) -> Stage
     rather than launched.
     """
     root = Path(runtime_root).expanduser().resolve()
-    _refuse_inside_home(root, "staged runtime root")
+    _refuse_inside_denied_root(root, "staged runtime root", pin.denied_roots)
     try:
         pin.containment_policy().validate_readable(root, what="staged runtime root")
     except ContainmentError as exc:
