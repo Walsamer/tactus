@@ -22,6 +22,7 @@ import {
   useUltimate,
 } from '@/sdk'
 import type { Issue, Issues } from './types.ts'
+import { authorized, fleetLabels } from './gate.ts'
 
 /** No arguments → the open issues (`refresh` reads `gh` again); an issue number → the prompt that hands it on. */
 const ListAction = actionRef<null, Issues>('issues', 'list')
@@ -58,16 +59,6 @@ function group(issues: readonly Issue[]) {
     }))
 }
 
-/** The issue's fleet label; `undefined` when it carries none. Only `fleet:ready` authorizes intake (see server.ts). */
-const fleetOf = (issue: Issue) =>
-  issue.labels.find((label) => label.startsWith('fleet:'))?.slice('fleet:'.length)
-
-/** Whether the project's own gate lets this issue be started, which is what the row's action says it will do. */
-const authorized = (issue: Issue) => {
-  const fleet = fleetOf(issue)
-  return fleet === undefined || fleet === 'ready'
-}
-
 /** The tone of one label: priority and fleet state carry colour, what the work is stays quiet. */
 function tone(label: string) {
   const at = label.indexOf(':')
@@ -79,8 +70,7 @@ function tone(label: string) {
         ? 'border-warning/40 text-warning'
         : 'border-border/80 text-muted-foreground'
   // The closed set the project's domain owns: src/tactus/domain/work_source.py (`fleet:ready` authorizes intake).
-  if (prefix === 'fleet')
-    switch (value) {
+  if (prefix === 'fleet')    switch (value) {
       case 'ready':
         return 'border-success/40 text-success'
       case 'human':
@@ -200,7 +190,8 @@ function Hand({
   hand: (issue: Issue) => void
   state: HandState
 }) {
-  const start = authorized(issue)
+  const start = authorized(issue.labels)
+  const fleet = fleetLabels(issue.labels)
   return (
     <Button
       className="h-5 gap-1 px-1.5 font-mono text-[10.5px] text-muted-foreground hover:text-foreground"
@@ -210,7 +201,7 @@ function Hand({
       title={
         start
           ? 'Hand this issue to @ultimate with its criteria and the project rules'
-          : `Hand this issue to @ultimate to assess: ${fleetOf(issue)}, which is not authorized for intake`
+          : `Hand this issue to @ultimate to assess it: ${fleet.length ? `${fleet.map((label) => `fleet:${label}`).join(' and ')} is` : 'no fleet: label is'} not authorized for intake`
       }
       variant="ghost"
     >
