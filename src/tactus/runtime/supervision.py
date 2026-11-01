@@ -1452,6 +1452,9 @@ class RuntimeSupervisor:
 
         filesystem = self._verify_filesystem(declared)
         if filesystem.get("mismatches"):
+            # A verified diff that disagrees with the declaration is not a
+            # reporting nit: the agent's account of what it changed is wrong.
+            contract_violation = True
             errors.append(
                 "workspace changes do not match the declared paths: "
                 + ", ".join(filesystem["mismatches"])

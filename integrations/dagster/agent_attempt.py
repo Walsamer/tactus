@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -625,11 +626,15 @@ def run_agent_attempt(
         # path inside this repository is not a bounded agent workspace.
         forbidden_roots=(root,),
     )
+    # When the workspace is a git checkout, the supervisor computes the changed
+    # paths itself rather than trusting the agent's self-report.
+    diff_provider = _git_changed_paths if (workspace.root / ".git").exists() else None
     supervisor = RuntimeSupervisor(
         pin.descriptor(),
         workspace,
         limits=pin.limits,
         state_dir=state_dir,
+        workspace_paths=diff_provider,
         containment=pin.containment,
         # A model credential is handed over by *name* and only when the pin asks
         # for it; a missing value fails at preflight rather than mid-run.
@@ -655,6 +660,44 @@ def run_agent_attempt(
     _write_json(summary_path, summary)
     summary["process"]["summary_path"] = str(summary_path)
     return summary
+
+
+def _git_changed_paths(root: Path, timeout: float = 30.0) -> tuple[str, ...]:
+    """Paths git reports as changed in the workspace (the supervisor's own view).
+
+    This is what makes write-scope verification real: the account compares the
+    agent's *declared* paths with what changed on disk, instead of only checking
+    that the declaration is internally consistent.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AgentAttemptError(f"cannot read the workspace diff: {exc}") from exc
+    if completed.returncode != 0:
+        raise AgentAttemptError(
+            f"cannot read the workspace diff: git exited {completed.returncode}: "
+            f"{(completed.stderr or '').strip()[:200]}"
+        )
+    paths: list[str] = []
+    for line in completed.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        payload = line[3:].strip()
+        if " -> " in payload:  # a rename names both sides
+            for side in payload.split(" -> ", 1):
+                candidate = side.strip().strip('"')
+                if candidate and candidate not in paths:
+                    paths.append(candidate)
+            continue
+        candidate = payload.strip('"')
+        if candidate and candidate not in paths:
+            paths.append(candidate)
+    return tuple(paths)
 
 
 def _credential_values(names: tuple[str, ...]) -> dict[str, str]:

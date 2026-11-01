@@ -886,3 +886,38 @@ def _request_with_task(task: str) -> RuntimeRequest:
     )
 
 
+
+
+def test_declared_paths_are_checked_against_the_real_diff(tmp_path):
+    """With a diff provider, a wrong declaration is a contract violation."""
+    import subprocess as sp
+
+    workspace_root = tmp_path / "workspace"
+    (workspace_root / "src").mkdir(parents=True)
+    (workspace_root / "src" / "example.py").write_text("x = 1\n", encoding="utf-8")
+    (workspace_root / "src" / "stale.py").write_text("y = 1\n", encoding="utf-8")
+    for command in (
+        ["git", "init", "-q", "."],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+    ):
+        sp.run(command, cwd=workspace_root, check=True)
+    # An uncommitted change the agent will not declare.
+    (workspace_root / "src" / "stale.py").write_text("y = 2\n", encoding="utf-8")
+
+    workspace = Workspace(root=workspace_root, allowed_scope=("src",))
+    supervisor = RuntimeSupervisor(
+        _descriptor("success"),
+        workspace,
+        state_dir=tmp_path / "state",
+        workspace_paths=lambda root: (
+            "src/example.py",
+            "src/stale.py",
+        ),
+    )
+    evidence = supervisor.run(_request())
+
+    assert evidence.filesystem["verified"] is True
+    assert evidence.filesystem["mismatches"] == ["src/stale.py"]
+    assert evidence.status == "invalid"
+    assert any("do not match the declared paths" in error for error in evidence.errors)
