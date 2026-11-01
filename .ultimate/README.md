@@ -16,6 +16,22 @@ setup?** choice is answered with *Use it*.
   consistency (Ictus pin), secret material, then `uv run pytest`.
   Nothing is pushed: publication stays a pull request, per `AGENTS.md`.
 
+## `agents/`
+
+A review team for the one class of mistake this repository must not make.
+The shipped `reviewer` starts every `reviewer-*` in parallel on the same
+immutable range and merges their reports; the coordinator owns the verdict.
+
+- `reviewer-boundaries.md` (`deepseek/deepseek-v4-pro`, high) — plane
+  boundaries, the Ictus pin, weakened gates, direct publication.
+- `reviewer-contracts.md` (`deepseek/deepseek-flash`, high) — the cross-system
+  contracts against the real pinned Ictus artifact and the fixtures that stand
+  in for the other side.
+
+Both are read-only and resolve the Ictus checkout through the worktree's
+`agentic-control` link, reading the pinned revision out of it with
+`git show <commit>:<file>` rather than trusting its working tree.
+
 ## `worktree-setup.sh`
 
 `uv sync` for dependencies, then a symlink to the Ictus checkout beside the
