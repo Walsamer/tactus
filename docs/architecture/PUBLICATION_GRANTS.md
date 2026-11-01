@@ -1,9 +1,12 @@
 # Publication grants and credential interface
 
-Status: Tactus-owned authorization guard implemented; **mock-only**. This Work
-Order does not push a branch, open a pull request, call GitHub, read a real
-credential or wire a live Stax publication command. It defines the boundary a
-later Stax publication adapter must use.
+Status: Tactus-owned authorization guard implemented; the **mocked** publication
+port remains the default and refuses a live transport in its constructor. A live
+publication now exists as a separate, explicitly reviewed class
+(`GitHubLivePublicationPort`) with a live `git push` + `gh api` transport and a
+fine-grained token provider; see [Live publication](LIVE_PUBLICATION.md). That
+document states the credential reality plainly: narrowing the token is what was
+achieved, and agent isolation from it is **not** claimed.
 
 The durable, idempotent publication port built on this guard is documented in
 [Mocked publication](MOCKED_PUBLICATION.md). It consumes the same grant and
@@ -126,7 +129,8 @@ through the guard. This module performs no logging.
 
 - No real credential store and no token value in source, tests or evidence.
 - No `git push`, GitHub API, `stax submit`, `stax pr`, PR/merge operation or
-  direct write to `main`.
+  direct write to `main` **from the mocked port**; the live port is a separate
+  class with its own documented refusals.
 - No Ictus policy/approval-requirement change and no fabricated decision.
 - No publication privilege delegated to a coding-agent process.
 - No claim that a future live transport is safe merely because this guard

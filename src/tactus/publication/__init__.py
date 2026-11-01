@@ -12,6 +12,21 @@ See ``docs/architecture/PUBLICATION_GRANTS.md`` and
 idempotency contracts.
 """
 
+from .credentials import (
+    CredentialPreflightError,
+    FileTokenCredentialProvider,
+    TokenScopeFacts,
+    probe_github_token,
+)
+from .grant_projection import (
+    PROTECTED_HEAD_BRANCHES,
+    EmptyGrantScopeError,
+    GrantProjectionError,
+    ProtectedHeadBranchError,
+    PublicationActionRequiredError,
+    StaleGrantBindingError,
+    publication_grant_from_human_grant,
+)
 from .guard import (
     PublicationCredential,
     PublicationCredentialProvider,
@@ -43,8 +58,10 @@ from .models import (
     validate_publication_grant,
 )
 from .publisher import (
+    LIVE_PUBLICATION_CONTRACT_ID,
     PUBLICATION_CONTRACT_ID,
     PUBLICATION_VERSION,
+    GitHubLivePublicationPort,
     GitHubPublicationPort,
     ImplementationStatus,
     PublicationBusyError,
@@ -58,10 +75,21 @@ from .publisher import (
 
 __all__ = [
     "DEFAULT_TRUSTED_AUTHORITIES",
+    "CredentialPreflightError",
+    "FileTokenCredentialProvider",
+    "TokenScopeFacts",
+    "probe_github_token",
+    "LIVE_PUBLICATION_CONTRACT_ID",
+    "PROTECTED_HEAD_BRANCHES",
     "PUBLICATION_CONTRACT_ID",
     "PUBLICATION_VERSION",
+    "EmptyGrantScopeError",
+    "GitHubLivePublicationPort",
     "GitHubPublicationPort",
+    "GrantProjectionError",
     "ImplementationStatus",
+    "ProtectedHeadBranchError",
+    "PublicationActionRequiredError",
     "PublicationAuthorization",
     "PublicationAuthorityError",
     "PublicationBindingError",
@@ -91,7 +119,9 @@ __all__ = [
     "PublicationStatus",
     "PublicationTransport",
     "PublicationTransportError",
+    "StaleGrantBindingError",
     "normalize_scope",
+    "publication_grant_from_human_grant",
     "scope_covers",
     "validate_publication_grant",
 ]

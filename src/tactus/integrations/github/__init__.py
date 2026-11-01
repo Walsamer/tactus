@@ -1,9 +1,10 @@
 """GitHub integration adapters.
 
 The work-source adapter is the anti-corruption boundary around GitHub's
-canonical Issue intent. The publication transport is a deterministic fake:
-it has no network path, no token store and no live GitHub client. Both keep
-local imports and tests offline.
+canonical Issue intent. Publication has two transports behind one contract
+(``transport``): a deterministic fake with no network path, and a live one over
+``git push`` and ``gh api`` (``gh``) that is only reachable through the live
+publication port. The fake keeps every test offline.
 """
 
 from .fake import (

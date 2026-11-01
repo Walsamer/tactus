@@ -75,6 +75,7 @@ __all__ = [
     "SourceControlRequestError",
     "SourceRevisionMismatchError",
     "StaxSourceControlPort",
+    "load_prepared_change",
     "WorkspaceProvider",
     "review_branch_for",
 ]
@@ -1220,3 +1221,109 @@ class StaxSourceControlPort:
         if isinstance(exc, SourceControlError):
             exc.evidence_path = target
         return exc
+
+
+def load_prepared_change(
+    state_root: str | os.PathLike[str], change_id: str
+) -> PreparedChange:
+    """Load one durably recorded preparation by change identity.
+
+    Read-only, and deliberately not a second preparation: it reconstructs the
+    facts the adapter already recorded and never applies a patch, touches a
+    workspace, creates a ref or re-runs a check. A publication composition needs
+    *the* verified change the operator prepared, addressed by identity.
+
+    The recorded outcome is ``REUSED`` with manifest-derived checks, because a
+    record proves what was prepared, not that verification ran again now.
+    """
+
+    if not isinstance(change_id, str) or not change_id.strip():
+        raise PreparedChangeStateError("change_id must be a non-empty string")
+    root = Path(os.fspath(state_root)).expanduser()
+    if not root.is_absolute():
+        raise PreparedChangeStateError("state_root must be an absolute path")
+    root = root.resolve()
+    if root == Path(root.anchor):
+        raise PreparedChangeStateError("state_root must not be a filesystem root")
+
+    path = root / ".tactus" / "changes" / f"{_digest_text(change_id.strip())}.json"
+    if not path.exists():
+        raise PreparedChangeStateError(
+            f"no recorded preparation for change {change_id!r} under {root}"
+        )
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PreparedChangeStateError(
+            f"cannot read preparation manifest {path}: {exc}"
+        ) from exc
+    if not isinstance(manifest, Mapping):
+        raise PreparedChangeStateError(f"preparation manifest {path} is not an object")
+    if manifest.get("schema_version") != _SCHEMA_VERSION:
+        raise PreparedChangeStateError(
+            f"preparation manifest {path} has an unsupported schema"
+        )
+    facts = manifest.get("facts")
+    if not isinstance(facts, Mapping):
+        raise PreparedChangeStateError(f"preparation manifest {path} has no facts")
+    if facts.get("change_id") != change_id:
+        raise PreparedChangeStateError(
+            f"manifest {path} records change {facts.get('change_id')!r}, "
+            f"not {change_id!r}"
+        )
+
+    branch = str(manifest.get("review_branch", ""))
+    branch_revision = str(manifest.get("branch_revision", ""))
+    if not _REVISION_RE.fullmatch(branch_revision):
+        raise PreparedChangeStateError(
+            f"manifest {path} has an invalid branch revision"
+        )
+    workspace = Path(str(manifest.get("workspace_path", "")))
+    if not workspace.is_absolute():
+        raise PreparedChangeStateError(f"manifest {path} has an invalid workspace path")
+    created_at = manifest.get("created_at")
+    try:
+        prepared_at = datetime.fromisoformat(str(created_at))
+    except ValueError as exc:
+        raise PreparedChangeStateError(
+            f"manifest {path} has an invalid preparation time"
+        ) from exc
+    if prepared_at.tzinfo is None or prepared_at.utcoffset() is None:
+        raise PreparedChangeStateError(
+            f"manifest {path} has a timezone-naive preparation time"
+        )
+
+    source_revision = str(facts.get("source_revision", ""))
+    base_revision = str(facts.get("base_revision", ""))
+    patch_digest = str(facts.get("patch_digest", ""))
+    return PreparedChange(
+        contract_id=SOURCE_CONTROL_CONTRACT_ID,
+        contract_version=SOURCE_CONTROL_VERSION,
+        change_id=change_id,
+        prepared_change_id=str(manifest.get("prepared_change_id", "")),
+        work_order_id=str(facts.get("work_order_id", "")),
+        repository=str(facts.get("repository", "")),
+        source_revision=source_revision,
+        base_revision=base_revision,
+        patch_digest=patch_digest,
+        patch_bytes=int(manifest.get("patch_bytes", 0)),
+        review_branch=branch,
+        branch_revision=branch_revision,
+        workspace_path=os.fspath(workspace),
+        workspace_present=workspace.is_dir(),
+        implementation=ImplementationVerification(
+            outcome=ImplementationOutcome.REUSED,
+            source_revision=source_revision,
+            base_revision=base_revision,
+            patch_digest=patch_digest,
+            branch_revision=branch_revision,
+            checks=(
+                "loaded_from_recorded_manifest",
+                "manifest_schema_supported",
+                "manifest_change_identity_matches",
+            ),
+        ),
+        publication=PublicationEligibility.NOT_ELIGIBLE,
+        publication_reason=_PUBLICATION_REASON,
+        prepared_at=prepared_at,
+    )

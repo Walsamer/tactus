@@ -2,11 +2,12 @@
 
 Status: implemented **against a fake GitHub transport only**. There is no
 network call, push to a real remote, PR creation on GitHub, credential-store
-access, merge or deployment in this Work Order. Tactus's publication port stays
-mocked only: `GitHubPublicationPort` refuses any transport whose contract is not
-explicitly non-live and non-network, no grant issuer is decided, and every live
-credential path remains a later gated Work Order after explicit publication
-authority is accepted.
+access, merge or deployment in the mocked port. `GitHubPublicationPort` refuses
+any transport whose contract is not explicitly non-live and non-network, in its
+constructor; there is no flag or setting that can change that. A live
+publication is a different class, `GitHubLivePublicationPort`, documented in
+[Live publication](LIVE_PUBLICATION.md) with its own transport, credential
+provider and refusals.
 
 The `software.promote` Dagster wiring this document once deferred to "a later
 gated Work Order after ICT-WO-201" now exists upstream: ICT-WO-201 landed as
@@ -74,7 +75,8 @@ State lives only under the configured absolute state root:
 
 A success record binds the publication identity to the Work Order, repository,
 branch, exact base/source revisions, effect, `prepared_change_id`, patch digest,
-branch revision and fake PR number/URL. It contains no credential or token.
+branch revision, the authorizing `grant_id` and `authority` with the grant's
+window, and fake PR number/URL. It contains no credential or token.
 
 Repeating the same intent and source returns the original branch and PR URL with
 `PublicationStatus.REUSED`, without a second credential resolution or remote
