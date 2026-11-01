@@ -47,7 +47,8 @@ repository from a Tactus Work Order.
   `src/tactus/integrations/ictus/observation.py`, mirrored in
   `.github/workflows/ci.yml` and the docs. Never float it. Advance it only
   through an authorized Work Order (`TCT-WO-003` advanced it to `86816d6`,
-  merged via PR #37).
+  merged via PR #37; `TCT-WO-ICTUS-PIN-C140AF3` advanced it to `c140af3`, the
+  upstream Ictus PR #21).
 - Do not implement Ictus/Dagster execution semantics in this repository.
 - Do not edit the Ictus repository from a Tactus Work Order.
 - Run the registered verifier `./scripts/verify-goal.sh`; do not weaken gates.
@@ -63,6 +64,7 @@ repository from a Tactus Work Order.
 
 ## State
 
-`main` pins Ictus at `e7419210d5bdfec3169e375d4957077951cc231c`, advanced via
-PR #37 (`chore(ictus): advance the pinned Ictus revision to 86816d6`).
+`main` pins Ictus at `c140af38304b401d6628109cb45d818f3d8aeeb1`, advanced via
+`TCT-WO-ICTUS-PIN-C140AF3` (`chore(ictus): advance the pinned Ictus revision to
+c140af3`, upstream Walsamer/ictus#21).
 Never float the pin; advance it only through an authorized Work Order.
