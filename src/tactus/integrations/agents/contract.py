@@ -34,13 +34,13 @@ __all__ = [
 
 #: Version of the adapter protocol itself.  Bump this when the request,
 #: cancellation, artifact or status semantics change incompatibly.
-AGENT_ADAPTER_VERSION = "1.0.0"
+AGENT_ADAPTER_VERSION = "1.1.0"
 
 #: Stable identifier for the protocol family (independent of its version).
 AGENT_ADAPTER_CONTRACT_ID = "tactus.coding-agent.adapter/v1"
 
 #: The request file is the supervisor's bounded ``request.json``.
-AGENT_REQUEST_SCHEMA = "tactus.runtime.request/v1"
+AGENT_REQUEST_SCHEMA = "tactus.runtime.request/v2"
 
 #: The result file is the supervisor's bounded ``result.json`` schema.
 AGENT_RESULT_SCHEMA = 1
@@ -64,7 +64,7 @@ class AgentAdapterContract:
     contract_id: str = AGENT_ADAPTER_CONTRACT_ID
     version: str = AGENT_ADAPTER_VERSION
     request_schema: str = AGENT_REQUEST_SCHEMA
-    request_fields: tuple[str, ...] = ("attempt_id", "intent_id", "capability")
+    request_fields: tuple[str, ...] = ("attempt_id", "intent_id", "capability", "task")
     result_schema: int = AGENT_RESULT_SCHEMA
     expected_artifacts: tuple[str, ...] = ("result.json", "patch.diff")
     result_statuses: tuple[str, ...] = AGENT_RESULT_STATUSES
@@ -80,13 +80,17 @@ class AgentAdapterContract:
         "explicit caller-supplied RuntimeDescriptor; no fallback, no discovery, "
         "no Ictus routing decision"
     )
+    #: Names of environment variables the runtime may receive (the model
+    #: credential, for example). Names only: a value here is refused, because a
+    #: credential that reaches the contract reaches every log of it.
     credential_environment: tuple[str, ...] = ()
     publication_authority: bool = False
     policy_owner: str = "ictus"
     remaining_gates: tuple[str, ...] = (
-        "real coding-agent provider and model selection require an approved Work Order",
-        "OS execution-permission boundary (filesystem, network and credential "
-        "containment) is unresolved; a Git worktree does not provide it",
+        "the real-runtime canary needs explicit operator approval and a scoped "
+        "provider credential; it is documented as an operator command",
+        "egress is open for the length of the approved canary only; the standing "
+        "posture is denied or localhost-only egress behind the pinned launcher",
     )
 
     def __post_init__(self) -> None:
@@ -121,8 +125,17 @@ class AgentAdapterContract:
             raise ValueError("agent adapter contract result_schema must be at least 1")
         if self.publication_authority:
             raise ValueError("a coding-agent adapter may not carry publication authority")
-        if self.credential_environment:
-            raise ValueError("a coding-agent adapter may not forward credentials")
+        for name in self.credential_environment:
+            if not isinstance(name, str) or not name.isidentifier():
+                raise ValueError(
+                    "credential_environment declares variable *names* only; "
+                    f"{name!r} is not an identifier (a value must never appear here)"
+                )
+            if name.upper().startswith(("GH_", "GITHUB_", "SSH_")):
+                raise ValueError(
+                    f"a coding-agent adapter may not receive publication or SSH "
+                    f"credentials ({name})"
+                )
 
     def as_dict(self) -> dict[str, Any]:
         return {

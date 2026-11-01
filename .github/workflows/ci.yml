@@ -82,3 +82,30 @@ jobs:
             tests/integrations/ictus/data/recovery_snapshot.v2.json
       - name: verifier
         run: ./scripts/verify-goal.sh
+
+  macos-boundary:
+    name: macos (containment boundary)
+    # The boundary is macOS seatbelt, so the tests that spawn a child through
+    # `sandbox-exec`, or that read the macOS process table (`ps -E`, `lsof`),
+    # cannot run on the Linux job — they are marked and skipped there. This job
+    # runs exactly those tests where the boundary exists, so it is verified
+    # rather than excluded. It is deliberately not the whole suite: macOS
+    # runner minutes cost more, and everything else runs on Linux.
+    #
+    # A green result here means the denials were observed. If the runner refuses
+    # to nest a sandbox, this job fails and the gap is reported; `pytest` also
+    # exits non-zero when no test matches the marker selection.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - name: install (frozen)
+        run: uv sync --frozen
+
+      - name: pytest (macOS-only boundary tests)
+        run: >-
+          uv run --frozen pytest -q -m "seatbelt or macos_process_table"
+          tests/runtime tests/canary tests/integrations/dagster

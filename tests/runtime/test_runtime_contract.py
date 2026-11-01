@@ -20,6 +20,7 @@ from tactus.runtime import (
     preflight,
     validate_changed_paths,
 )
+from tactus.runtime.containment import Launcher
 
 FAKE_AGENT = Path(__file__).with_name("fake_agent.py")
 
@@ -155,3 +156,239 @@ def test_workspace_evidence_is_json_safe(tmp_path):
     space = workspace(tmp_path)
     assert set(space.as_dict()) == {"root", "allowed_scope", "forbidden_roots"}
     assert os.path.isabs(space.as_dict()["root"])
+
+
+# -- artifact sets, launcher pinning, placeholders (vendor-free) -------------
+
+
+def _tree(tmp_path: Path) -> Path:
+    tree = tmp_path / "runtime"
+    (tree / "bin").mkdir(parents=True)
+    (tree / "bin" / "agent").write_text("#!/bin/sh\necho agent-tree 1.0.0\n", encoding="utf-8")
+    (tree / "bin" / "agent").chmod(0o755)
+    (tree / "lib").mkdir()
+    (tree / "lib" / "data").write_text("bytes\n", encoding="utf-8")
+    return tree
+
+
+def test_file_artifact_pin_is_verified_and_recorded(tmp_path: Path):
+    from tactus.runtime.containment import digest_tree  # noqa: F401  (kept for parity)
+
+    import hashlib
+
+    artifact_path = tmp_path / "agent"
+    artifact_path.write_text("#!/bin/sh\necho agent 1.0.0\n", encoding="utf-8")
+    artifact_path.chmod(0o755)
+    digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    from tactus.runtime.descriptor import Artifact
+
+    runtime = descriptor(
+        executable=str(artifact_path),
+        argv=(str(artifact_path), "run", REQUEST_PLACEHOLDER),
+        preflight_argv=(str(artifact_path), "--version"),
+        expected_version_token="agent 1.0.0",
+        artifacts=(Artifact(path=str(artifact_path), sha256=digest),),
+    )
+    provenance = preflight(runtime)
+    assert provenance.artifacts[0]["sha256"] == digest
+    assert provenance.artifacts[0]["kind"] == "file"
+
+
+def test_tree_artifact_pin_is_verified_with_its_manifest(tmp_path: Path):
+    from tactus.runtime.containment import digest_tree
+    from tactus.runtime.descriptor import Artifact, TREE_DIGEST_ORDER
+
+    tree = _tree(tmp_path)
+    digest, count = digest_tree(tree)
+    entry = tree / "bin" / "agent"
+    runtime = descriptor(
+        executable=str(entry),
+        argv=(str(entry), "run", REQUEST_PLACEHOLDER),
+        preflight_argv=(str(entry), "--version"),
+        expected_version_token="agent-tree 1.0.0",
+        artifacts=(
+            Artifact(
+                path=str(tree),
+                sha256=digest,
+                kind="tree",
+                digest_order=TREE_DIGEST_ORDER,
+                file_count=count,
+                entrypoint="bin/agent",
+            ),
+        ),
+    )
+    provenance = preflight(runtime)
+    assert provenance.artifacts[0]["kind"] == "tree"
+    assert provenance.artifacts[0]["file_count"] == count
+    assert provenance.artifacts[0]["digest_order"] == TREE_DIGEST_ORDER
+
+
+def test_tree_artifact_digest_drift_fails_closed(tmp_path: Path):
+    from tactus.runtime.containment import digest_tree
+    from tactus.runtime.descriptor import Artifact
+
+    tree = _tree(tmp_path)
+    digest, count = digest_tree(tree)
+    (tree / "lib" / "data").write_text("changed\n", encoding="utf-8")
+    entry = tree / "bin" / "agent"
+    runtime = descriptor(
+        executable=str(entry),
+        argv=(str(entry), "run", REQUEST_PLACEHOLDER),
+        preflight_argv=(str(entry), "--version"),
+        expected_version_token="agent-tree 1.0.0",
+        artifacts=(
+            Artifact(
+                path=str(tree),
+                sha256=digest,
+                kind="tree",
+                file_count=count,
+                entrypoint="bin/agent",
+            ),
+        ),
+    )
+    with pytest.raises(RuntimePreflightError, match="artifact digest mismatch"):
+        preflight(runtime)
+
+
+def test_tree_artifact_file_count_drift_fails_closed(tmp_path: Path):
+    from tactus.runtime.containment import digest_tree
+    from tactus.runtime.descriptor import Artifact
+
+    tree = _tree(tmp_path)
+    digest, count = digest_tree(tree)
+    entry = tree / "bin" / "agent"
+    runtime = descriptor(
+        executable=str(entry),
+        argv=(str(entry), "run", REQUEST_PLACEHOLDER),
+        preflight_argv=(str(entry), "--version"),
+        expected_version_token="agent-tree 1.0.0",
+        artifacts=(
+            Artifact(
+                path=str(tree),
+                sha256=digest,
+                kind="tree",
+                file_count=count + 1,
+                entrypoint="bin/agent",
+            ),
+        ),
+    )
+    with pytest.raises(RuntimePreflightError, match="files; the pin records"):
+        preflight(runtime)
+
+
+def test_an_artifact_without_a_digest_is_refused(tmp_path: Path):
+    from tactus.runtime.descriptor import Artifact
+
+    tree = _tree(tmp_path)
+    entry = tree / "bin" / "agent"
+    runtime = descriptor(
+        executable=str(entry),
+        argv=(str(entry), "run", REQUEST_PLACEHOLDER),
+        preflight_argv=(str(entry), "--version"),
+        expected_version_token="agent-tree 1.0.0",
+        artifacts=(Artifact(path=str(tree), sha256="", kind="tree", file_count=2),),
+    )
+    with pytest.raises(RuntimePreflightError, match="no pinned digest"):
+        preflight(runtime)
+
+
+def test_launcher_is_pinned_and_the_probe_is_deferred_to_the_self_test(
+    pinned_launcher: Launcher,
+):
+    launcher = pinned_launcher
+    runtime = descriptor(launcher=launcher, expected_version_token="fake-agent 1.0.0")
+    runtime = RuntimeDescriptor(
+        runtime_id=runtime.runtime_id,
+        adapter=runtime.adapter,
+        executable=runtime.executable,
+        argv=runtime.argv,
+        preflight_argv=runtime.preflight_argv,
+        expected_version_token=runtime.expected_version_token,
+        launcher=launcher,
+    )
+    provenance = preflight(runtime)
+    assert provenance.probe_mode == "containment-self-test"
+    assert provenance.reported_version == ""
+    assert len(provenance.launcher_sha256) == 64
+
+
+def test_launcher_digest_drift_fails_before_anything_runs(pinned_launcher: Launcher):
+    from tactus.runtime.containment import ContainmentUnavailable
+
+    launcher = pinned_launcher
+    drifted = Launcher(
+        path=launcher.path, argv_prefix=launcher.argv_prefix, sha256="0" * 64
+    )
+    runtime = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        launcher=drifted,
+    )
+    with pytest.raises(ContainmentUnavailable, match="digest mismatch"):
+        preflight(runtime)
+
+
+def test_launcher_command_prefixes_the_pinned_runtime(pinned_launcher: Launcher):
+    launcher = pinned_launcher
+    runtime = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        launcher=launcher,
+    )
+    command = runtime.command(
+        "/tmp/request.json", profile_path="/tmp/profile.sb", workspace="/tmp/ws"
+    )
+    assert command[0] == str(launcher.path)
+    assert command[1] == "-f"
+    assert command[2] == "/tmp/profile.sb"
+    assert command[3] == sys.executable
+    assert command[-1] == "/tmp/request.json"
+
+
+def test_a_profile_placeholder_requires_a_launcher():
+    with pytest.raises(ValueError, match="requires a pinned launcher"):
+        runtime = descriptor(argv=(sys.executable, "{profile}", REQUEST_PLACEHOLDER))
+
+
+def test_placeholder_without_a_value_is_refused(pinned_launcher: Launcher):
+    runtime = descriptor()
+    launcher = pinned_launcher
+    pinned = RuntimeDescriptor(
+        runtime_id=runtime.runtime_id,
+        adapter=runtime.adapter,
+        executable=runtime.executable,
+        argv=runtime.argv,
+        preflight_argv=runtime.preflight_argv,
+        expected_version_token=runtime.expected_version_token,
+        launcher=launcher,
+    )
+    with pytest.raises(RuntimePreflightError, match="no value was supplied"):
+        pinned.command("/tmp/request.json")
+
+
+def test_prompt_placeholder_and_stdin_source():
+    runtime = descriptor(
+        argv=(sys.executable, str(FAKE_AGENT), "success", "{prompt}", REQUEST_PLACEHOLDER),
+        stdin_from="prompt",
+    )
+    command = runtime.command("/tmp/request.json", prompt_path="/tmp/prompt.txt")
+    assert "/tmp/prompt.txt" in command
+    # A runtime that reads its task from stdin needs no placeholder in argv.
+    assert descriptor(stdin_from="prompt").stdin_from == "prompt"
+    with pytest.raises(ValueError, match="stdin_from"):
+        descriptor(stdin_from="file")
+
+
+def test_env_allowlist_declares_names_only():
+    runtime = descriptor(env_allowlist=("OPENAI_API_KEY", "TACTUS_MODEL"))
+    assert runtime.env_allowlist == ("OPENAI_API_KEY", "TACTUS_MODEL")
+    with pytest.raises(ValueError, match="identifiers"):
+        descriptor(env_allowlist=("OPENAI_API_KEY=sk-value",))

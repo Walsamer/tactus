@@ -86,6 +86,57 @@ def main(argv: list[str]) -> int:
         print(f"grandchild pid={child.pid}", flush=True)
         time.sleep(120)
         return 0
+    if mode == "detach":
+        # Leave a process behind that outlives this group but still carries the
+        # attempt marker: the supervisor must not call termination confirmed.
+        survivor = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            start_new_session=True,
+        )
+        print(f"survivor pid={survivor.pid}", flush=True)
+        _write(output_dir, status="completed", changed=["src/example.py"], summary="detached")
+        (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
+        return 0
+    if mode == "stdin":
+        task = sys.stdin.read() if not sys.stdin.isatty() else ""
+        _write(output_dir, status="completed", changed=["src/example.py"], summary=task)
+        (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
+        return 0
+    if mode == "commit-only":
+        workspace = Path(request["workspace"]["root"])
+        (workspace / "src" / "example.py").write_text("x = 3\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(workspace), "add", "-A"], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(workspace),
+                "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "agent commit",
+            ],
+            check=True,
+        )
+        return 0
+    if mode == "detach-shell":
+        # A detached /bin/sh helper with the workspace as cwd: `ps -E` does not
+        # show its environment, so only the holder check can find it.
+        subprocess.Popen(
+            ["/bin/sh", "-c", "sleep 120"],
+            start_new_session=True,
+            cwd=str(Path(request["workspace"]["root"])),
+        )
+        (Path(request["workspace"]["root"]) / "src" / "example.py").write_text(
+            "x = 4\n", encoding="utf-8"
+        )
+        return 0
+    if mode == "edit-outside":
+        workspace = Path(request["workspace"]["root"])
+        (workspace / "outside.py").write_text("nope = 1\n", encoding="utf-8")
+        return 0
+    if mode == "edit-only":
+        # A real runtime's shape: change the workspace, write no artifacts.
+        (Path(request["workspace"]["root"]) / "src" / "example.py").write_text(
+            "x = 2\n", encoding="utf-8"
+        )
+        return 0
     if mode == "no-result":
         return 0
     if mode == "failed":

@@ -1,9 +1,27 @@
 # Agent execution slice: `software.implement` through Dagster
 
-Status: **Tactus half implemented, tested and runnable; the durable link waits on
-one Ictus change that is agreed and scheduled (B4).** The pinned runtime is the
-deterministic **fake** agent: no model provider, no credentials, no publication,
-no OS isolation. Issue #22 is **not** closed by this slice.
+Status: **the Tactus half is implemented, tested and runnable, and the boundary an
+attempt can run behind is now enforced and proven without a model call; the
+durable link waits on one Ictus change that is agreed and scheduled (B4).** The
+pinned runtime is still the deterministic **fake** agent: no model provider, no
+credentials, no publication — and, in this slice, still no containment, because
+its pin pins no launcher. Issue #22 is **not** closed by this slice.
+
+Phase 2 (Issue #22) added the enforcement half a real runtime needs: a rendered
+seatbelt profile, a pinned launcher verified by path and digest, a denial matrix
+run with real children before any agent process exists, the task on stdin instead
+of argv, attempt-local `HOME`/`TMPDIR`/git config, an environment allowlist of
+variable *names*, and a survivor sweep that gates `confirmed` and lock release
+(see [`CONTAINMENT.md`](CONTAINMENT.md) and
+[`RUNTIME_SUPERVISION.md`](RUNTIME_SUPERVISION.md)). That path is exercised
+without a model call: `tests/runtime/test_containment.py`,
+`tests/runtime/test_runtime_supervision.py` and
+`tests/integrations/agents/test_agent_adapter.py` run real child processes and no
+provider. **The canary itself has not been run**: it needs explicit operator
+approval and a scoped provider credential, and the operator's provider
+subscription quota was spent on the boundary work. It is an operator command
+rather than a code path these tests drive, so no attempt has observed it end to
+end.
 
 ## What this slice is
 
@@ -114,7 +132,8 @@ the pinned revision rather than against whatever is installed in the venv.
 |---|---|
 | `integrations/dagster/agent_attempt.py` | Dagster-free: load the operator runtime pin, verify the executable digest, supervise one attempt, re-check patch evidence, write the durable attempt account next to the artifacts. |
 | `integrations/dagster/agent_location.py` | Dagster: job `software_agent_job` with `prepare_op` → `execute_op` → `verify_op`, resource `SoftwareAgentSettings`. Fails closed without `TACTUS_AGENT_WORKSPACE_ROOT`; no retry policy and `allow_retries=False`, so an agent is never silently re-run. |
-| `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, allowed scope, limits. |
+| `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, allowed scope, limits, and — since phase 2 — optional `artifacts`, `containment`, `env_allowlist` and `stdin_from`. The shipped fake pin declares **none** of those, so the attempt it describes runs uncontained; a pin that declares a launcher gets the boundary, verified at preflight. |
+| `config/agent-runtime-canary.json` | The operator canary's pin: the Codex CLI release tree and executable by digest, the launcher by digest, denied roots, `egress: open` for that run only, the `ipc-posix-shm` allowance the runtime needs, and `OPENAI_API_KEY` by name. Run through `scripts/run-agent-canary.sh`. |
 | `scripts/run-agent-slice.sh`, `scripts/validate_agent_slice.py` | The evidence harness. |
 | `tests/integrations/dagster/test_agent_attempt.py` | Dagster-free tests: pin drift, unknown/missing pin keys, unpinned runtime refused before anything is touched, success with real workspace edit, crash, timeout, scope violation, route-capability mismatch, JSON-safe accounts. |
 
@@ -167,13 +186,17 @@ for the conformance tests).
 
 1. **No real coding agent.** `runtime_kind: fake-canary`; the provider/model pin
    and an approved bounded canary are open (Issue #22 AC1).
-2. **No containment.** The child runs as the same OS account with the same
-   filesystem and network reach. The supervisor checks the *declared* changed
-   paths and the patch headers after the fact; with no workspace diff provider an
-   undeclared write is invisible, and every attempt account records
-   `write_scope.verified: false` with the reason. Filesystem/network/credential
-   containment (gate B2, Issue #22 AC3) is undone, and a Git worktree does not
-   provide it. The workspace may not be the Tactus checkout itself.
+2. **This slice's shipped pin is uncontained.** The supervisor enforces a
+   boundary whenever the descriptor pins a launcher
+   ([`CONTAINMENT.md`](CONTAINMENT.md)) and the pin loader accepts a
+   `containment` block; `config/agent-runtime.json` declares none, so the fake
+   canary's child keeps the account's filesystem and network reach and its account
+   records `isolation: "none (same OS account: no filesystem or network
+   boundary)"`. Anything else — a workspace inside a denied root, a launcher
+   digest drift, a failing denial matrix — is refused before a child exists; what
+   the boundary *does* refuse is proven in
+   [`RUNTIME_SUPERVISION.md`](RUNTIME_SUPERVISION.md). The workspace may still not
+   be the Tactus checkout itself.
 3. **No publication.** `publication_authority: false` in every account; nothing
    pushes, opens a PR or holds a token (Issue #23).
 4. **No automatic repair.** A failed attempt is a terminal step failure; Tactus

@@ -27,6 +27,20 @@ execution plan recorded by Ictus's own job definition, that job must declare the
 same steps as the Ictus job — see
 [`AGENT_EXECUTION_SLICE.md`](../../docs/architecture/AGENT_EXECUTION_SLICE.md).
 
+**Containment status (Issue #22 phase 2).** The runtime supervisor can now enforce
+OS containment — a pinned seatbelt launcher with the runtime's version probe run
+through it, a profile rendered per attempt, a denial matrix proven with real
+children before anything is spawned, the task on stdin instead of argv,
+attempt-local `HOME`/`TMPDIR`/git config, an allowlist of environment variable
+*names*, and a survivor sweep that must come back clear before termination is
+confirmed and the writer lock released — and every one of those proofs is named in
+[`RUNTIME_SUPERVISION.md`](../../docs/architecture/RUNTIME_SUPERVISION.md), with
+the attempt contract in
+[`AGENT_ADAPTER_CONTRACT.md`](../../docs/architecture/AGENT_ADAPTER_CONTRACT.md).
+This location does not use it yet: `config/agent-runtime.json` pins no launcher and
+its pin loader reads the pre-phase-2 key set, so the attempt it runs is still
+uncontained and its account says `isolation: none`.
+
 ## Boundary rules
 
 * The authorized `ExecutionIntent` is submitted unchanged
