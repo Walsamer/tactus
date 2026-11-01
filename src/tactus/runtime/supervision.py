@@ -25,14 +25,24 @@ Lifecycle invariants
    whose termination was never confirmed, blocks new writers until an operator
    resolves it explicitly.
 
+Containment (opt-in, Issue #22)
+------------------------------
+When the descriptor pins a launcher, this supervisor becomes an *enforcement*
+port as well: it renders the containment profile into the attempt directory,
+proves the boundary with real children (denial matrix) before any agent process
+exists, launches the runtime through the pinned launcher, and refuses to release
+the writer lock while any process still carries the attempt marker. A failed
+self-test starts nothing.
+
 Not claimed
 -----------
-* This is **not a sandbox**. Same OS account, same filesystem and network reach.
-  Write scope is *detected and rejected after the fact*, never prevented.
-* Git-worktree isolation (Issue #23) is a separate boundary, and even that does
-  not stop a same-user child from reading files, using the network or using
-  ambient credentials. A real agent (Issue #22) requires an execution-permission
-  boundary that has not been established yet.
+* Without a pinned launcher this is **not a sandbox**: same OS account, same
+  filesystem and network reach, and write scope is *detected and rejected after
+  the fact*, never prevented. With one, writes are an allowlist and reads are a
+  deny-list — the latter is weaker than an allowlist and is stated as such.
+* Git-worktree isolation (Issue #23) is a separate boundary and does not stop a
+  same-user child from reading files, using the network or using ambient
+  credentials on its own.
 """
 
 from __future__ import annotations
@@ -54,6 +64,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from tactus.runtime.containment import (
+    ContainmentError,
+    ContainmentPolicy,
+    residual_processes,
+    run_self_test,
+)
 from tactus.runtime.descriptor import (
     RuntimeDescriptor,
     RuntimeProvenance,
@@ -89,6 +105,8 @@ __all__ = [
 RESULT_FILE = "result.json"
 PATCH_FILE = "patch.diff"
 REQUEST_FILE = "request.json"
+PROMPT_FILE = "prompt.txt"
+CONTAINMENT_PROFILE = "containment.sb"
 ATTEMPT_FILE = "attempt.json"
 LOCK_FILE = "writer.lock"
 RECOVERY_LOG = "recovery.jsonl"
@@ -173,18 +191,25 @@ class RuntimeRequest:
     attempt_id: str
     intent_id: str
     capability: str
+    #: The task the agent must perform. Written to the prompt file; never argv,
+    #: which would expose it in ``ps``. Empty is valid for a runtime that reads
+    #: no prompt, and refused when the descriptor feeds stdin from one.
+    task: str = ""
 
     def __post_init__(self) -> None:
         for name in ("attempt_id", "intent_id", "capability"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"runtime request {name} must be a non-empty string")
+        if not isinstance(self.task, str):
+            raise ValueError("runtime request task must be a string")
 
     def as_dict(self) -> dict[str, str]:
         return {
             "attempt_id": self.attempt_id,
             "intent_id": self.intent_id,
             "capability": self.capability,
+            "task": self.task,
         }
 
 
@@ -448,6 +473,9 @@ class RuntimeEvidence:
     agent_status: str
     agent_summary: str
     errors: tuple[str, ...] = field(default_factory=tuple)
+    #: What the boundary observed: policy summary, profile digest, the denial
+    #: matrix, and any process that outlived its group.
+    containment: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -487,6 +515,7 @@ class RuntimeEvidence:
                 "filesystem": dict(self.filesystem),
             },
             "validation": {"errors": list(self.errors)},
+            "containment": dict(self.containment),
         }
 
 
@@ -546,9 +575,23 @@ class RuntimeSupervisor:
         | None = None,
         workspace_paths: Callable[[Path], Sequence[str]] | None = None,
         start_marker: Callable[[int], str | None] | None = None,
+        containment: ContainmentPolicy | None = None,
+        credentials: Mapping[str, str] | None = None,
     ) -> None:
+        if descriptor.launcher is not None and containment is None:
+            # A launcher without a policy would mean launching through a wrapper
+            # whose denials nobody stated. Refuse rather than guess.
+            raise RuntimeSupervisionError(
+                "the descriptor pins a launcher, so a containment policy is required"
+            )
+        if containment is not None and descriptor.launcher is None:
+            raise RuntimeSupervisionError(
+                "a containment policy requires the descriptor to pin its launcher"
+            )
         self._descriptor = descriptor
         self._workspace = workspace
+        self._containment = containment
+        self._credentials = dict(credentials or {})
         self._limits = limits or RuntimeLimits()
         self._state_dir = (
             Path(state_dir).resolve()
@@ -578,6 +621,17 @@ class RuntimeSupervisor:
     @property
     def limits(self) -> RuntimeLimits:
         return self._limits
+
+    @property
+    def containment(self) -> ContainmentPolicy | None:
+        return self._containment
+
+    def _sweep(self, marker: str) -> tuple[Any, ...] | None:
+        """Processes still carrying the attempt marker; None if unverifiable."""
+        try:
+            return tuple(residual_processes(marker))
+        except ContainmentError:
+            return None
 
     @property
     def attempt_record_path(self) -> Path:
@@ -636,6 +690,7 @@ class RuntimeSupervisor:
                 )
 
             attempt_dir, output_dir = self._create_attempt_dir(request.attempt_id)
+            attempt_marker = attempt_dir.name
             record_owned = True
             request_path = attempt_dir / REQUEST_FILE
             _write_json(
@@ -660,22 +715,24 @@ class RuntimeSupervisor:
                     "pgid": None,
                 },
             )
-            try:
-                process = subprocess.Popen(
-                    self._descriptor.command(request_path),
-                    cwd=str(self._workspace.root),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=_child_environment(request),
-                    start_new_session=True,
-                )
-            except OSError as exc:
-                # No child exists: termination is trivially confirmed, and the
-                # attempt still gets a durable record before the lock is released.
+            containment_evidence: dict[str, Any] = {
+                "enabled": False,
+                "reason": "no launcher pinned in the descriptor",
+                "attempt_marker": attempt_marker,
+            }
+
+            def finish_without_child(
+                *, status: str, errors: tuple[str, ...], reason: str
+            ) -> RuntimeEvidence:
+                """Record a pre-spawn failure: no child existed, so termination holds.
+
+                Nothing was launched, so the writer lock is released: the workspace
+                is provably free. The durable record carries the reason, which is
+                what an operator needs — holding the lock would only block them.
+                """
+                nonlocal termination, settled
                 termination = TerminationReport(confirmed=True)
                 lock.confirm_termination()
-                errors = (f"runtime could not be started: {exc}",)
                 evidence = self._finish(
                     request=request,
                     provenance=provenance,
@@ -697,11 +754,12 @@ class RuntimeSupervisor:
                     agent_summary="",
                     declared=(),
                     patch_paths=(),
-                    filesystem={"verified": False, "reason": "process did not start"},
+                    filesystem={"verified": False, "reason": reason},
                     patch_sha256="",
                     patch_bytes=0,
                     errors=errors,
-                    status="failed",
+                    status=status,
+                    containment=containment_evidence,
                 )
                 self._write_terminal(evidence)
                 settled = True
@@ -709,6 +767,111 @@ class RuntimeSupervisor:
                 lock.release()
                 lock_state["released"] = True
                 return self._replace_lock_state(evidence, lock_state)
+
+            # The task is data on disk, never argv: an argv is visible in ``ps``.
+            prompt_path: Path | None = None
+            if self._descriptor.stdin_from == "prompt":
+                if not request.task.strip():
+                    return finish_without_child(
+                        status="invalid",
+                        errors=(
+                            "the runtime reads its task from stdin, but the request "
+                            "carries no task",
+                        ),
+                        reason="no task to send",
+                    )
+                prompt_path = attempt_dir / PROMPT_FILE
+                prompt_path.write_text(request.task, encoding="utf-8")
+
+            # Containment is proven before any agent process exists. A boundary
+            # that cannot be proven starts nothing.
+            profile_path: Path | None = None
+            if self._containment is not None:
+                try:
+                    self._containment.validate_workspace(self._workspace.root)
+                    self._containment.validate_readable(
+                        Path(self._descriptor.executable), what="runtime"
+                    )
+                    profile_path = self._containment.write_profile(
+                        attempt_dir / CONTAINMENT_PROFILE,
+                        workspace=self._workspace.root,
+                        attempt_dir=attempt_dir,
+                    )
+                    self_test = run_self_test(
+                        self._containment,
+                        workspace=self._workspace.root,
+                        attempt_dir=attempt_dir,
+                        runtime_probe_argv=self._descriptor.preflight_argv,
+                        expected_version_token=self._descriptor.expected_version_token,
+                    )
+                except (ContainmentError, OSError) as exc:
+                    containment_evidence = {
+                        "enabled": True,
+                        "attempt_marker": attempt_marker,
+                        "policy": self._containment.as_dict(),
+                        "self_test": None,
+                        "error": str(exc),
+                    }
+                    return finish_without_child(
+                        status="invalid",
+                        errors=(f"containment could not be established: {exc}",),
+                        reason="containment unavailable",
+                    )
+                containment_evidence = {
+                    "enabled": True,
+                    "attempt_marker": attempt_marker,
+                    "policy": self._containment.as_dict(),
+                    "profile_path": str(profile_path),
+                    "profile_sha256": self_test.profile_sha256,
+                    "self_test": self_test.as_dict(),
+                }
+                if not self_test.ok:
+                    return finish_without_child(
+                        status="invalid",
+                        errors=(
+                            "containment self-test did not hold: "
+                            + ", ".join(
+                                check.name
+                                for check in self_test.checks
+                                if check.required and not check.ok
+                            ),
+                        ),
+                        reason="containment self-test failed",
+                    )
+
+            stdin_handle = (
+                prompt_path.open("rb") if prompt_path is not None else subprocess.DEVNULL
+            )
+            try:
+                process = subprocess.Popen(
+                    self._descriptor.command(
+                        request_path,
+                        prompt_path=prompt_path,
+                        profile_path=profile_path,
+                        workspace=self._workspace.root,
+                    ),
+                    cwd=str(self._workspace.root),
+                    stdin=stdin_handle,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=_child_environment(
+                        request,
+                        attempt_dir=attempt_dir,
+                        allowlist=self._descriptor.env_allowlist,
+                        credentials=self._credentials,
+                        attempt_marker=attempt_marker,
+                    ),
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                return finish_without_child(
+                    status="failed",
+                    errors=(f"runtime could not be started: {exc}",),
+                    reason="process did not start",
+                )
+            finally:
+                if prompt_path is not None:
+                    stdin_handle.close()  # type: ignore[union-attr]
 
             pid = process.pid
             pgid = process.pid  # start_new_session == new process group leader
@@ -723,6 +886,7 @@ class RuntimeSupervisor:
                     "pid": pid,
                     "pgid": pgid,
                     "start_marker": self._start_marker(pid),
+                    "attempt_marker": attempt_marker,
                 },
             )
             stdout_reader = _BoundedReader(process.stdout, self._limits.max_output_bytes)
@@ -745,7 +909,22 @@ class RuntimeSupervisor:
                     pgid, process, self._limits.termination_grace_seconds
                 )
                 if termination.confirmed:
-                    lock.confirm_termination()
+                    # A group can be gone while a detached helper still runs.
+                    # Termination stays unconfirmed until nothing carries the
+                    # attempt marker, so the writer lock cannot be handed over
+                    # while any part of the attempt is still alive.
+                    survivors = self._sweep(attempt_marker)
+                    if survivors is None:
+                        containment_evidence["sweep"] = "unverifiable"
+                        termination = replace(termination, confirmed=False)
+                    elif survivors:
+                        containment_evidence["survivors"] = [
+                            item.as_dict() for item in survivors
+                        ]
+                        termination = replace(termination, confirmed=False, alive_after=True)
+                    else:
+                        containment_evidence["sweep"] = "clear"
+                        lock.confirm_termination()
             # Only wait for the streams of a process we know is gone: an
             # unconfirmed termination must not block the supervisor on a pipe
             # that a live child still owns.
@@ -807,6 +986,7 @@ class RuntimeSupervisor:
             patch_bytes=patch_bytes,
             errors=errors,
             status=status,
+            containment=containment_evidence,
         )
         # Durable outcome before release: a failed validation still records first.
         self._write_terminal(evidence)
@@ -892,6 +1072,57 @@ class RuntimeSupervisor:
 
         if phase in _SETTLED_PHASES:
             return RecoveryReport(found=True, attempt_id=attempt_id, phase=phase)
+
+        # A process that still carries the attempt marker means the attempt is not
+        # over, whatever the recorded group says: a detached helper can outlive
+        # its group. That is never "recovered" — it needs an operator.
+        recorded_attempt_marker = str(record.get("attempt_marker") or "")
+        if recorded_attempt_marker:
+            survivors = self._sweep(recorded_attempt_marker)
+            if survivors is None:
+                self._mark(
+                    record,
+                    PHASE_UNRESOLVED,
+                    reason="survivor sweep unverifiable",
+                )
+                self._audit(
+                    {
+                        "action": "unresolved_sweep_unverifiable",
+                        "attempt_id": attempt_id,
+                        "previous_phase": phase,
+                    }
+                )
+                return RecoveryReport(
+                    found=True,
+                    attempt_id=attempt_id,
+                    previous_phase=phase,
+                    phase=PHASE_UNRESOLVED,
+                    requires_operator=True,
+                    reason="survivor sweep unverifiable",
+                )
+            if survivors:
+                self._mark(
+                    record,
+                    PHASE_UNRESOLVED,
+                    reason="processes still carry the attempt marker",
+                    extra={"survivors": [item.as_dict() for item in survivors]},
+                )
+                self._audit(
+                    {
+                        "action": "unresolved_survivors",
+                        "attempt_id": attempt_id,
+                        "previous_phase": phase,
+                        "survivors": [item.as_dict() for item in survivors],
+                    }
+                )
+                return RecoveryReport(
+                    found=True,
+                    attempt_id=attempt_id,
+                    previous_phase=phase,
+                    phase=PHASE_UNRESOLVED,
+                    requires_operator=True,
+                    reason="processes still carry the attempt marker",
+                )
 
         if pgid is None:
             # Unknown process identity (crashed while spawning, or a record that
@@ -1070,6 +1301,10 @@ class RuntimeSupervisor:
                 "status": evidence.status,
                 "termination_confirmed": evidence.termination.confirmed,
                 "validation_errors": list(evidence.errors),
+                # The marker must survive into the terminal record: it is how a
+                # later attempt proves that nothing of this one still runs.
+                "attempt_marker": str(evidence.containment.get("attempt_marker", "")),
+                "survivors": list(evidence.containment.get("survivors") or []),
             },
         )
 
@@ -1295,6 +1530,7 @@ class RuntimeSupervisor:
         patch_bytes: int,
         errors: tuple[str, ...],
         status: str,
+        containment: Mapping[str, Any] | None = None,
     ) -> RuntimeEvidence:
         return RuntimeEvidence(
             status=status,
@@ -1326,6 +1562,7 @@ class RuntimeSupervisor:
             agent_status=agent_status,
             agent_summary=agent_summary,
             errors=errors,
+            containment=dict(containment or {}),
         )
 
     @staticmethod
@@ -1369,19 +1606,61 @@ def _read_bounded(path: Path, limit: int) -> bytes:
     return data
 
 
-def _child_environment(request: RuntimeRequest) -> dict[str, str]:
-    """Minimal child environment: no credentials, no inherited configuration.
+def _child_environment(
+    request: RuntimeRequest,
+    *,
+    attempt_dir: Path | None = None,
+    allowlist: Sequence[str] = (),
+    credentials: Mapping[str, str] | None = None,
+    attempt_marker: str = "",
+) -> dict[str, str]:
+    """Minimal child environment: no inherited configuration, no credentials.
 
     Publication credentials are deliberately absent — an agent that may edit
-    files has no publication authority (Issue #22). This is hygiene, not an
-    isolation boundary: the child can still read whatever the OS account can,
-    including ambient network access and any credential on disk.
+    files has no publication authority (Issue #22). What the child gets is
+    ``PATH``, the two attempt identifiers, attempt-local ``HOME``/``TMPDIR``/git
+    configuration (when an attempt directory is given), and only those variables
+    the descriptor named in its allowlist. Values come from the supervisor, never
+    from the ambient environment, so an unrelated secret cannot leak into the run
+    and an allowlisted name cannot be inherited.
+
+    This is hygiene, not containment on its own: without an OS boundary the child
+    can still read whatever the OS account can.
     """
-    return {
+    env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "TACTUS_ATTEMPT_ID": request.attempt_id,
         "TACTUS_INTENT_ID": request.intent_id,
     }
+    if attempt_marker:
+        # Per-run marker for the survivor sweep (see containment.ATTEMPT_MARKER_VARIABLE).
+        env["TACTUS_ATTEMPT_DIR"] = attempt_marker
+    if attempt_dir is not None:
+        home = attempt_dir / "home"
+        temp = attempt_dir / "tmp"
+        home.mkdir(parents=True, exist_ok=True)
+        temp.mkdir(parents=True, exist_ok=True)
+        gitconfig = home / "gitconfig"
+        if not gitconfig.exists():
+            gitconfig.write_text(
+                "[user]\n\tname = tactus agent\n\temail = agent@tactus.invalid\n"
+                "[safe]\n\tdirectory = *\n",
+                encoding="utf-8",
+            )
+        env.update(
+            {
+                "HOME": str(home),
+                "TMPDIR": str(temp),
+                "GIT_CONFIG_GLOBAL": str(gitconfig),
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+            }
+        )
+    supplied = dict(credentials or {})
+    for name in allowlist:
+        value = supplied.get(name)
+        if value:
+            env[name] = value
+    return env
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

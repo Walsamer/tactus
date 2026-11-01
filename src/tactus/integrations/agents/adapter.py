@@ -63,6 +63,7 @@ class AgentRunResult:
     patch_sha256: str
     patch_bytes: int
     patch_path: str
+    task_sha256: str
     publication_authority: bool
     errors: tuple[str, ...]
     evidence: RuntimeEvidence
@@ -77,6 +78,7 @@ class AgentRunResult:
             "patch_sha256": self.patch_sha256,
             "patch_bytes": self.patch_bytes,
             "patch_path": self.patch_path,
+            "task_sha256": self.task_sha256,
             "publication_authority": self.publication_authority,
             "errors": list(self.errors),
             "evidence": self.evidence.as_dict(),
@@ -142,6 +144,14 @@ class RuntimeAgentAdapter:
         """Supervise one attempt and return a contract-checked result."""
         if not isinstance(request, RuntimeRequest):
             raise AgentAdapterError("a RuntimeRequest is required")
+        if self._supervisor.descriptor.stdin_from == "prompt" and not request.task.strip():
+            # Refuse before an attempt directory exists: there is nothing to
+            # supervise when the runtime has no task to perform.
+            raise AgentContractViolation(
+                "the pinned runtime reads its task from stdin, so the request must "
+                "carry a task"
+            )
+        task_sha256 = hashlib.sha256(request.task.encode("utf-8")).hexdigest() if request.task else ""
         evidence = self._supervisor.run(request)
         self._validate_evidence(evidence)
         patch_path = ""
@@ -158,6 +168,7 @@ class RuntimeAgentAdapter:
             patch_sha256=evidence.patch_sha256,
             patch_bytes=evidence.patch_bytes,
             patch_path=patch_path,
+            task_sha256=task_sha256,
             publication_authority=self._contract.publication_authority,
             errors=evidence.errors,
             evidence=evidence,

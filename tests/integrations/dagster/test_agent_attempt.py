@@ -175,7 +175,7 @@ def test_attempt_runs_the_pinned_agent_and_reports_patch_evidence(tmp_path):
     assert summary["status"] == "success"
     assert summary["attempt_id"] == "intent:agent-slice.attempt-1"
     assert summary["capability"] == "software.implement"
-    assert summary["contract_version"] == "1.0.0"
+    assert summary["contract_version"] == "1.1.0"
     assert summary["runtime"]["runtime_id"] == "fake-workspace-agent"
     assert summary["runtime"]["runtime_kind"] == "fake-canary"
     assert (

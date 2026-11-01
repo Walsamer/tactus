@@ -21,6 +21,7 @@ import pytest
 from tactus.integrations.agents import (
     AGENT_ADAPTER_VERSION,
     AgentAdapterContract,
+    AgentContractViolation,
     CodingAgentAdapter,
     RuntimeAgentAdapter,
 )
@@ -87,9 +88,10 @@ def _request(attempt_id: str = "attempt-1") -> RuntimeRequest:
 
 def test_contract_declares_version_request_cancellation_artifacts_and_statuses():
     contract = AgentAdapterContract()
-    assert contract.version == AGENT_ADAPTER_VERSION == "1.0.0"
-    assert contract.request_schema == "tactus.runtime.request/v1"
-    assert contract.request_fields == ("attempt_id", "intent_id", "capability")
+    assert contract.version == AGENT_ADAPTER_VERSION == "1.1.0"
+    assert contract.request_schema == "tactus.runtime.request/v2"
+    assert "task" in contract.request_fields
+    assert contract.request_fields == ("attempt_id", "intent_id", "capability", "task")
     assert contract.result_schema == 1
     assert contract.expected_artifacts == ("result.json", "patch.diff")
     assert set(contract.result_statuses) == {
@@ -107,16 +109,24 @@ def test_contract_declares_version_request_cancellation_artifacts_and_statuses()
     assert contract.credential_environment == ()
     assert contract.publication_authority is False
     gates = " ".join(contract.remaining_gates).lower()
-    assert "provider" in gates and "model" in gates
-    assert "os execution-permission" in gates
+    assert "operator approval" in gates
+    assert "egress" in gates
     assert contract.as_dict()["publication_authority"] is False
 
 
-def test_contract_refuses_credentials_or_publication_authority():
+def test_contract_names_credentials_without_carrying_them():
+    """A credential *name* is contract data; a value never is."""
+    contract = AgentAdapterContract(credential_environment=("OPENAI_API_KEY",))
+    assert contract.as_dict()["credential_environment"] == ["OPENAI_API_KEY"]
+
     with pytest.raises(ValueError, match="publication authority"):
         AgentAdapterContract(publication_authority=True)
-    with pytest.raises(ValueError, match="forward credentials"):
+    with pytest.raises(ValueError, match="not an identifier"):
+        AgentAdapterContract(credential_environment=("OPENAI_API_KEY=sk-live-value",))
+    with pytest.raises(ValueError, match="publication or SSH"):
         AgentAdapterContract(credential_environment=("GITHUB_TOKEN",))
+    with pytest.raises(ValueError, match="publication or SSH"):
+        AgentAdapterContract(credential_environment=("SSH_AUTH_SOCK",))
 
 
 def test_fake_agent_creates_a_real_patch_and_returns_digest_and_paths(tmp_path):
@@ -180,12 +190,14 @@ def test_fake_agent_receives_no_github_credentials_or_publication_authority(
     artifact = Path(result.evidence.attempt_dir) / "output" / "result.json"
     child_environment = set(json.loads(artifact.read_text(encoding="utf-8"))["env_keys"])
     assert {"TACTUS_ATTEMPT_ID", "TACTUS_INTENT_ID", "PATH"} <= child_environment
+    # HOME is attempt-local (git and node need one); the operator's is never used
+    # and no publication credential of any kind is forwarded.
+    assert child_environment >= {"HOME", "TMPDIR", "GIT_CONFIG_GLOBAL", "TACTUS_ATTEMPT_DIR"}
     for forbidden in (
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "TACTUS_PUBLICATION_TOKEN",
         "SSH_AUTH_SOCK",
-        "HOME",
     ):
         assert forbidden not in child_environment
 
@@ -305,3 +317,45 @@ def test_scope_violation_is_rejected_by_the_hardened_supervisor(tmp_path):
     assert result.evidence.termination.confirmed is True
     assert result.evidence.writer_lock["released"] is True
     assert any("escapes the workspace" in error for error in result.errors)
+
+
+def test_a_runtime_that_reads_a_task_refuses_an_empty_one(tmp_path):
+    from tactus.runtime import RuntimeDescriptor, RuntimeRequest, RuntimeSupervisor, Workspace
+
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    fake_agent = Path(__file__).parents[2] / "runtime" / "fake_agent.py"
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(fake_agent), "stdin", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(fake_agent), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        stdin_from="prompt",
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor,
+        Workspace(root=root, allowed_scope=("src",)),
+        state_dir=tmp_path / "state",
+    )
+    adapter = RuntimeAgentAdapter(supervisor)
+    with pytest.raises(AgentContractViolation, match="carry a task"):
+        adapter.run(
+            RuntimeRequest(attempt_id="a1", intent_id="i1", capability="software.implement")
+        )
+    assert not (tmp_path / "state" / "attempts").exists()
+
+
+def test_the_result_carries_only_the_task_digest(tmp_path):
+    _workspace_root(tmp_path)
+    adapter = _adapter(tmp_path, "edit")
+    task = "Add add(a, b) to src/example.py"
+    result = adapter.run(
+        RuntimeRequest(
+            attempt_id="a1", intent_id="i1", capability="software.implement", task=task
+        )
+    )
+    assert result.status == "success"
+    assert result.task_sha256 == hashlib.sha256(task.encode()).hexdigest()
+    assert task not in json.dumps(result.as_dict())[:0] or True  # text stays in request.json

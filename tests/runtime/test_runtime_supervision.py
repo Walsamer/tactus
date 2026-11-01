@@ -176,14 +176,63 @@ def test_agent_environment_carries_no_publication_credentials(tmp_path):
     )
     env_keys = set(result["env_keys"])
     assert {"TACTUS_ATTEMPT_ID", "TACTUS_INTENT_ID", "PATH"} <= env_keys
+    # No publication credential, no SSH agent, no ambient secret of any kind.
     for forbidden in (
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "SSH_AUTH_SOCK",
-        "HOME",
         "AWS_SECRET_ACCESS_KEY",
+        "OPENAI_API_KEY",
     ):
         assert forbidden not in env_keys
+
+
+def test_child_environment_is_minimal_and_attempt_local(tmp_path):
+    """The child gets paths to its own attempt, and only allowlisted names.
+
+    Credential *values* live in supervisor memory and are copied in by name; a
+    variable the descriptor did not name is absent even when the supervisor holds
+    it, and nothing is inherited from the ambient environment.
+    """
+    from tactus.runtime.supervision import _child_environment
+
+    attempt_dir = tmp_path / "state" / "attempts" / "a1"
+    attempt_dir.mkdir(parents=True)
+    request = _request()
+    env = _child_environment(
+        request,
+        attempt_dir=attempt_dir,
+        allowlist=("OPENAI_API_KEY",),
+        credentials={"OPENAI_API_KEY": "sk-test-value", "GH_TOKEN": "must-not-leak"},
+        attempt_marker="attempt-dir-marker",
+    )
+    assert env["TACTUS_ATTEMPT_DIR"] == "attempt-dir-marker"
+
+    assert set(env) == {
+        "PATH",
+        "TACTUS_ATTEMPT_ID",
+        "TACTUS_INTENT_ID",
+        "TACTUS_ATTEMPT_DIR",
+        "HOME",
+        "TMPDIR",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "OPENAI_API_KEY",
+    }
+    assert env["OPENAI_API_KEY"] == "sk-test-value"
+    assert env["HOME"] == str(attempt_dir / "home")
+    assert env["HOME"] != str(Path.home())
+    assert env["TMPDIR"] == str(attempt_dir / "tmp")
+    assert env["GIT_CONFIG_SYSTEM"] == "/dev/null"
+    assert (attempt_dir / "home" / "gitconfig").is_file()
+    assert "GH_TOKEN" not in env and "SSH_AUTH_SOCK" not in env
+
+
+def test_child_environment_without_an_attempt_dir_is_the_legacy_shape():
+    from tactus.runtime.supervision import _child_environment
+
+    env = _child_environment(_request())
+    assert set(env) == {"PATH", "TACTUS_ATTEMPT_ID", "TACTUS_INTENT_ID"}
 
 
 def test_request_file_describes_the_bound_workspace(tmp_path):
@@ -584,3 +633,256 @@ def test_operator_resolution_releases_the_hold_and_is_audited(tmp_path):
     ]
     assert any(entry["action"] == "operator_resolved" for entry in audit)
     assert _supervisor(tmp_path, "success").run(_request("attempt-3")).status == "success"
+
+
+# -- containment integration -------------------------------------------------
+
+
+def _containment_launcher():
+    import shutil
+
+    from tactus.runtime.containment import Launcher
+
+    found = shutil.which("sandbox-exec")
+    if found is None:
+        pytest.skip("seatbelt launcher is not available on this host")
+    return Launcher(path=Path(found), argv_prefix=(found, "-f", "{profile}"))
+
+
+def _containment_policy(denied_root: Path):
+    from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy
+
+    return ContainmentPolicy(
+        launcher=_containment_launcher(),
+        denied_roots=(DeniedRoot(path=denied_root, reason="operator home"),),
+        egress=EgressPolicy(),
+    )
+
+
+def _containment_supervisor(tmp_path: Path, mode: str, *, denied_root: Path | None = None):
+    from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy, Launcher
+
+    workspace = _workspace(tmp_path)
+    denied = denied_root or (tmp_path / "home")
+    denied.mkdir(parents=True, exist_ok=True)
+    policy = ContainmentPolicy(
+        launcher=_containment_launcher(),
+        denied_roots=(DeniedRoot(path=denied, reason="operator home"),),
+        egress=EgressPolicy(),
+    )
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent-contained",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), mode, REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        launcher=policy.launcher,
+    )
+    return RuntimeSupervisor(
+        descriptor,
+        workspace,
+        state_dir=tmp_path / "state",
+        containment=policy,
+    )
+
+
+def test_containment_is_proven_before_the_agent_runs(tmp_path):
+    supervisor = _containment_supervisor(tmp_path, "success")
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "success"
+    containment = dict(evidence.containment)
+    assert containment["enabled"] is True
+    self_test = containment["self_test"]
+    assert self_test["ok"] is True
+    names = {check["name"] for check in self_test["checks"]}
+    assert {"write_denied_outside", "read_denied_root", "connect_denied"} <= names
+    # The version probe ran inside the boundary, not outside it.
+    assert "runtime_probe_through_launcher" in names
+    assert containment["profile_sha256"] == self_test["profile_sha256"]
+    assert containment["sweep"] == "clear"
+
+
+def test_a_boundary_that_cannot_be_proven_starts_nothing(tmp_path):
+    from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy, Launcher
+
+    workspace = _workspace(tmp_path)
+    denied = tmp_path / "home"
+    denied.mkdir()
+    fake = tmp_path / "fake-launcher.sh"
+    fake.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
+    fake.chmod(0o755)
+    policy = ContainmentPolicy(
+        launcher=Launcher(path=fake, argv_prefix=(str(fake),)),
+        denied_roots=(DeniedRoot(path=denied, reason="operator home"),),
+        egress=EgressPolicy(),
+    )
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent-contained",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        launcher=policy.launcher,
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor, workspace, state_dir=tmp_path / "state", containment=policy
+    )
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "invalid"
+    assert evidence.pid is None and evidence.pgid is None
+    assert any("self-test" in error for error in evidence.errors)
+    containment = dict(evidence.containment)
+    assert containment["self_test"]["ok"] is False
+    # Nothing ran, so nothing is owned: the lock is released and the record stands.
+    assert evidence.termination.confirmed is True
+    assert evidence.writer_lock["released"] is True
+    assert not (Path(evidence.attempt_dir) / "output" / "result.json").exists()
+    record = json.loads((tmp_path / "state" / "attempt.json").read_text())
+    assert record["phase"] == "settled"
+
+
+def test_a_descriptor_launcher_without_a_policy_is_refused(tmp_path):
+    workspace = _workspace(tmp_path)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent-contained",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        launcher=_containment_launcher(),
+    )
+    with pytest.raises(RuntimeSupervisionError, match="containment policy is required"):
+        RuntimeSupervisor(descriptor, workspace, state_dir=tmp_path / "state")
+
+
+def test_a_policy_without_a_pinned_launcher_is_refused(tmp_path):
+    workspace = _workspace(tmp_path)
+    denied = tmp_path / "home"
+    denied.mkdir()
+    with pytest.raises(RuntimeSupervisionError, match="requires the descriptor"):
+        RuntimeSupervisor(
+            _descriptor("success"),
+            workspace,
+            state_dir=tmp_path / "state",
+            containment=_containment_policy(denied),
+        )
+
+
+def test_a_surviving_marker_keeps_the_workspace_owned(tmp_path):
+    """A detached helper outliving its group means termination is unconfirmed.
+
+    The durable protection is the record, not the file descriptor: the next writer
+    is refused because a process still carries the attempt marker, and the attempt
+    is marked unresolved for an explicit operator decision.
+    """
+    evidence = _containment_supervisor(tmp_path, "detach").run(_request())
+    survivors = list(evidence.containment.get("survivors") or [])
+    try:
+        assert evidence.status == "unterminated"
+        assert evidence.termination.confirmed is False
+        assert evidence.writer_lock["released"] is False
+        assert survivors, "the sweep must report the process that outlived its group"
+        assert evidence.containment.get("sweep") != "clear"
+
+        # A restart must refuse: the marker it recorded is still in the process
+        # table, so the previous attempt is unresolved, not recovered.
+        with pytest.raises(RuntimeRecoveryRequired, match="marker"):
+            _containment_supervisor(tmp_path, "success").run(
+                _request(attempt_id="attempt-2")
+            )
+        record = json.loads((tmp_path / "state" / "attempt.json").read_text())
+        assert record["phase"] == "unresolved"
+        assert record["attempt_marker"]
+    finally:
+        # Leave no process behind, whatever the assertions above did.
+        for survivor in survivors:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(survivor["pid"], signal.SIGKILL)
+
+
+def test_the_task_is_fed_on_stdin_never_on_the_command_line(tmp_path):
+    workspace = _workspace(tmp_path)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "stdin", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        stdin_from="prompt",
+    )
+    supervisor = RuntimeSupervisor(descriptor, workspace, state_dir=tmp_path / "state")
+    task = "Add add(a, b) to src/calc.py and a test for it."
+    evidence = supervisor.run(_request_with_task(task))
+
+    result = json.loads(
+        (Path(evidence.attempt_dir) / "output" / "result.json").read_text()
+    )
+    assert result["summary"] == task
+    assert task not in " ".join(descriptor.argv)
+    assert (Path(evidence.attempt_dir) / "prompt.txt").read_text(encoding="utf-8") == task
+
+
+def test_a_runtime_that_needs_a_task_refuses_an_empty_one(tmp_path):
+    workspace = _workspace(tmp_path)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "stdin", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        stdin_from="prompt",
+    )
+    supervisor = RuntimeSupervisor(descriptor, workspace, state_dir=tmp_path / "state")
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "invalid"
+    assert evidence.pid is None
+    assert any("no task" in error for error in evidence.errors)
+
+
+def test_allowlisted_credentials_reach_the_child_and_nothing_else_does(tmp_path):
+    workspace = _workspace(tmp_path)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        env_allowlist=("TEST_MODEL_KEY",),
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor,
+        workspace,
+        state_dir=tmp_path / "state",
+        credentials={"TEST_MODEL_KEY": "value-from-supervisor", "GH_TOKEN": "must-not-leak"},
+    )
+    evidence = supervisor.run(_request())
+
+    result = json.loads(
+        (Path(evidence.attempt_dir) / "output" / "result.json").read_text()
+    )
+    env_keys = set(result["env_keys"])
+    assert "TEST_MODEL_KEY" in env_keys
+    assert "GH_TOKEN" not in env_keys
+    # The value is never written into the evidence, only the name is.
+    assert "value-from-supervisor" not in json.dumps(evidence.as_dict())
+
+
+def _request_with_task(task: str) -> RuntimeRequest:
+    base = _request()
+    return RuntimeRequest(
+        attempt_id=base.attempt_id,
+        intent_id=base.intent_id,
+        capability=base.capability,
+        task=task,
+    )
+
+

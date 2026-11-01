@@ -86,6 +86,22 @@ def main(argv: list[str]) -> int:
         print(f"grandchild pid={child.pid}", flush=True)
         time.sleep(120)
         return 0
+    if mode == "detach":
+        # Leave a process behind that outlives this group but still carries the
+        # attempt marker: the supervisor must not call termination confirmed.
+        survivor = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            start_new_session=True,
+        )
+        print(f"survivor pid={survivor.pid}", flush=True)
+        _write(output_dir, status="completed", changed=["src/example.py"], summary="detached")
+        (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
+        return 0
+    if mode == "stdin":
+        task = sys.stdin.read() if not sys.stdin.isatty() else ""
+        _write(output_dir, status="completed", changed=["src/example.py"], summary=task)
+        (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
+        return 0
     if mode == "no-result":
         return 0
     if mode == "failed":
