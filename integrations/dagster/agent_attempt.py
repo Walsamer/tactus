@@ -41,6 +41,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tactus.integrations.agents import RuntimeAgentAdapter
+from tactus.runtime.containment import (
+    ContainmentPolicy,
+    DeniedRoot,
+    EgressPolicy,
+    Launcher,
+)
+from tactus.runtime.containment import digest_tree
+from tactus.runtime.descriptor import Artifact
 from tactus.runtime import (
     REQUEST_PLACEHOLDER,
     RuntimeDescriptor,
@@ -91,7 +99,9 @@ _REQUIRED_KEYS = frozenset(
     }
 )
 
-_OPTIONAL_KEYS = frozenset({"limits", "purpose"})
+_OPTIONAL_KEYS = frozenset(
+    {"limits", "purpose", "containment", "artifacts", "env_allowlist", "stdin_from"}
+)
 
 _LIMIT_KEYS = frozenset(
     {
@@ -154,6 +164,18 @@ class AgentRuntimePin:
     allowed_scope: tuple[str, ...]
     limits: RuntimeLimits
     purpose: str = ""
+    #: Vendor-free pinned artifact set (file, or tree with a declared digest
+    #: order). Empty keeps the phase-1 shape: one executable verified above.
+    artifacts: tuple[Artifact, ...] = ()
+    #: The OS boundary, when the pin declares one. Absent means the attempt is
+    #: supervised but not contained — stated in the attempt account either way.
+    containment: ContainmentPolicy | None = None
+    env_allowlist: tuple[str, ...] = ()
+    stdin_from: str = "none"
+
+    @property
+    def launcher(self) -> Launcher | None:
+        return self.containment.launcher if self.containment is not None else None
 
     def __post_init__(self) -> None:
         for name in (
@@ -183,6 +205,10 @@ class AgentRuntimePin:
             argv=self.argv,
             preflight_argv=self.preflight_argv,
             expected_version_token=self.expected_version_token,
+            artifacts=self.artifacts,
+            launcher=self.launcher,
+            env_allowlist=self.env_allowlist,
+            stdin_from=self.stdin_from,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -199,6 +225,10 @@ class AgentRuntimePin:
             "allowed_scope": list(self.allowed_scope),
             "limits": self.limits.as_dict(),
             "purpose": self.purpose,
+            "artifacts": [artifact.as_dict() for artifact in self.artifacts],
+            "containment": self.containment.as_dict() if self.containment else None,
+            "env_allowlist": list(self.env_allowlist),
+            "stdin_from": self.stdin_from,
         }
 
 
@@ -239,6 +269,22 @@ def _str_tuple(config: Mapping[str, Any], name: str, path: Path) -> tuple[str, .
     return tuple(value)
 
 
+def _optional_str_tuple(
+    config: Mapping[str, Any], name: str, path: Path
+) -> tuple[str, ...]:
+    """A list of non-empty strings, or an empty tuple when absent."""
+    value = config.get(name)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        raise AgentRuntimePinError(
+            f"runtime pin {name} must be a list of non-empty strings ({path})"
+        )
+    return tuple(value)
+
+
 def _resolve_executable(raw: str, repo_root: Path) -> Path:
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
@@ -268,6 +314,124 @@ def _limits(config: Mapping[str, Any], path: Path) -> RuntimeLimits:
         return RuntimeLimits(**raw)
     except (TypeError, ValueError) as exc:
         raise AgentRuntimePinError(f"runtime pin limits are invalid ({path}): {exc}") from exc
+
+
+def _artifacts(config: Mapping[str, Any], root: Path, path: Path) -> tuple[Artifact, ...]:
+    """Parse the optional pinned artifact set (file or tree)."""
+    raw = config.get("artifacts")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        raise AgentRuntimePinError(f"runtime pin artifacts must be a non-empty list ({path})")
+    artifacts: list[Artifact] = []
+    allowed = {"path", "sha256", "kind", "digest_order", "file_count", "entrypoint", "role"}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise AgentRuntimePinError(f"runtime pin artifacts entries must be objects ({path})")
+        unknown = set(entry) - allowed
+        if unknown:
+            raise AgentRuntimePinError(
+                "runtime pin artifacts entry has unknown keys: "
+                + ", ".join(sorted(unknown))
+                + f" ({path})"
+            )
+        artifact_path = _required_str(entry, "path", path)
+        candidate = Path(artifact_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            artifacts.append(
+                Artifact(
+                    path=str(candidate),
+                    sha256=_required_str(entry, "sha256", path),
+                    kind=str(entry.get("kind", "file")),
+                    digest_order=str(entry.get("digest_order", "path-sorted")),
+                    file_count=entry.get("file_count"),
+                    entrypoint=str(entry.get("entrypoint", "")),
+                    role=str(entry.get("role", "runtime")),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise AgentRuntimePinError(f"runtime pin artifact is invalid ({path}): {exc}") from exc
+    return tuple(artifacts)
+
+
+def _containment(config: Mapping[str, Any], path: Path) -> ContainmentPolicy | None:
+    """Parse the optional containment block into a policy (or None)."""
+    raw = config.get("containment")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise AgentRuntimePinError(f"runtime pin containment must be an object ({path})")
+    unknown = set(raw) - {"launcher", "denied_roots", "egress", "allowances"}
+    if unknown:
+        raise AgentRuntimePinError(
+            "runtime pin containment has unknown keys: " + ", ".join(sorted(unknown)) + f" ({path})"
+        )
+    launcher_raw = raw.get("launcher")
+    if not isinstance(launcher_raw, dict):
+        raise AgentRuntimePinError(f"runtime pin containment.launcher is required ({path})")
+    launcher_unknown = set(launcher_raw) - {"path", "argv_prefix", "sha256"}
+    if launcher_unknown:
+        raise AgentRuntimePinError(
+            "runtime pin containment.launcher has unknown keys: "
+            + ", ".join(sorted(launcher_unknown))
+            + f" ({path})"
+        )
+    try:
+        launcher = Launcher(
+            path=Path(_required_str(launcher_raw, "path", path)),
+            argv_prefix=_str_tuple(launcher_raw, "argv_prefix", path),
+            sha256=str(launcher_raw.get("sha256", "")),
+        )
+    except (TypeError, ValueError) as exc:
+        raise AgentRuntimePinError(f"runtime pin launcher is invalid ({path}): {exc}") from exc
+
+    roots_raw = raw.get("denied_roots", [])
+    if not isinstance(roots_raw, list):
+        raise AgentRuntimePinError(f"runtime pin denied_roots must be a list ({path})")
+    roots: list[DeniedRoot] = []
+    for entry in roots_raw:
+        if not isinstance(entry, dict):
+            raise AgentRuntimePinError(f"runtime pin denied_roots entries must be objects ({path})")
+        try:
+            roots.append(
+                DeniedRoot(
+                    path=Path(_required_str(entry, "path", path)),
+                    reason=_required_str(entry, "reason", path),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise AgentRuntimePinError(
+                f"runtime pin denied root is invalid ({path}): {exc}"
+            ) from exc
+
+    egress_raw = raw.get("egress", {"mode": "deny"})
+    if not isinstance(egress_raw, dict):
+        raise AgentRuntimePinError(f"runtime pin egress must be an object ({path})")
+    try:
+        egress = EgressPolicy(
+            mode=str(egress_raw.get("mode", "deny")), port=egress_raw.get("port")
+        )
+    except (TypeError, ValueError) as exc:
+        raise AgentRuntimePinError(f"runtime pin egress is invalid ({path}): {exc}") from exc
+
+    allowances_raw = raw.get("allowances", [])
+    if not isinstance(allowances_raw, list) or any(
+        not isinstance(item, str) or not item for item in allowances_raw
+    ):
+        raise AgentRuntimePinError(
+            f"runtime pin allowances must be a list of strings ({path})"
+        )
+    try:
+        return ContainmentPolicy(
+            launcher=launcher,
+            denied_roots=tuple(roots),
+            egress=egress,
+            allowances=tuple(allowances_raw),
+        )
+    except (TypeError, ValueError) as exc:
+        raise AgentRuntimePinError(f"runtime pin containment is invalid ({path}): {exc}") from exc
 
 
 def load_agent_runtime_pin(
@@ -348,6 +512,10 @@ def load_agent_runtime_pin(
         allowed_scope=_str_tuple(config, "allowed_scope", path),
         limits=_limits(config, path),
         purpose=purpose,
+        artifacts=_artifacts(config, root, path),
+        containment=_containment(config, path),
+        env_allowlist=_optional_str_tuple(config, "env_allowlist", path),
+        stdin_from=str(config.get("stdin_from", "none")),
     )
 
 
@@ -415,7 +583,16 @@ def _summary(
         },
         "errors": list(result.errors),
         "publication_authority": result.publication_authority,
-        "isolation": "none (same OS account: no filesystem or network boundary)",
+        "task_sha256": result.task_sha256,
+        # What the boundary actually observed: policy, profile digest and the
+        # denial matrix, or an explicit statement that there was none.
+        "containment": dict(evidence.containment),
+        "isolation": (
+            "enforced (pinned launcher; write allowlist, read deny-list, egress "
+            f"{pin.containment.egress.mode})"
+            if pin.containment is not None
+            else "none (same OS account: no filesystem or network boundary)"
+        ),
     }
 
 
@@ -425,6 +602,7 @@ def run_agent_attempt(
     capability: str,
     attempt: int,
     workspace_root: str | os.PathLike[str],
+    task: str = "",
     repo_root: str | os.PathLike[str] | None = None,
     config_path: str | os.PathLike[str] | None = None,
     state_dir: str | os.PathLike[str] | None = None,
@@ -452,12 +630,17 @@ def run_agent_attempt(
         workspace,
         limits=pin.limits,
         state_dir=state_dir,
+        containment=pin.containment,
+        # A model credential is handed over by *name* and only when the pin asks
+        # for it; a missing value fails at preflight rather than mid-run.
+        credentials=_credential_values(pin.env_allowlist),
     )
     adapter = RuntimeAgentAdapter(supervisor)
     request = RuntimeRequest(
         attempt_id=f"{intent_id}.attempt-{attempt}",
         intent_id=intent_id,
         capability=capability,
+        task=task,
     )
     result = adapter.run(request)
     summary = _summary(
@@ -472,6 +655,31 @@ def run_agent_attempt(
     _write_json(summary_path, summary)
     summary["process"]["summary_path"] = str(summary_path)
     return summary
+
+
+def _credential_values(names: tuple[str, ...]) -> dict[str, str]:
+    """Collect allowlisted credential values from the environment, by name only.
+
+    A pin that names a credential the environment does not carry fails here, with
+    the variable's name and both ways to satisfy it — never at the first request
+    of a run that has already begun.
+    """
+    values: dict[str, str] = {}
+    missing: list[str] = []
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            values[name] = value
+        else:
+            missing.append(name)
+    if missing:
+        raise AgentRuntimePinError(
+            "the runtime pin requires credentials that are not set: "
+            + ", ".join(missing)
+            + " (export a scoped, low-limit key for the run; it is passed to the "
+            "child environment only, never to argv or evidence)"
+        )
+    return values
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

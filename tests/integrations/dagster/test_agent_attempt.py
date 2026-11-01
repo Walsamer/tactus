@@ -325,3 +325,149 @@ def test_fixture_agent_is_executable_and_self_reporting():
     assert os.access(FAKE_AGENT, os.X_OK)
     assert shutil.which("python3") is not None
     assert FAKE_AGENT.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3")
+
+
+# -- phase 2: containment, artifacts, credentials in the operator pin --------
+
+
+def _sandbox_launcher():
+    found = shutil.which("sandbox-exec")
+    if found is None:
+        pytest.skip("seatbelt launcher is not available on this host")
+    return attempt.Launcher(path=Path(found), argv_prefix=(found, "-f", "{profile}"))
+
+
+def _containment_block(tmp_path: Path) -> dict:
+    launcher = _sandbox_launcher()
+    denied = tmp_path / "home"
+    denied.mkdir(exist_ok=True)
+    return {
+        "launcher": {"path": str(launcher.path), "argv_prefix": list(launcher.argv_prefix)},
+        "denied_roots": [{"path": str(denied), "reason": "operator home"}],
+        "egress": {"mode": "deny"},
+        "allowances": [],
+    }
+
+
+def test_the_pin_can_declare_containment_and_the_account_records_it(tmp_path):
+    config_path = _write_config(
+        tmp_path, _config(containment=_containment_block(tmp_path))
+    )
+    summary = attempt.run_agent_attempt(
+        intent_id="intent:contained",
+        capability="software.implement",
+        attempt=1,
+        workspace_root=_workspace(tmp_path),
+        repo_root=REPO_ROOT,
+        config_path=config_path,
+        state_dir=tmp_path / "state",
+    )
+
+    assert summary["status"] == "success"
+    assert summary["isolation"].startswith("enforced")
+    containment = summary["containment"]
+    assert containment["enabled"] is True
+    assert containment["self_test"]["ok"] is True
+    assert containment["policy"]["egress"]["mode"] == "deny"
+
+
+def test_a_pin_without_containment_says_so_in_the_account(tmp_path):
+    summary = _run(tmp_path)
+    assert summary["isolation"].startswith("none")
+    assert summary["containment"].get("enabled") is False
+
+
+def test_the_pin_can_pin_a_tree_artifact(tmp_path):
+    tree = tmp_path / "runtime-tree"
+    (tree / "bin").mkdir(parents=True)
+    agent = tree / "bin" / "agent"
+    agent.write_text("#!/bin/sh\necho tree-agent 1.0.0\n", encoding="utf-8")
+    agent.chmod(0o755)
+    digest, count = attempt.digest_tree(tree)
+    config_path = _write_config(
+        tmp_path,
+        _config(
+            executable=str(agent),
+            executable_sha256=hashlib.sha256(agent.read_bytes()).hexdigest(),
+            argv=[str(agent), "run", "{request}"],
+            preflight_argv=[str(agent), "--version"],
+            expected_version_token="tree-agent 1.0.0",
+            artifacts=[
+                {
+                    "path": str(tree),
+                    "sha256": digest,
+                    "kind": "tree",
+                    "file_count": count,
+                    "entrypoint": "bin/agent",
+                }
+            ],
+        ),
+    )
+    pin = attempt.load_agent_runtime_pin(config_path, repo_root=REPO_ROOT)
+    assert pin.artifacts[0].kind == "tree"
+    assert pin.artifacts[0].file_count == count
+    assert pin.descriptor().artifacts[0].sha256 == digest
+
+
+def test_a_named_credential_missing_from_the_environment_fails_at_preflight(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("TACTUS_TEST_MODEL_KEY", raising=False)
+    config_path = _write_config(
+        tmp_path, _config(env_allowlist=["TACTUS_TEST_MODEL_KEY"])
+    )
+    with pytest.raises(attempt.AgentRuntimePinError, match="TACTUS_TEST_MODEL_KEY"):
+        attempt.run_agent_attempt(
+            intent_id="intent:key",
+            capability="software.implement",
+            attempt=1,
+            workspace_root=_workspace(tmp_path),
+            repo_root=REPO_ROOT,
+            config_path=config_path,
+            state_dir=tmp_path / "state",
+        )
+    # Fail-closed and clean: no attempt directory was created.
+    assert not (tmp_path / "state" / "attempts").exists()
+
+
+def test_a_named_credential_reaches_the_child_by_name_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("TACTUS_TEST_MODEL_KEY", "sk-from-environment")
+    config_path = _write_config(
+        tmp_path, _config(env_allowlist=["TACTUS_TEST_MODEL_KEY"])
+    )
+    summary = attempt.run_agent_attempt(
+        intent_id="intent:key-ok",
+        capability="software.implement",
+        attempt=1,
+        workspace_root=_workspace(tmp_path),
+        repo_root=REPO_ROOT,
+        config_path=config_path,
+        state_dir=tmp_path / "state",
+    )
+    assert summary["status"] == "success"
+    assert "sk-from-environment" not in json.dumps(summary)
+
+
+def test_an_unknown_containment_key_is_refused(tmp_path):
+    block = _containment_block(tmp_path)
+    block["surprise"] = True
+    config_path = _write_config(tmp_path, _config(containment=block))
+    with pytest.raises(attempt.AgentRuntimePinError, match="unknown keys"):
+        attempt.load_agent_runtime_pin(config_path, repo_root=REPO_ROOT)
+
+
+def test_the_task_is_recorded_as_a_digest_in_the_account(tmp_path):
+    task = "make the greeting explicit"
+    config_path = _write_config(tmp_path, _config())
+    summary = attempt.run_agent_attempt(
+        intent_id="intent:task",
+        capability="software.implement",
+        attempt=1,
+        workspace_root=_workspace(tmp_path),
+        task=task,
+        repo_root=REPO_ROOT,
+        config_path=config_path,
+        state_dir=tmp_path / "state",
+    )
+    assert summary["task_sha256"] == hashlib.sha256(task.encode()).hexdigest()
+    assert task not in json.dumps({k: v for k, v in summary.items() if k != "request"})
