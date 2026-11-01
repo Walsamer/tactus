@@ -14,6 +14,7 @@ from tactus.integrations.github.transport import (
     GitHubAcknowledgmentLostError,
     GitHubBaseMovedError,
     GitHubNonFastForwardPushError,
+    GitHubPermissionDeniedError,
     GitHubProtectedDestinationError,
     GitHubTransportError,
 )
@@ -55,7 +56,21 @@ class RecordingRunner:
 
     @property
     def pushed(self) -> list[list[str]]:
-        return [argv for argv, _ in self.calls if argv[:1] == ["git"]]
+        return [
+            argv
+            for argv, _ in self.calls
+            if argv[:1] == ["git"] and "push" in argv
+        ]
+
+    @property
+    def push_env(self) -> dict[str, str] | None:
+        for argv, env in self.calls:
+            if argv[:1] == ["git"] and "push" in argv:
+                return env
+        return None
+
+
+REMOTE = "git@github.com:Walsamer/tactus.git\n"
 
 
 def ok(payload: object) -> GhCommandResult:
@@ -91,6 +106,7 @@ def test_the_contract_declares_a_live_networked_transport_needing_credentialed_r
 def test_push_never_forces_and_keeps_the_token_out_of_argv() -> None:
     runner = RecordingRunner(
         {
+            "remote get-url": GhCommandResult(0, stdout=REMOTE),
             f"{REVISION}:refs/heads/{BRANCH}": GhCommandResult(0),
             f"git/ref/heads/{BRANCH}": ref(REVISION),
         }
@@ -106,17 +122,36 @@ def test_push_never_forces_and_keeps_the_token_out_of_argv() -> None:
     assert not any(argument.startswith("--force") for argument in push)
     assert push[:2] == ["git", "-c"]
     assert "credential.helper=" in push
+    assert "--no-verify" in push
     assert f"{REVISION}:refs/heads/{BRANCH}" in push
     assert TOKEN not in " ".join(push)
 
-    environment = runner.calls[0][1]
+    environment = runner.push_env
     assert environment is not None
     assert environment["GH_TOKEN"] == TOKEN
+
+
+def test_a_checkout_whose_remote_is_another_repository_is_refused() -> None:
+    runner = RecordingRunner(
+        {
+            "remote get-url": GhCommandResult(
+                0, stdout="git@github.com:someone-else/tactus.git\n"
+            ),
+        }
+    )
+    transport = make_transport(runner)
+
+    with pytest.raises(GitHubProtectedDestinationError) as error:
+        transport.ensure_branch(REPOSITORY, BRANCH, REVISION)
+
+    assert "not the authorized repository" in error.value.reason
+    assert runner.pushed == []
 
 
 def test_a_rejected_non_fast_forward_push_is_refused_never_forced() -> None:
     runner = RecordingRunner(
         {
+            "remote get-url": GhCommandResult(0, stdout=REMOTE),
             f"{REVISION}:refs/heads/{BRANCH}": GhCommandResult(
                 returncode=1,
                 stderr=(
@@ -146,6 +181,7 @@ def test_a_permission_failure_is_typed_not_retried() -> None:
 
     runner = RecordingRunner(
         {
+            "remote get-url": GhCommandResult(0, stdout=REMOTE),
             f"{REVISION}:refs/heads/{BRANCH}": GhCommandResult(
                 returncode=1,
                 stderr="remote: Permission to Walsamer/tactus.git denied to app.",
@@ -157,6 +193,31 @@ def test_a_permission_failure_is_typed_not_retried() -> None:
     with pytest.raises(GitHubPermissionDeniedError):
         transport.ensure_branch(REPOSITORY, BRANCH, REVISION)
     assert len(runner.pushed) == 1
+
+
+def test_a_ruleset_rejection_is_a_permission_story_not_a_stale_branch() -> None:
+    """A protected-branch hook rejection also prints "failed to push some refs"."""
+
+    from tactus.integrations.github.transport import GitHubBranchConflictError
+    runner = RecordingRunner(
+        {
+            "remote get-url": GhCommandResult(0, stdout=REMOTE),
+            f"{REVISION}:refs/heads/{BRANCH}": GhCommandResult(
+                returncode=1,
+                stderr=(
+                    f"! [remote rejected] {REVISION} -> {BRANCH} "
+                    "(protected branch hook declined)\n"
+                    "error: failed to push some refs to 'github.com:Walsamer/tactus.git'"
+                ),
+            ),
+        }
+    )
+    transport = make_transport(runner)
+
+    with pytest.raises(GitHubPermissionDeniedError) as error:
+        transport.ensure_branch(REPOSITORY, BRANCH, REVISION)
+
+    assert not isinstance(error.value, GitHubBranchConflictError)
 
 
 def test_publishing_onto_the_trunk_is_refused_before_any_command() -> None:

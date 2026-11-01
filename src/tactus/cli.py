@@ -125,12 +125,14 @@ def _publish(args: argparse.Namespace) -> int:
 
     from tactus.application.publish_change import publish_change
     from tactus.integrations.github.gh import GhGitHubTransport
+    from tactus.integrations.github.transport import GitHubTransportError
     from tactus.integrations.stax.source_control import load_prepared_change
     from tactus.persistence import SqliteHumanIntervention
     from tactus.publication import (
         CredentialPreflightError,
         FileTokenCredentialProvider,
         GitHubLivePublicationPort,
+        PublicationStateError,
     )
     from tactus.publication.grant_projection import GrantProjectionError
 
@@ -176,7 +178,12 @@ def _publish(args: argparse.Namespace) -> int:
         port = GitHubLivePublicationPort(
             transport, provider, state_root=args.state_root
         )
-    except (CredentialPreflightError, ValueError) as exc:
+    except (
+        CredentialPreflightError,
+        GitHubTransportError,
+        PublicationStateError,
+        ValueError,
+    ) as exc:
         return refuse(type(exc).__name__, str(exc))
 
     try:
@@ -187,7 +194,7 @@ def _publish(args: argparse.Namespace) -> int:
             destination=args.base,
             port=port,
         )
-    except (GrantProjectionError, ValueError) as exc:
+    except (GrantProjectionError, GitHubTransportError, PublicationStateError, ValueError) as exc:
         return refuse(type(exc).__name__, str(exc))
 
     print(json.dumps(result.as_dict(), indent=2, sort_keys=True))

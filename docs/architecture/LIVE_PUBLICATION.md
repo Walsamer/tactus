@@ -57,11 +57,22 @@ remote execution host) that this repository does not have.
 
 | Rule | Why |
 |---|---|
-| `GH_TOKEN` in the environment of one `gh` subprocess | `gh` prefers it over stored authentication, so an operator's `~/.config/gh` login is never used. |
+| `GH_TOKEN` in the environment of one `gh` subprocess, and of one `git push` | `gh` prefers it over stored authentication, so an operator's `~/.config/gh` login is never used. The push runs with `--no-verify` so a pre-push hook cannot inherit the token. |
 | `git -c credential.helper= -c credential.helper=…` before `push` | The empty value resets the helper list first, so an ambient keychain or credential manager cannot supply a different credential. The token is read from `GH_TOKEN` inside the helper. |
 | Never in argv | argv is world-readable in `ps`. |
 | The token file must live outside the repository | It is never committed and never inside a workspace handed to an agent. |
-| The token file's scope is checked before any publication | A provider that would publish with too broad a token is never constructible. |
+| The token's scope is checked before any publication | A provider is never constructible with a classic token or one carrying admin permission. |
+
+One limit, stated rather than papered over: the GitHub API cannot enumerate a
+**fine-grained** token's permissions. `GET /repos/{repo}` reports API-level
+permissions, in which `admin` is true only when the token holds *every*
+repository permission. A fine-grained token holding `contents: write` together
+with `administration: write` can still edit the ruleset that protects `main` and
+still reports `admin: false`. The preflight therefore catches classic tokens,
+admin-permission tokens and read-only tokens, and **the operator must grant
+exactly Contents: write and Pull requests: write and nothing else**; that part is
+not verifiable from inside this repository. The repository's ruleset is what
+actually refuses a bad write to `main`, not the token's scope.
 
 ## Two ports, one state machine
 
@@ -89,10 +100,22 @@ only programs it runs, always as an argv list, never through a shell.
 | Refusal | Error | Test |
 |---|---|---|
 | A push that is not a fast-forward | `GitHubNonFastForwardPushError` (a `GitHubBranchConflictError`) | `test_a_rejected_non_fast_forward_push_is_refused_never_forced` |
+| A ruleset or hook rejection of the push | `GitHubPermissionDeniedError` — classified **before** the non-fast-forward signatures, because git prints `failed to push some refs` after both | `test_a_ruleset_rejection_is_a_permission_story_not_a_stale_branch` |
 | A push onto the trunk or the authorized base | `GitHubProtectedDestinationError` | `test_publishing_onto_the_trunk_is_refused_before_any_command`, `test_publishing_onto_the_authorized_base_branch_is_refused` |
+| A push from a checkout whose remote is another repository | `GitHubProtectedDestinationError` | `test_a_checkout_whose_remote_is_another_repository_is_refused` |
 | A pull request against any base but the authorized one, or at any base revision but the authorized one | `GitHubProtectedDestinationError` | `test_a_pull_request_against_another_base_is_refused_before_any_command`, `test_a_pull_request_for_another_base_revision_is_refused` |
 | A pull request with the trunk as its head | `GitHubProtectedDestinationError` | `test_a_pull_request_with_the_trunk_as_head_is_refused` |
 | Publishing with no credential bound | `GitHubTransportError` | `test_an_unbound_credential_refuses_before_any_command` |
+
+The push remote is verified before the first push: `git remote get-url <remote>`
+must name the authorized `owner/name`, because `git push` writes wherever
+`origin` points while every read and the pull-request call go to the authorized
+repository. `--repository-root` must therefore be the canonical operator
+checkout, not a fork or a scratch clone.
+
+A failed *read* (401, rate limit, 5xx, network) is a `FAILED` /
+`transport_failed` result with attempt evidence, not an exception out of
+`publish()`: a live attempt must always come back as a recorded outcome.
 
 `--force` is never passed. A rejected non-fast-forward push is **the boundary
 working**, not an obstacle: it surfaces as a typed refusal, the verified revision
@@ -121,7 +144,15 @@ The binding the port enforces:
 | `repository` | canonical `owner/name` from the recorded provenance |
 | `destination` | the operator's explicit base, never inferred |
 | `scope` | the recorded grant's scope, normalized and refused when empty |
-| `grant_id`, `authority`, `issued_at`, `expires_at`, `revoked_at` | the durable `HumanGrant` |
+| `grant_id`, `issued_at`, `expires_at` | the durable `HumanGrant` |
+| `authority` | **asserted by the composition root** (`operator`), not read from the grant |
+
+`HumanGrant` records a human `actor` ("who"), not an authority ("on what
+standing"). The composition root asserts `operator`, which is the guard's
+default trusted authority, and the human is still reachable for audit through
+`grant_id` → the `human_grants` row. The guard's authority check is therefore a
+boundary on the *composition*, not a property derived from the record; nothing
+in Tactus decides whether the human was *allowed* to grant publication.
 
 A grant that has moved is refused: a different base revision is
 `CHANGE_BINDING_MISMATCH`, a moved remote base is `BASE_MOVED`, a branch at
@@ -152,8 +183,11 @@ authorized that pull request". The record never contains credential material.
 Revocation and expiry are refused **before** the reuse path, so a late retry with
 a revoked grant cannot re-publish. It also cannot read the URL back through
 `publish()`; the recovery path is `port.evidence(publication_id)`, which needs no
-grant. Every attempt — published, reused, reconciled, refused, failed — writes
-attempt evidence, so a refusal never erases implementation evidence.
+grant. Revocation is *enforced*, not recorded: a revoked grant never reaches the
+success path, so the record has no `revoked_at` field, and an audit reaches the
+revocation through `grant_id`. Every attempt — published, reused, reconciled,
+refused, failed, and a failed remote read — writes attempt evidence, so a
+refusal or a transport fault never erases implementation evidence.
 
 ## Why `gh`, and not Stax, for publication
 
@@ -241,7 +275,8 @@ The command prints redacted publication evidence as JSON and exits:
 | `REFUSED` / `protected_destination` | the transport was asked to write the trunk or an unauthorized base | a defect: the request should never have been built |
 | `FAILED` / `base_moved` | `main` advanced past the authorized revision | re-prepare against the new base; do not re-force |
 | `FAILED` / `stale_branch` | the remote review branch is at another revision | inspect the branch; a human decides, Tactus never force-updates |
-| `FAILED` / `permission_denied` | the token cannot write, or the branch is protected | check the token's scope and the destination |
+| `FAILED` / `permission_denied` | the token cannot write, or a ruleset/hook declined the push | check the token's scope and the branch protection rules |
+| `FAILED` / `transport_failed` | a read or a command failed: 401, rate limit, 5xx, network, missing `git`/`gh` | fix the credential or the environment; the attempt is recorded, nothing was mutated if it failed before the push |
 
 ## Non-goals
 
@@ -259,7 +294,7 @@ The command prints redacted publication evidence as JSON and exits:
 |---|---|
 | Grant projection | `tests/publication/test_grant_projection.py` |
 | Live transport, force and destination refusals | `tests/integrations/github/test_gh_transport.py` |
-| Port lock and credential-before-reads | `tests/publication/test_live_port_lock.py` |
+| Port lock, credential-before-reads, failed reads | `tests/publication/test_live_port_lock.py` |
 | Token provider scope preflight | `tests/publication/test_credentials.py` |
 | Composition, replay, revoked grant | `tests/application/test_publish_change.py` |
 | CLI wiring and refusals | `tests/test_cli_publish.py` |

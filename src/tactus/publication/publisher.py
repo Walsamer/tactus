@@ -1,17 +1,27 @@
-"""Durable, mocked publication port for one authorized review pull request.
+"""Durable, idempotent publication of one authorized review pull request.
 
-The port composes the Tactus-owned publication grant guard with a **fake**
-GitHub transport. It owns only publication identity, ordering and durable
-evidence; it never touches the network, a real credential store, the canonical
-checkout or an execution agent. Implementation verification and publication are
-reported as two separate statuses.
+The state machine here is shared by two ports that differ in exactly one
+reviewed way:
+
+* :class:`GitHubPublicationPort` is the **mocked** port. Its transport must be
+  non-live and non-network, enforced in the constructor, and no flag, setting or
+  environment value can change that.
+* :class:`GitHubLivePublicationPort` is the **live** port over ``git push`` and
+  ``gh api``. Its transport must be live and networked, it resolves the single
+  credential before reading, and it still never merges, never force-pushes and
+  never writes the trunk.
+
+Both keep the same rules: authorization before any effect, one credential per
+attempt, durable content-addressed identity, create/reuse/reconcile outcomes,
+separated implementation and publication statuses, and redacted evidence that
+names the grant that authorized the publication.
 
 Ordering for one authorized intent::
 
     validate implementation evidence and exact change binding
         -> validate authority/binding/scope/freshness/revocation
         -> reuse a durable publication record, or refuse a changed digest
-        -> check remote base/branch/duplicate state
+        -> read remote base/branch/duplicate state
         -> resolve exactly one opaque credential
         -> ensure one deterministic branch
         -> create (or reconcile) exactly one pull request
@@ -20,6 +30,9 @@ Ordering for one authorized intent::
 A failure after publication starts returns ``PublicationStatus.FAILED`` with
 ``ImplementationStatus.VERIFIED`` unchanged: a publication problem never
 invalidates the verified patch and never restarts agent editing.
+
+See ``docs/architecture/MOCKED_PUBLICATION.md`` and
+``docs/architecture/LIVE_PUBLICATION.md``.
 """
 
 from __future__ import annotations
@@ -411,7 +424,11 @@ class _PublicationStateMachine:
         live = contract is None or bool(getattr(contract, "live", True))
         network = contract is None or bool(getattr(contract, "network", True))
         if self._requires_live_transport:
-            if not live or not network:
+            if (
+                contract is None
+                or not bool(getattr(contract, "live", False))
+                or not bool(getattr(contract, "network", False))
+            ):
                 raise PublicationStateError(
                     "live publication requires a live, networked transport"
                 )
@@ -794,26 +811,22 @@ class _PublicationStateMachine:
             )
         return credential
 
-    def _publish_locked(
+    def _preflight_reads(
         self,
         request: PublicationRequest,
         grant: PublicationGrant,
         change: PreparedChange,
         now: datetime,
-    ) -> PublicationResult:
+    ) -> PublicationResult | None:
+        """Read the remote facts a publication depends on, before any mutation.
+
+        Returns a finished result when those facts already decide the outcome (a
+        moved base, a stale branch, an existing pull request to reconcile), and
+        ``None`` when publication may proceed. Transport failures propagate so
+        the caller records them as a failed attempt rather than crashing.
+        """
+
         repository = request.repository
-
-        # A live transport cannot read a private repository without the
-        # credential, so a live contract resolves and binds the one credential
-        # *before* any read. A fake needs no credential to read, so it keeps the
-        # stricter order and resolves only once a publication is certain.
-        resolved: PublicationCredential | PublicationResult | None = None
-        if self._transport.contract.reads_require_credential:
-            resolved = self._resolve_credential(request, grant, change, now)
-            if isinstance(resolved, PublicationResult):
-                return resolved
-            self._transport.bind_credential(resolved)
-
         base = self._transport.base_revision(repository, request.destination)
         if base is None:
             return self._fail(
@@ -915,6 +928,46 @@ class _PublicationStateMachine:
                     ),
                 )
             )
+        return None
+
+    def _publish_locked(
+        self,
+        request: PublicationRequest,
+        grant: PublicationGrant,
+        change: PreparedChange,
+        now: datetime,
+    ) -> PublicationResult:
+        repository = request.repository
+
+        # A live transport cannot read a private repository without the
+        # credential, so a live contract resolves and binds the one credential
+        # *before* any read. A fake needs no credential to read, so it keeps the
+        # stricter order and resolves only once a publication is certain.
+        resolved: PublicationCredential | PublicationResult | None = None
+        if self._transport.contract.reads_require_credential:
+            resolved = self._resolve_credential(request, grant, change, now)
+            if isinstance(resolved, PublicationResult):
+                return resolved
+            self._transport.bind_credential(resolved)
+
+        try:
+            preflight_failure = self._preflight_reads(request, grant, change, now)
+        except GitHubTransportError as exc:
+            # A live read can fail (401, rate limit, 5xx, network). That is a
+            # failed attempt, not a crash: it must come back as a result and be
+            # recorded as evidence like every other outcome.
+            return self._fail(
+                self._result(
+                    request,
+                    grant,
+                    change,
+                    PublicationStatus.FAILED,
+                    error_code=PublicationErrorCode.TRANSPORT_FAILED,
+                    reason=f"publication transport read failed ({type(exc).__name__})",
+                )
+            )
+        if preflight_failure is not None:
+            return preflight_failure
 
         if not isinstance(resolved, PublicationCredential):
             resolved = self._resolve_credential(request, grant, change, now)

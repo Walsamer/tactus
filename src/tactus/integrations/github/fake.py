@@ -57,7 +57,6 @@ __all__ = [
 ]
 
 from .transport import GitHubTransport  # noqa: F401  (re-exported; see __all__)
-
 FAKE_GITHUB_CONTRACT_ID = "tactus.integrations.github.fake/v1"
 FAKE_GITHUB_VERSION = "1.0.0"
 

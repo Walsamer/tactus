@@ -40,6 +40,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import quote
 
 from .transport import (
     GitHubAcknowledgmentLostError,
@@ -81,7 +82,7 @@ _MARKER_RE = re.compile(r"Tactus publication marker:\s*(pub-[0-9a-f]{32})")
 _REVISION_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 #: A credential helper for one `git push` that reads the token from the child
-#: environment. It resets any ambient helper first (see ``_push_argv``), so an
+#: environment. It resets any ambient helper first (see ``ensure_branch``), so an
 #: operator's keychain or credential-manager entry cannot be used instead of the
 #: narrow publication token.
 _CREDENTIAL_HELPER = (
@@ -89,11 +90,14 @@ _CREDENTIAL_HELPER = (
     'echo "password=${GH_TOKEN}"; }; f'
 )
 
+#: Signatures of a rejected non-fast-forward push. Deliberately narrow: the
+#: generic "failed to push some refs" that also follows a ruleset or hook
+#: rejection is *not* here, because such a rejection is a permission story, not
+#: a stale branch.
 _NON_FAST_FORWARD_MARKERS = (
-    "non-fast-forward",
-    "fetch first",
+    "(non-fast-forward)",
+    "(fetch first)",
     "[rejected]",
-    "failed to push some refs",
 )
 
 _PERMISSION_MARKERS = (
@@ -102,6 +106,8 @@ _PERMISSION_MARKERS = (
     "403",
     "must have push access",
     "protected branch",
+    "hook declined",
+    "gh006",
 )
 
 
@@ -176,6 +182,22 @@ def _last_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+_REMOTE_URL_RE = re.compile(
+    r"github\.com[:/](?P<repository>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/*$"
+)
+
+
+def _repository_from_remote(url: str) -> str:
+    """Return ``owner/name`` from a GitHub remote URL, or an empty string.
+
+    Handles ``https://github.com/owner/name(.git)``,
+    ``git@github.com:owner/name(.git)`` and ``ssh://git@github.com/owner/name``.
+    """
+
+    match = _REMOTE_URL_RE.search(url.strip())
+    return match.group("repository").casefold() if match is not None else ""
+
+
 class GhGitHubTransport:
     """One live GitHub transport, bound to one repository and one base."""
 
@@ -215,6 +237,7 @@ class GhGitHubTransport:
         self._operations: list[RemoteOperation] = []
         self._calls = 0
         self._credential: PublicationCredential | None = None
+        self._remote_verified = False
         self._contract = GitHubTransportContract(
             contract_id=GH_CONTRACT_ID,
             version=GH_VERSION,
@@ -281,12 +304,10 @@ class GhGitHubTransport:
         argv: Sequence[str],
         *,
         cwd: Path | None = None,
-        authenticated: bool = True,
     ) -> GhCommandResult:
         self._calls += 1
-        env = self._child_env() if authenticated else None
         try:
-            return self._runner(list(argv), cwd=cwd, env=env)
+            return self._runner(list(argv), cwd=cwd, env=self._child_env())
         except GhCommandError as exc:
             raise GitHubTransportError(str(exc)) from None
 
@@ -353,7 +374,8 @@ class GhGitHubTransport:
         owner = repository.split("/", 1)[0]
         query = (
             f"repos/{repository}/pulls?state=all&per_page=100"
-            f"&head={owner}:{head_branch}&base={base_branch}"
+            f"&head={quote(owner, safe='')}:{quote(head_branch, safe='')}"
+            f"&base={quote(base_branch, safe='')}"
         )
         result = self._api(query)
         if result.returncode != 0:
@@ -405,6 +427,33 @@ class GhGitHubTransport:
         if ref.casefold() in self._protected or ref == self._authorized_base_branch:
             raise GitHubProtectedDestinationError(ref, reason)
 
+    def _verify_remote(self, repository: str) -> None:
+        """Refuse to push unless this checkout's remote *is* the authorized repo.
+
+        ``git push`` writes wherever ``origin`` points, while every read and the
+        pull-request call go to the authorized ``owner/name``. Pushing a review
+        branch into a fork and then reading the authorized repository would
+        report a stale branch and leave a stray branch behind, so the two are
+        required to agree before any push happens. Verified once per transport.
+        """
+
+        if self._remote_verified:
+            return
+        result = self._run(["git", "remote", "get-url", self._remote], cwd=self._source_path)
+        if result.returncode != 0:
+            raise GitHubTransportError(
+                f"cannot resolve remote {self._remote!r} in the publication checkout: "
+                f"{_last_line(result.stderr)}"
+            )
+        url = result.stdout.strip()
+        if _repository_from_remote(url) != repository.casefold():
+            raise GitHubProtectedDestinationError(
+                repository,
+                f"the checkout's {self._remote!r} remote is {url!r}, which is not "
+                "the authorized repository",
+            )
+        self._remote_verified = True
+
     def ensure_branch(self, repository: str, branch: str, revision: str) -> str:
         repository = _require_text(repository, "repository")
         branch = _require_text(branch, "branch")
@@ -414,6 +463,7 @@ class GhGitHubTransport:
         self._refuse_protected(
             branch, "publication never writes the trunk or the authorized base"
         )
+        self._verify_remote(repository)
 
         argv = [
             "git",
@@ -422,18 +472,22 @@ class GhGitHubTransport:
             "-c",
             f"credential.helper={_CREDENTIAL_HELPER}",
             "push",
+            "--no-verify",
             self._remote,
             f"{revision}:refs/heads/{branch}",
         ]
         result = self._run(argv, cwd=self._source_path)
         if result.returncode != 0:
             detail = f"{result.stdout}\n{result.stderr}".lower()
+            # A ruleset or hook rejection is a permission story, so it is
+            # classified before the non-fast-forward signatures: the generic
+            # "failed to push some refs" follows both.
+            if any(marker in detail for marker in _PERMISSION_MARKERS):
+                raise GitHubPermissionDeniedError("ensure_branch", repository)
             if any(marker in detail for marker in _NON_FAST_FORWARD_MARKERS):
                 raise GitHubNonFastForwardPushError(
                     branch, revision, _last_line(result.stderr)
                 )
-            if any(marker in detail for marker in _PERMISSION_MARKERS):
-                raise GitHubPermissionDeniedError("ensure_branch", repository)
             raise GitHubTransportError(
                 f"git push failed: {_last_line(result.stderr)}"
             )

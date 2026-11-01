@@ -216,3 +216,28 @@ def test_a_live_port_records_the_contract_it_served(tmp_path: Path) -> None:
     assert port.contract.network
     assert port.contract.transport == "gh"
     assert port.contract.contract_id.endswith("/v1")
+
+
+def test_a_failed_read_is_a_recorded_result_not_an_exception(tmp_path: Path) -> None:
+    """A live read can fail (401, rate limit, 5xx). That must not crash or vanish."""
+
+    from tactus.integrations.github.transport import GitHubTransportError
+
+    class FailingReadTransport(CallOrderingTransport):
+        def base_revision(self, repository: str, branch: str) -> str | None:
+            raise GitHubTransportError("gh: Bad credentials (HTTP 401)")
+
+    transport = FailingReadTransport(reads_require_credential=True)
+    credentials = CountingProvider()
+    port = GitHubLivePublicationPort(transport, credentials, state_root=tmp_path)
+
+    result = port.publish(make_request(), make_grant(), make_change(), at=NOW)
+
+    assert result.publication_status is PublicationStatus.FAILED
+    assert result.error_code == "transport_failed"
+    assert result.implementation_verified
+    attempts = list(
+        (tmp_path / ".tactus" / "publications" / "attempts").glob("*.json")
+    )
+    assert len(attempts) == 1
+    assert port.evidence(result.publication_id) is None
