@@ -791,7 +791,7 @@ def test_a_surviving_marker_keeps_the_workspace_owned(tmp_path):
 
         # A restart must refuse: the marker it recorded is still in the process
         # table, so the previous attempt is unresolved, not recovered.
-        with pytest.raises(RuntimeRecoveryRequired, match="marker"):
+        with pytest.raises(RuntimeRecoveryRequired, match="still alive"):
             _containment_supervisor(tmp_path, "success").run(
                 _request(attempt_id="attempt-2")
             )

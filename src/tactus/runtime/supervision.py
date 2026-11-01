@@ -1190,7 +1190,7 @@ class RuntimeSupervisor:
                 self._mark(
                     record,
                     PHASE_UNRESOLVED,
-                    reason="processes still carry the attempt marker",
+                    reason="processes belonging to the attempt are still alive",
                     extra={"survivors": [item.as_dict() for item in survivors]},
                 )
                 self._audit(
@@ -1207,7 +1207,7 @@ class RuntimeSupervisor:
                     previous_phase=phase,
                     phase=PHASE_UNRESOLVED,
                     requires_operator=True,
-                    reason="processes still carry the attempt marker",
+                    reason="processes belonging to the attempt are still alive",
                 )
 
         if pgid is None:

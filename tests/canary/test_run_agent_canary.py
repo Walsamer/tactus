@@ -365,3 +365,40 @@ def test_dry_run_skips_the_model_call_and_records_the_matrix(
     }
     assert evidence["pin"]["egress"]["mode"] == "open"
     assert evidence["staging"]["artifacts"][0]["sha256"] == evidence["pin"]["artifacts"][0]["sha256"]
+
+
+def test_the_survivor_sweep_accepts_a_workspace_root(tmp_path):
+    """Regression: the real-run path once passed the workspace object, not its path."""
+    module = _load_command()
+    root = tmp_path / "repo"
+    attempt_dir = tmp_path / "state" / "attempts" / "a1"
+    for directory in (root, attempt_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    (root / "src").mkdir(exist_ok=True)
+
+    result = module._survivor_sweep("marker-not-present", root, attempt_dir)
+
+    assert isinstance(result, dict)
+    assert result["verified"] is True
+    assert result["clear"] is True
+    assert result["checks"]["workspace_holders"] in (True, False)
+
+
+def test_the_survivor_sweep_finds_a_helper_holding_the_workspace(tmp_path):
+    """A leftover helper whose environment is invisible is found as a holder."""
+    import subprocess
+
+    module = _load_command()
+    root = tmp_path / "repo"
+    attempt_dir = tmp_path / "state" / "attempts" / "a1"
+    for directory in (root, attempt_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    helper = subprocess.Popen(["/bin/sh", "-c", "sleep 20"], cwd=str(root))
+    try:
+        result = module._survivor_sweep("marker-not-present", root, attempt_dir)
+        assert result["verified"] is True
+        assert result["clear"] is False
+        assert any(item["matched_by"] == "workspace-holder" for item in result["processes"])
+    finally:
+        helper.kill()
+        helper.wait(timeout=10)

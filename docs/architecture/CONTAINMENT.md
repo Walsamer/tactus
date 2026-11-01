@@ -187,8 +187,12 @@ live in the pin file, and a mismatch is a refusal, never a warning.
   environment: a detached helper normally inherits the workspace as its cwd and is
   caught there (`test_runtime_supervision.py::test_a_survivor_is_found_even_when_its_environment_is_invisible`).
   A survivor that neither holds those paths nor exposes its environment is not
-  detectable; that is the honest limit, and it is why an unavailable check
-  (`unverifiable`) keeps the lock instead of being read as clear.
+  detectable, and the code says so rather than pretending otherwise. Note what
+  that permits: such a process holds no handle *between* writes, so it can still
+  write into the workspace by absolute path after the lock has been handed over.
+  It is why an unavailable check (`unverifiable`) keeps the lock instead of being
+  read as clear, and why the workspace is disposable evidence rather than a
+  trusted store.
 * **`workspace-diff` needs git.** The mode stages the workspace and diffs against
   the revision recorded before the child spawned, so a run that stages or commits
   its own work is still accounted for; a workspace that is not a git checkout is

@@ -1799,7 +1799,7 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
         _write_json(supervisor_path, attempt.as_dict())
         survivors = _survivor_sweep(
             str(attempt.containment.get("attempt_marker", "")),
-            workspace,
+            workspace.root,
             Path(attempt.attempt_dir),
         )
         patch = collect_patch(workspace=workspace, allowed=contained, run_dir=run_dir)
