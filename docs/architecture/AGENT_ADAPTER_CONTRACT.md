@@ -52,6 +52,11 @@ code (`src/tactus/runtime/descriptor.py`). The descriptor carries:
   which is executed *through* the pinned launcher inside the containment
   self-test rather than outside it;
 * the environment variable **names** the attempt may receive;
+* the **result contract** — `agent-artifacts` (the runtime writes `result.json`
+  and `patch.diff`) or `workspace-diff` (it writes neither: the supervisor takes
+  the changed paths and the patch from the workspace, so a general-purpose CLI is
+  accounted for by what it actually changed). The patch is always the
+  supervisor's own bounded diff, never the agent's prose;
 * next to it, a **containment policy** — launcher, denied roots, egress mode,
   recorded allowances — that names no runtime either.
 
@@ -69,6 +74,12 @@ The data shape is tested on its own:
 `…::test_a_profile_placeholder_requires_a_launcher`,
 `…::test_prompt_placeholder_and_stdin_source`,
 `…::test_env_allowlist_declares_names_only`.
+
+The result contract is tested against a runtime that edits the workspace and
+writes no artifacts at all:
+`tests/runtime/test_runtime_supervision.py::test_workspace_diff_contract_needs_no_agent_artifacts`,
+`…::test_workspace_diff_contract_rejects_a_path_outside_the_scope`,
+`…::test_workspace_diff_contract_requires_a_provider`.
 
 ## Contract (version `1.1.0`, id `tactus.coding-agent.adapter/v1`)
 

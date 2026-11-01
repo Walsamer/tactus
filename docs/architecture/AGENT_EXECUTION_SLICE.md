@@ -132,7 +132,8 @@ the pinned revision rather than against whatever is installed in the venv.
 |---|---|
 | `integrations/dagster/agent_attempt.py` | Dagster-free: load the operator runtime pin, verify the executable digest, supervise one attempt, re-check patch evidence, write the durable attempt account next to the artifacts. |
 | `integrations/dagster/agent_location.py` | Dagster: job `software_agent_job` with `prepare_op` → `execute_op` → `verify_op`, resource `SoftwareAgentSettings`. Fails closed without `TACTUS_AGENT_WORKSPACE_ROOT`; no retry policy and `allow_retries=False`, so an agent is never silently re-run. |
-| `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, allowed scope, limits. It pins **no launcher and no containment policy**, so the attempt it describes runs uncontained. |
+| `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, allowed scope, limits, and — since phase 2 — optional `artifacts`, `containment`, `env_allowlist` and `stdin_from`. The shipped fake pin declares **none** of those, so the attempt it describes runs uncontained; a pin that declares a launcher gets the boundary, verified at preflight. |
+| `config/agent-runtime-canary.json` | The operator canary's pin: the Codex CLI release tree and executable by digest, the launcher by digest, denied roots, `egress: open` for that run only, the `ipc-posix-shm` allowance the runtime needs, and `OPENAI_API_KEY` by name. Run through `scripts/run-agent-canary.sh`. |
 | `scripts/run-agent-slice.sh`, `scripts/validate_agent_slice.py` | The evidence harness. |
 | `tests/integrations/dagster/test_agent_attempt.py` | Dagster-free tests: pin drift, unknown/missing pin keys, unpinned runtime refused before anything is touched, success with real workspace edit, crash, timeout, scope violation, route-capability mismatch, JSON-safe accounts. |
 
@@ -185,18 +186,17 @@ for the conformance tests).
 
 1. **No real coding agent.** `runtime_kind: fake-canary`; the provider/model pin
    and an approved bounded canary are open (Issue #22 AC1).
-2. **Containment is not applied to this slice.** The supervisor enforces a
+2. **This slice's shipped pin is uncontained.** The supervisor enforces a
    boundary whenever the descriptor pins a launcher
-   ([`CONTAINMENT.md`](CONTAINMENT.md)); this slice's pin pins none, and the pin
-   loader here still reads the pre-phase-2 key set
-   (`integrations/dagster/agent_attempt.py:79`), so the child keeps the account's
-   filesystem and network reach and every account records
-   `isolation: "none (same OS account: no filesystem or network boundary)"` plus
-   `write_scope.verified: false` with the reason. With no workspace diff provider
-   an undeclared write is invisible, and a Git worktree does not provide any of
-   this. The workspace may not be the Tactus checkout itself. What the boundary
-   *does* refuse is proven in [`RUNTIME_SUPERVISION.md`](RUNTIME_SUPERVISION.md);
-   wiring this pin to a pinned launcher is the next step, not a claim.
+   ([`CONTAINMENT.md`](CONTAINMENT.md)) and the pin loader accepts a
+   `containment` block; `config/agent-runtime.json` declares none, so the fake
+   canary's child keeps the account's filesystem and network reach and its account
+   records `isolation: "none (same OS account: no filesystem or network
+   boundary)"`. Anything else — a workspace inside a denied root, a launcher
+   digest drift, a failing denial matrix — is refused before a child exists; what
+   the boundary *does* refuse is proven in
+   [`RUNTIME_SUPERVISION.md`](RUNTIME_SUPERVISION.md). The workspace may still not
+   be the Tactus checkout itself.
 3. **No publication.** `publication_authority: false` in every account; nothing
    pushes, opens a PR or holds a token (Issue #23).
 4. **No automatic repair.** A failed attempt is a terminal step failure; Tactus

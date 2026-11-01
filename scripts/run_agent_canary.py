@@ -314,6 +314,9 @@ class CanaryPin:
             launcher=self.launcher,
             env_allowlist=self.env_allowlist,
             stdin_from=self.stdin_from,
+            # A general-purpose CLI writes no Tactus artifacts: the attempt is
+            # accounted for by the workspace diff the supervisor computes itself.
+            result_contract="workspace-diff",
         )
 
     def model_probe_command(self, executable: Path) -> list[str]:
@@ -1799,10 +1802,9 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
             "output_truncated": attempt.output_truncated,
             "containment": dict(attempt.containment),
             "note": (
-                "supervisor_status follows the Tactus agent artifact contract "
-                "(result.json plus patch.diff); a pinned general-purpose CLI does not "
-                "write those, so this canary judges the attempt by its process account "
-                "and by the git-observed patch instead of by that status."
+                "the attempt is accounted for by result_contract='workspace-diff': the "
+                "supervisor computes the changed paths and the patch from the workspace, "
+                "so a runtime that writes no Tactus artifacts still reports honestly."
             ),
         }
         evidence["usage"] = parse_usage(attempt.stdout, truncated=attempt.output_truncated)

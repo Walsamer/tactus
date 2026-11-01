@@ -58,6 +58,22 @@ evidence records `containment.enabled=false` with the reason
 (`src/tactus/runtime/supervision.py:719`), and the child keeps the account's
 filesystem and network reach (see "Deliberately not claimed").
 
+## Result contract (artifact shapes)
+
+Two shapes are expressible, and the descriptor picks one:
+
+| `result_contract` | The runtime writes | The supervisor takes |
+|---|---|---|
+| `agent-artifacts` (default) | `result.json` and `patch.diff` in the attempt output | the declared paths and the patch, re-read under a hard byte cap |
+| `workspace-diff` | nothing | the changed paths and the patch, from the workspace's own `git diff` |
+
+`workspace-diff` exists because a general-purpose coding CLI speaks neither the
+Tactus artifact format nor a diff on request; accounting for it by an artifact
+format it does not have would have recorded a correct run as a failure. In that
+mode the diff is the supervisor's, its headers are still checked against the
+declared paths, and its size is still capped by `max_patch_bytes`
+(`tests/runtime/test_runtime_supervision.py::test_workspace_diff_contract_needs_no_agent_artifacts`).
+
 ## Recovery contract (fail-closed)
 
 A durable `attempt.json` survives the supervising process. On the next attempt
