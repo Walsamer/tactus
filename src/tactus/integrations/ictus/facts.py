@@ -16,14 +16,15 @@ Normative sources
 
 Two counters stay categorically separate
 ----------------------------------------
-``recovery.semantic_attempts`` / ``recovery.max_semantic_attempts``
+``attempts.semantic`` / ``attempts.max_semantic``
     The semantic, decision-relevant accepted-attempt count and authorized
-    total limit. ``recovery.semantic_attempts`` includes the failed current
-    attempt during recovery; another attempt is permitted only while
-    ``count < limit``. Missing or invalid budget is a hard validation failure,
-    never an implicit zero/default unlimited budget.
+    total limit. ``attempts.semantic`` includes the failed current attempt
+    during recovery; another attempt is permitted only while ``count < limit``.
+    Missing or invalid budget is a hard validation failure, never an implicit
+    zero/default unlimited budget. These are Ictus's canonical fact keys, so
+    the snapshot crosses the boundary untranslated.
 
-``execution.step_retry_index``
+``attempts.step_retries``
     The execution backend's (Dagster) diagnostic step-retry index. It is
     execution-owned diagnostics only and can never consume or refill the
     semantic attempt allowance by substitution.

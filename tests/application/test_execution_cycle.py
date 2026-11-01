@@ -273,9 +273,9 @@ def test_recovery_decision_reopens_and_allows_a_new_semantic_attempt(tmp_path):
         work_order_revision=1,
     )
     facts = {fact["key"]: fact["value"] for fact in snapshot["facts"]}
-    assert facts["recovery.semantic_attempts"] == 1
-    assert facts["recovery.max_semantic_attempts"] == 3
-    assert facts["execution.step_retry_index"] == 7
+    assert facts["attempts.semantic"] == 1
+    assert facts["attempts.max_semantic"] == 3
+    assert facts["attempts.step_retries"] == 7
     assert facts["observation.category"] == "PROCESS_CRASH"
 
     recovery = cycle.apply_recovery_decision(

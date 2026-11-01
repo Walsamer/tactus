@@ -41,6 +41,9 @@ from tactus.domain import (
     WorkOrderState,
 )
 from tactus.integrations.ictus import (
+    FACT_ATTEMPTS_MAX_SEMANTIC,
+    FACT_ATTEMPTS_SEMANTIC,
+    FACT_ATTEMPTS_STEP_RETRIES,
     FACT_AUTHORIZATION_GRANTS,
     FACT_BACKEND_DESCRIPTORS,
     FACT_BACKEND_PREVIOUS_BACKEND,
@@ -48,15 +51,12 @@ from tactus.integrations.ictus import (
     FACT_BACKEND_STATUS,
     FACT_DOMAIN_DEPENDENCIES_SATISFIED,
     FACT_DOMAIN_SCOPE_CONSTRAINTS,
-    FACT_EXECUTION_STEP_RETRY_INDEX,
     FACT_OBSERVATION_CATEGORY,
     FACT_OBSERVATION_EVIDENCE,
     FACT_OBSERVATION_MESSAGE,
     FACT_PROFILE_VERSION,
     FACT_RECOVERY_ATTEMPT_ID,
     FACT_RECOVERY_INTENT_ID,
-    FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS,
-    FACT_RECOVERY_SEMANTIC_ATTEMPTS,
     FACT_SNAPSHOT_DIGEST,
     FACT_SNAPSHOT_PHASE,
     FACT_SOURCE_REVISION,
@@ -518,28 +518,28 @@ def test_observation_evidence_is_preserved() -> None:
 def test_canonical_semantic_count_and_limit_are_emitted() -> None:
     facts = _facts(_build_initial(semantic_budget=SemanticBudget(0, 2)))
 
-    assert facts[FACT_RECOVERY_SEMANTIC_ATTEMPTS] == 0
-    assert facts[FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS] == 2
+    assert facts[FACT_ATTEMPTS_SEMANTIC] == 0
+    assert facts[FACT_ATTEMPTS_MAX_SEMANTIC] == 2
 
 
 def test_recovery_semantic_count_includes_the_failed_current_attempt() -> None:
     facts = _facts(_build_recovery(semantic_budget=SemanticBudget(2, 3)))
 
-    assert facts[FACT_RECOVERY_SEMANTIC_ATTEMPTS] == 2
-    assert facts[FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS] == 3
+    assert facts[FACT_ATTEMPTS_SEMANTIC] == 2
+    assert facts[FACT_ATTEMPTS_MAX_SEMANTIC] == 3
 
 
 def test_step_retry_index_is_diagnostic_and_independent() -> None:
     first = _facts(_build_initial(step_retry=StepRetryDiagnostic(index=0)))
     second = _facts(_build_initial(step_retry=StepRetryDiagnostic(index=7)))
 
-    assert first[FACT_EXECUTION_STEP_RETRY_INDEX] == 0
-    assert second[FACT_EXECUTION_STEP_RETRY_INDEX] == 7
+    assert first[FACT_ATTEMPTS_STEP_RETRIES] == 0
+    assert second[FACT_ATTEMPTS_STEP_RETRIES] == 7
     # The semantic allowance is untouched by the execution-owned diagnostic.
-    assert first[FACT_RECOVERY_SEMANTIC_ATTEMPTS] == 0
-    assert second[FACT_RECOVERY_SEMANTIC_ATTEMPTS] == 0
-    assert first[FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS] == 3
-    assert second[FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS] == 3
+    assert first[FACT_ATTEMPTS_SEMANTIC] == 0
+    assert second[FACT_ATTEMPTS_SEMANTIC] == 0
+    assert first[FACT_ATTEMPTS_MAX_SEMANTIC] == 3
+    assert second[FACT_ATTEMPTS_MAX_SEMANTIC] == 3
 
 
 def test_legacy_attempt_number_fact_is_never_emitted() -> None:

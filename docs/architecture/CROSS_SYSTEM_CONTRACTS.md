@@ -33,19 +33,25 @@ Tactus supplies these facts without policy-filtering a preferred candidate list.
 Ictus decides compatibility, freshness suitability and route; deterministic
 tie-breaking is part of Ictus policy.
 
-Canonical fact semantics for the new profile:
+Canonical fact semantics for the new profile. Ictus owns the fact-key namespace
+(`crates/core/src/context.rs`), so these keys are Ictus's own and are emitted
+verbatim — there is no translation layer between the two ends:
 
-- `recovery.semantic_attempts`: number of already accepted semantic attempts;
+- `attempts.semantic`: number of already accepted semantic attempts;
   zero before the first; includes the failed current attempt during recovery.
-- `recovery.max_semantic_attempts`: authorized total accepted-attempt limit.
+- `attempts.max_semantic`: authorized total accepted-attempt limit.
   Another attempt is permitted only when count < limit. Missing/invalid budget
   is a typed validation failure, not an implicit zero/default unlimited budget.
-- `execution.step_retry_index`: execution-owned diagnostic count only. It cannot
+- `attempts.step_retries`: execution-owned diagnostic count only. It cannot
   consume or refill the semantic attempt allowance by substitution.
 
 Existing `retry.attempt`/`retry.budget` policy facts and Tactus `attempt.number`
-are legacy profile inputs. A compatibility adapter must explicitly translate
-known versions and test off-by-one behavior; never guess their meaning.
+are legacy profile inputs. Ictus still reads the `retry.*` pair as a complete
+fallback for foreign payloads; Tactus never emits them, and its profile guard
+rejects a snapshot that carries them, because one payload must not state the
+same budget in two vocabularies. A compatibility adapter must explicitly
+translate known versions and test off-by-one behavior; never guess their
+meaning.
 
 ## Validated decisions and intents
 

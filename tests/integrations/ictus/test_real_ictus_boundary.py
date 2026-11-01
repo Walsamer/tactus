@@ -16,8 +16,9 @@ Original issue-7 criteria proven here:
 * initial snapshots require no fabricated observation;
 * canonical semantic count/limit at zero, one-remaining and exhausted;
 * step-retry remains a diagnostic that cannot substitute for the semantic count;
-* the shared fixtures run through the real Ictus boundary and expose the former
-  ``retry.attempt``/``retry.budget`` mismatch.
+* the shared fixtures run through the real Ictus boundary with no compatibility
+  projection between the two ends: the canonical ``attempts.semantic`` /
+  ``attempts.max_semantic`` facts are what Ictus reads.
 """
 
 from __future__ import annotations
@@ -33,14 +34,14 @@ from typing import Any
 import pytest
 
 from tactus.integrations.ictus import (
-    FACT_EXECUTION_STEP_RETRY_INDEX,
+    FACT_ATTEMPTS_MAX_SEMANTIC,
+    FACT_ATTEMPTS_SEMANTIC,
+    FACT_ATTEMPTS_STEP_RETRIES,
     FACT_OBSERVATION_CATEGORY,
     FACT_OBSERVATION_EXECUTION_ID,
     FACT_OBSERVATION_INTENT_ID,
     FACT_RECOVERY_ATTEMPT_ID,
     FACT_RECOVERY_INTENT_ID,
-    FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS,
-    FACT_RECOVERY_SEMANTIC_ATTEMPTS,
     FACT_SNAPSHOT_DIGEST,
     FACT_SNAPSHOT_PHASE,
     FACT_WORK_ORDER_ID,
@@ -50,7 +51,6 @@ from tactus.integrations.ictus import (
     StepRetryDiagnostic,
     build_state_snapshot,
     compute_snapshot_digest,
-    to_ictus_legacy_boundary_payload,
     validate_snapshot_profile,
 )
 from tactus.integrations.ictus.facts import (
@@ -76,24 +76,35 @@ def _facts(payload: dict[str, Any]) -> dict[str, Any]:
     return {fact["key"]: fact["value"] for fact in payload["facts"]}
 
 
-def _with_budget(payload: dict[str, Any], attempts: int, limit: int) -> dict[str, Any]:
-    """Return a profile-valid copy with the canonical budget replaced."""
+def _resealed(payload: dict[str, Any]) -> dict[str, Any]:
+    """Recompute ``snapshot.digest`` so a payload's only defect is the one under test.
+
+    Without this a negative test can pass on the digest mismatch instead of the
+    rule it names, and would keep passing after that rule was deleted.
+    """
 
     facts = [dict(fact) for fact in payload["facts"]]
-    for fact in facts:
-        if fact["key"] == FACT_RECOVERY_SEMANTIC_ATTEMPTS:
-            fact["value"] = attempts
-        elif fact["key"] == FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS:
-            fact["value"] = limit
     body = dict(payload)
     body["facts"] = [fact for fact in facts if fact["key"] != FACT_SNAPSHOT_DIGEST]
     digest = compute_snapshot_digest(body)
     for fact in facts:
         if fact["key"] == FACT_SNAPSHOT_DIGEST:
             fact["value"] = digest
-    updated = dict(payload)
-    updated["facts"] = facts
-    return updated
+    return {**payload, "facts": facts}
+
+
+def _with_budget(payload: dict[str, Any], attempts: int, limit: int) -> dict[str, Any]:
+    """Return a profile-valid copy with the canonical budget replaced."""
+
+    facts = [
+        {**fact, "value": attempts}
+        if fact["key"] == FACT_ATTEMPTS_SEMANTIC
+        else {**fact, "value": limit}
+        if fact["key"] == FACT_ATTEMPTS_MAX_SEMANTIC
+        else fact
+        for fact in payload["facts"]
+    ]
+    return _resealed({**payload, "facts": facts})
 
 
 def _git_status(root: Path) -> str:
@@ -165,7 +176,7 @@ def test_initial_fixture_has_no_fabricated_failure(ictus_boundary: conformance.I
     assert _facts(payload)[FACT_SNAPSHOT_PHASE] == "INITIAL"
     assert FACT_OBSERVATION_CATEGORY not in _facts(payload)
 
-    outcome = ictus_boundary.decide(to_ictus_legacy_boundary_payload(payload))
+    outcome = ictus_boundary.decide(payload)
 
     # The real boundary accepted and decided on the observation-free context.
     assert outcome.returncode in {0, 3}
@@ -202,7 +213,7 @@ def test_shared_golden_fixtures_run_through_real_boundary(
     payload = json.loads((pf.DATA_DIR / name).read_text(encoding="utf-8"))
     validate_snapshot_profile(payload)
 
-    outcome = ictus_boundary.decide(to_ictus_legacy_boundary_payload(payload))
+    outcome = ictus_boundary.decide(payload)
 
     assert outcome.proposal_decision == decision
 
@@ -224,7 +235,7 @@ def test_recovery_fixture_binds_subject_intent_and_attempt(
     assert facts[FACT_RECOVERY_ATTEMPT_ID] == "attempt-0001"
     assert facts[FACT_OBSERVATION_EXECUTION_ID] == "exec-0001"
 
-    outcome = ictus_boundary.decide(to_ictus_legacy_boundary_payload(payload))
+    outcome = ictus_boundary.decide(payload)
 
     assert outcome.proposal_decision == "REEXECUTE"
     assert outcome.policy_decision_kind == "ALLOW"
@@ -275,7 +286,7 @@ def test_canonical_budget_matrix_through_real_boundary(
     payload = _with_budget(pf.build_recovery_snapshot(), attempts, limit)
     validate_snapshot_profile(payload)
 
-    outcome = ictus_boundary.decide(to_ictus_legacy_boundary_payload(payload))
+    outcome = ictus_boundary.decide(payload)
 
     assert outcome.proposal_decision == expected
     assert outcome.policy_decision_kind == "ALLOW"
@@ -301,127 +312,128 @@ def test_step_retry_is_diagnostic_only(
 ) -> None:
     payload = _with_budget(pf.build_recovery_snapshot(), attempts, limit)
     for fact in payload["facts"]:
-        if fact["key"] == FACT_EXECUTION_STEP_RETRY_INDEX:
+        if fact["key"] == FACT_ATTEMPTS_STEP_RETRIES:
             fact["value"] = step_retry_index
 
-    outcome = ictus_boundary.decide(to_ictus_legacy_boundary_payload(payload))
+    outcome = ictus_boundary.decide(payload)
 
     # The execution-owned step-retry index never changes the semantic verdict.
     assert outcome.proposal_decision == expected
 
 
-# -- fail-closed projection ------------------------------------------------
+# -- the profile guard -----------------------------------------------------
 
 
 @pytest.mark.parametrize("bad_value", [True, False, -1, "2", 1.5, None])
 @pytest.mark.parametrize(
     "key",
-    [FACT_RECOVERY_SEMANTIC_ATTEMPTS, FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS],
+    [FACT_ATTEMPTS_SEMANTIC, FACT_ATTEMPTS_MAX_SEMANTIC],
 )
-def test_projection_rejects_missing_bool_negative_values(
-    key: str, bad_value: object
-) -> None:
-    payload = pf.build_recovery_snapshot()
-    payload["facts"] = [
-        {"key": fact["key"], "value": bad_value} if fact["key"] == key else fact
-        for fact in payload["facts"]
-    ]
+def test_profile_rejects_tampered_budget_values(key: str, bad_value: object) -> None:
+    payload = _resealed(
+        {
+            **pf.build_recovery_snapshot(),
+            "facts": [
+                {"key": fact["key"], "value": bad_value} if fact["key"] == key else fact
+                for fact in pf.build_recovery_snapshot()["facts"]
+            ],
+        }
+    )
 
     with pytest.raises(StateSnapshotContractError):
-        to_ictus_legacy_boundary_payload(payload)
+        validate_snapshot_profile(payload)
 
 
-def test_projection_rejects_missing_canonical_budget() -> None:
-    payload = pf.build_recovery_snapshot()
-    payload["facts"] = [
-        fact
-        for fact in payload["facts"]
-        if fact["key"] != FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS
-    ]
+def test_profile_rejects_a_missing_canonical_budget() -> None:
+    snapshot = pf.build_recovery_snapshot()
+    payload = _resealed(
+        {
+            **snapshot,
+            "facts": [
+                fact
+                for fact in snapshot["facts"]
+                if fact["key"] != FACT_ATTEMPTS_MAX_SEMANTIC
+            ],
+        }
+    )
 
     with pytest.raises(StateSnapshotContractError):
-        to_ictus_legacy_boundary_payload(payload)
+        validate_snapshot_profile(payload)
 
 
-def test_projection_rejects_inconsistent_budget() -> None:
+def test_profile_rejects_an_inconsistent_budget() -> None:
     payload = _with_budget(pf.build_recovery_snapshot(), 4, 3)
 
     with pytest.raises(StateSnapshotContractError):
-        to_ictus_legacy_boundary_payload(payload)
+        validate_snapshot_profile(payload)
 
 
-def test_projection_rejects_an_existing_legacy_fact() -> None:
-    payload = pf.build_recovery_snapshot()
+def test_profile_rejects_a_superseded_legacy_budget_fact() -> None:
+    """One budget, one vocabulary: the profile refuses a second statement of it."""
+
+    payload = _with_budget(pf.build_recovery_snapshot(), 1, 3)
     payload["facts"] = [
         *payload["facts"],
         {"key": LEGACY_FACT_RETRY_ATTEMPT, "value": 1},
+        {"key": LEGACY_FACT_RETRY_BUDGET, "value": 3},
     ]
 
     with pytest.raises(StateSnapshotContractError):
-        to_ictus_legacy_boundary_payload(payload)
+        validate_snapshot_profile(payload)
 
 
-def test_projection_is_additive_and_preserves_canonical_body() -> None:
-    payload = pf.build_recovery_snapshot()
-    projected = to_ictus_legacy_boundary_payload(payload)
-    projected_facts = _facts(projected)
-
-    assert projected_facts[LEGACY_FACT_RETRY_ATTEMPT] == 1
-    assert projected_facts[LEGACY_FACT_RETRY_BUDGET] == 3
-    assert _facts(payload) == {
-        key: value for key, value in projected_facts.items()
-        if key not in {LEGACY_FACT_RETRY_ATTEMPT, LEGACY_FACT_RETRY_BUDGET}
-    }
-    assert projected_facts[FACT_SNAPSHOT_DIGEST] == _facts(payload)[FACT_SNAPSHOT_DIGEST]
+# -- the canonical budget the real boundary reads --------------------------
 
 
-# -- the former retry.attempt/retry.budget mismatch, through real Ictus ----
-
-
-def test_former_missing_budget_mismatch_is_exposed_by_real_boundary(
+def test_canonical_only_budget_is_decided_by_the_real_boundary(
     ictus_boundary: conformance.IctusBoundary,
 ) -> None:
-    """Canonical-only facts leave Ictus defaulting retry.* to 0/0."""
+    """The adapter's canonical facts alone decide; nothing is projected for Ictus."""
 
-    payload = _with_budget(pf.build_recovery_snapshot(), 1, 3)
+    within = _with_budget(pf.build_recovery_snapshot(), 1, 3)
+    validate_snapshot_profile(within)
+    facts = _facts(within)
+    assert LEGACY_FACT_RETRY_ATTEMPT not in facts
+    assert LEGACY_FACT_RETRY_BUDGET not in facts
 
-    # Real boundary reading only the canonical facts: legacy retry.* default 0/0.
-    unprojected = ictus_boundary.decide(payload)
-    assert unprojected.proposal_decision == "ESCALATE"
-    # Ictus 86816d6 (GH-5) fails closed on missing semantic-accounting fields
-    # instead of defaulting legacy retry.* to 0/0.
-    assert "missing required field: attempts.semantic / attempts.max_semantic" in unprojected.reason
-
-    # The explicit compatibility projection repairs it against the same binary.
-    projected = ictus_boundary.decide(to_ictus_legacy_boundary_payload(payload))
-    assert projected.proposal_decision == "REEXECUTE"
-    assert "re-executable WorkerTimeout within the semantic attempt budget" in projected.reason
-
-
-def test_former_step_retry_substitution_mismatch_is_exposed_by_real_boundary(
-    ictus_boundary: conformance.IctusBoundary,
-) -> None:
-    """Substituting the step-retry index for the semantic count wrongly permits."""
+    decided = ictus_boundary.decide(within)
+    assert decided.proposal_decision == "REEXECUTE"
+    assert "re-executable WorkerTimeout within the semantic attempt budget" in decided.reason
 
     exhausted = _with_budget(pf.build_recovery_snapshot(), 3, 3)
-    step_retry_index = _facts(exhausted)[FACT_EXECUTION_STEP_RETRY_INDEX]
-    assert step_retry_index == 2
+    validate_snapshot_profile(exhausted)
 
-    # Legacy substitution: retry.attempt <- step-retry index (2) with budget 3.
-    substituted = dict(exhausted)
-    substituted["facts"] = [
-        *exhausted["facts"],
-        {"key": LEGACY_FACT_RETRY_ATTEMPT, "value": step_retry_index},
-        {"key": LEGACY_FACT_RETRY_BUDGET, "value": 3},
-    ]
-    wrong = ictus_boundary.decide(substituted)
-    assert wrong.proposal_decision == "REEXECUTE"
+    stop = ictus_boundary.decide(exhausted)
+    assert stop.proposal_decision == "ESCALATE"
+    assert "exhausted semantic attempt budget (3 of 3)" in stop.reason
 
-    # The canonical projection keeps the step retry diagnostic: exhausted stays
-    # exhausted.
-    right = ictus_boundary.decide(to_ictus_legacy_boundary_payload(exhausted))
-    assert right.proposal_decision == "ESCALATE"
-    assert "exhausted semantic attempt budget (3 of 3)" in right.reason
+
+def test_a_legacy_pair_cannot_override_the_canonical_budget(
+    ictus_boundary: conformance.IctusBoundary,
+) -> None:
+    """A payload stating the budget twice must not change the verdict.
+
+    Our profile guard refuses such a payload outright, so it never leaves
+    Tactus. Should one ever reach the boundary, Ictus reads the canonical keys:
+    an exhausted snapshot stays exhausted even beside a permissive legacy pair.
+    """
+
+    exhausted = _with_budget(pf.build_recovery_snapshot(), 3, 3)
+    hostile = {
+        **exhausted,
+        "facts": [
+            *exhausted["facts"],
+            {"key": LEGACY_FACT_RETRY_ATTEMPT, "value": 0},
+            {"key": LEGACY_FACT_RETRY_BUDGET, "value": 9},
+        ],
+    }
+
+    with pytest.raises(StateSnapshotContractError):
+        validate_snapshot_profile(hostile)
+
+    decided = ictus_boundary.decide(hostile)
+    assert decided.proposal_decision == "ESCALATE"
+    assert "exhausted semantic attempt budget (3 of 3)" in decided.reason
 
 
 # -- disposable state ------------------------------------------------------
@@ -436,9 +448,7 @@ def test_conformance_does_not_dirty_the_ictus_checkout() -> None:
     root = conformance.resolve_ictus_root()
     before = _git_status(root)
     boundary = conformance.load_boundary(root)
-    boundary.decide(
-        to_ictus_legacy_boundary_payload(pf.build_recovery_snapshot())
-    )
+    boundary.decide(pf.build_recovery_snapshot())
     assert _git_status(root) == before
 
 
