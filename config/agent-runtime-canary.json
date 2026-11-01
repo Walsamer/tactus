@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "runtime_id": "codex-cli-0.162.1",
+  "runtime_kind": "model-provider-canary",
+  "adapter": "process.exec@1",
+  "purpose": "Operator-owned pin for the one real-runtime canary (Issue #22 phase 2): one small deterministic edit by a pinned Codex CLI inside the Tactus containment boundary, with an open egress window, and machine-checkable evidence that the boundary held. Run it with scripts/run-agent-canary.sh --dry-run first; nothing here decides anything.",
+  "artifacts": [
+    {
+      "path": "/Users/samueleder/.codex/packages/standalone/releases/0.162.1-aarch64-apple-darwin",
+      "kind": "tree",
+      "role": "runtime",
+      "digest_order": "path-sorted",
+      "file_count": 42,
+      "sha256": "d0192d2b8a40d197e3f9b519105cc8a9362d2a18470ddf6bece0af6015b514a9",
+      "entrypoint": "bin/codex"
+    }
+  ],
+  "launcher": {
+    "path": "/usr/bin/sandbox-exec",
+    "argv_prefix": ["/usr/bin/sandbox-exec", "-f", "{profile}"],
+    "sha256": "58839ef01b4eef8aac0d2aa8f9d1c074ae45aafe3533965b030672450064acc8"
+  },
+  "executable": "/Users/samueleder/.codex/packages/standalone/releases/0.162.1-aarch64-apple-darwin/bin/codex",
+  "executable_sha256": "74c6a6d263f40d65f99c27a815275f5b4ed0bcc2baecc396b4cf3255498bdfc0",
+  "argv": [
+    "{executable}",
+    "exec",
+    "--json",
+    "--ephemeral",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--model",
+    "{model}",
+    "{request}"
+  ],
+  "preflight_argv": ["{executable}", "--version"],
+  "expected_version_token": "codex-cli 0.162.1",
+  "model": {
+    "slug": "gpt-6-luna",
+    "allowed": [
+      "codex-auto-review",
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-6-astra",
+      "gpt-6-luna",
+      "gpt-6-sol",
+      "gpt-6.1-sol",
+      "gpt-6.1-terra",
+      "gpt-reserve"
+    ],
+    "probe_argv": ["{executable}", "debug", "models"],
+    "probe_timeout_seconds": 60.0
+  },
+  "env_allowlist": ["OPENAI_API_KEY"],
+  "credential_env": "OPENAI_API_KEY",
+  "stdin_from": "prompt",
+  "allowed_scope": ["src", "tests"],
+  "containment": {
+    "egress": {"mode": "open"},
+    "allowances": ["ipc-posix-shm"],
+    "denied_roots": [
+      {
+        "path": "~",
+        "reason": "the operator's home: ambient credentials, agent configuration and keys",
+        "snapshot_depth": 1
+      },
+      {
+        "path": "~/.ssh",
+        "reason": "ssh private keys and known hosts"
+      },
+      {
+        "path": "~/.codex",
+        "reason": "the agent runtime's own auth.json, session and history material"
+      },
+      {
+        "path": "~/Library/Keychains",
+        "reason": "the macOS keychain stores"
+      },
+      {
+        "path": "/Volumes",
+        "reason": "other mounted volumes",
+        "snapshot": false
+      }
+    ]
+  },
+  "limits": {
+    "timeout_seconds": 600.0,
+    "max_output_bytes": 4000000,
+    "max_patch_bytes": 200000,
+    "max_result_bytes": 65536,
+    "max_changed_paths": 20,
+    "termination_grace_seconds": 10.0
+  }
+}
