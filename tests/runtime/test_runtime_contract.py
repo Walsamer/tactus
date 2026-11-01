@@ -20,6 +20,7 @@ from tactus.runtime import (
     preflight,
     validate_changed_paths,
 )
+from tactus.runtime.containment import Launcher
 
 FAKE_AGENT = Path(__file__).with_name("fake_agent.py")
 
@@ -291,19 +292,10 @@ def test_an_artifact_without_a_digest_is_refused(tmp_path: Path):
         preflight(runtime)
 
 
-def _launcher(tmp_path: Path):
-    from tactus.runtime.containment import Launcher
-
-    import shutil
-
-    found = shutil.which("sandbox-exec")
-    if found is None:
-        pytest.skip("seatbelt launcher is not available on this host")
-    return Launcher.for_path(found)
-
-
-def test_launcher_is_pinned_and_the_probe_is_deferred_to_the_self_test(tmp_path: Path):
-    launcher = _launcher(tmp_path)
+def test_launcher_is_pinned_and_the_probe_is_deferred_to_the_self_test(
+    pinned_launcher: Launcher,
+):
+    launcher = pinned_launcher
     runtime = descriptor(launcher=launcher, expected_version_token="fake-agent 1.0.0")
     runtime = RuntimeDescriptor(
         runtime_id=runtime.runtime_id,
@@ -320,10 +312,10 @@ def test_launcher_is_pinned_and_the_probe_is_deferred_to_the_self_test(tmp_path:
     assert len(provenance.launcher_sha256) == 64
 
 
-def test_launcher_digest_drift_fails_before_anything_runs(tmp_path: Path):
-    from tactus.runtime.containment import ContainmentUnavailable, Launcher
+def test_launcher_digest_drift_fails_before_anything_runs(pinned_launcher: Launcher):
+    from tactus.runtime.containment import ContainmentUnavailable
 
-    launcher = _launcher(tmp_path)
+    launcher = pinned_launcher
     drifted = Launcher(
         path=launcher.path, argv_prefix=launcher.argv_prefix, sha256="0" * 64
     )
@@ -340,8 +332,8 @@ def test_launcher_digest_drift_fails_before_anything_runs(tmp_path: Path):
         preflight(runtime)
 
 
-def test_launcher_command_prefixes_the_pinned_runtime(tmp_path: Path):
-    launcher = _launcher(tmp_path)
+def test_launcher_command_prefixes_the_pinned_runtime(pinned_launcher: Launcher):
+    launcher = pinned_launcher
     runtime = RuntimeDescriptor(
         runtime_id="fake-agent",
         adapter="process.exec@1",
@@ -366,9 +358,9 @@ def test_a_profile_placeholder_requires_a_launcher():
         runtime = descriptor(argv=(sys.executable, "{profile}", REQUEST_PLACEHOLDER))
 
 
-def test_placeholder_without_a_value_is_refused(tmp_path: Path):
+def test_placeholder_without_a_value_is_refused(pinned_launcher: Launcher):
     runtime = descriptor()
-    launcher = _launcher(tmp_path)
+    launcher = pinned_launcher
     pinned = RuntimeDescriptor(
         runtime_id=runtime.runtime_id,
         adapter=runtime.adapter,

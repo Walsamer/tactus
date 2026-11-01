@@ -159,6 +159,25 @@ Re-recording a pin (a new macOS build changes `/usr/bin/sandbox-exec`) is an
 operator change reviewed like any other: the launcher digest and the host build
 live in the pin file, and a mismatch is a refusal, never a warning.
 
+## Where this is verified
+
+CI verifies the boundary in two places, split by where it can exist. The Linux
+job (`python (pytest + verifier)`) runs everything that needs no seatbelt —
+profile rendering from pin data, the exact write allowlist, the recorded
+allowances, the policy hash, the launcher pin and every refusal path that needs
+no child — and skips the rest with a reason naming what it could not exercise.
+The `macos (containment boundary)` job on `macos-latest` runs exactly the tests
+marked `seatbelt` and `macos_process_table`; `tests/conftest.py` states that rule
+once, and on macOS nothing is skipped, so a launcher that has disappeared fails
+the job instead of passing it. What it covers: the denial matrix against real
+children through the pinned launcher, the canary's staging and fixture driven
+through it, and both survivor checks. Outside CI's reach: the real-runtime
+canary — one model call through the pinned runtime inside the boundary — needs
+operator approval and a scoped credential and stays an operator command, and the
+host-specific posture (a workspace or `TMPDIR` inside a denied root) is exercised
+only on a developer's machine, where `./scripts/verify-goal.sh` runs the whole
+suite, both jobs' tests included.
+
 ## Not claimed
 
 * **Reads are a deny-list.** Everything is readable except the configured denied

@@ -1,9 +1,20 @@
 """Containment: the rendered boundary, and the denials proven with real children.
 
-The read-only profile tests below run real processes through ``sandbox-exec``.
-They are the reason the boundary is a claim with evidence rather than an
-assertion: a policy that does not apply, or a launcher that ignores its profile,
-fails one of these checks.
+Two kinds of test live here, split by what they actually need:
+
+* **Policy data** — the rendered profile, its exact write allowlist, the
+  recorded allowances, the policy hash, the launcher pin and every refusal path
+  that needs no child. These run on every host, because a renderer or a refusal
+  is not a platform feature.
+* **Real children** — the denial matrix, which spawns processes through
+  ``sandbox-exec``, and the marker sweep, which reads the macOS process table.
+  These carry ``seatbelt`` / ``macos_process_table`` and run only where that
+  boundary exists (``tests/conftest.py`` states the rule once).
+
+The second group is the reason the boundary is a claim with evidence rather than
+an assertion: a policy that does not apply, or a launcher that ignores its
+profile, fails one of these checks — which is why they are verified on macOS in
+CI rather than excluded from it.
 """
 
 from __future__ import annotations
@@ -33,18 +44,10 @@ from tactus.runtime.containment import (
 )
 
 SANDBOX = shutil.which("sandbox-exec")
-requires_seatbelt = pytest.mark.skipif(
-    SANDBOX is None, reason="seatbelt launcher is not available on this host"
-)
 
 
-def _launcher() -> Launcher:
-    assert SANDBOX is not None
-    return Launcher.for_path(SANDBOX)
-
-
-def _policy(**kwargs: object) -> ContainmentPolicy:
-    return ContainmentPolicy(launcher=_launcher(), **kwargs)  # type: ignore[arg-type]
+def _policy(launcher: Launcher, **kwargs: object) -> ContainmentPolicy:
+    return ContainmentPolicy(launcher=launcher, **kwargs)  # type: ignore[arg-type]
 
 
 # -- egress ----------------------------------------------------------------
@@ -84,28 +87,27 @@ def test_egress_sbpl_is_explicit_per_mode() -> None:
 # -- launcher --------------------------------------------------------------
 
 
-@requires_seatbelt
-def test_launcher_verify_returns_the_observed_digest() -> None:
-    digest = _launcher().verify()
+@pytest.mark.seatbelt
+def test_launcher_verify_returns_the_observed_digest(seatbelt_launcher: Launcher) -> None:
+    digest = seatbelt_launcher.verify()
     assert len(digest) == 64
 
 
-@requires_seatbelt
-def test_a_launcher_pinned_by_path_alone_is_refused() -> None:
+def test_a_launcher_pinned_by_path_alone_is_refused(pinned_launcher: Launcher) -> None:
     """A path-only pin can be replaced in place, which is the swap we must stop."""
-    unpinned = Launcher(path=Path(SANDBOX), argv_prefix=(SANDBOX or "", "-f", "{profile}"))
+    unpinned = Launcher(
+        path=pinned_launcher.path, argv_prefix=pinned_launcher.argv_prefix
+    )
     with pytest.raises(ContainmentUnavailable, match="no pinned digest"):
         unpinned.verify()
     with pytest.raises(ContainmentError, match="pinned by digest"):
         ContainmentPolicy(launcher=unpinned)
 
 
-@requires_seatbelt
-def test_launcher_digest_mismatch_fails_closed() -> None:
-    pinned = _launcher()
+def test_launcher_digest_mismatch_fails_closed(pinned_launcher: Launcher) -> None:
     drifted = Launcher(
-        path=pinned.path,
-        argv_prefix=pinned.argv_prefix,
+        path=pinned_launcher.path,
+        argv_prefix=pinned_launcher.argv_prefix,
         sha256="0" * 64,
     )
     with pytest.raises(ContainmentUnavailable, match="digest mismatch"):
@@ -117,8 +119,9 @@ def test_launcher_requires_an_absolute_path() -> None:
         Launcher(path=Path("sandbox-exec"), argv_prefix=("sandbox-exec",))
 
 
-def test_launcher_prefix_must_name_the_launcher_itself(tmp_path: Path) -> None:
-    launcher = Launcher(path=Path(SANDBOX or "/usr/bin/sandbox-exec"), argv_prefix=("/bin/sh",))
+def test_launcher_prefix_must_name_the_launcher_itself(pinned_launcher: Launcher) -> None:
+    """A descriptor may not verify one launcher and run another."""
+    launcher = Launcher(path=pinned_launcher.path, argv_prefix=("/bin/sh",))
     with pytest.raises(ContainmentError, match="not the pinned launcher"):
         launcher.verify()
 
@@ -144,21 +147,29 @@ def test_denied_root_requires_a_reason(tmp_path: Path) -> None:
         DeniedRoot(path=tmp_path, reason="  ")
 
 
-def test_workspace_inside_a_denied_root_is_refused(tmp_path: Path) -> None:
+def test_workspace_inside_a_denied_root_is_refused(
+    tmp_path: Path, pinned_launcher: Launcher
+) -> None:
     home = tmp_path / "home"
     workspace = home / ".ultimate" / "worktrees" / "x"
     workspace.mkdir(parents=True)
-    policy = _policy(denied_roots=(DeniedRoot(path=home, reason="operator home"),))
+    policy = _policy(
+        pinned_launcher, denied_roots=(DeniedRoot(path=home, reason="operator home"),)
+    )
     with pytest.raises(ContainmentError, match="inside the denied root"):
         policy.validate_workspace(workspace)
 
 
-def test_runtime_inside_a_denied_root_is_refused(tmp_path: Path) -> None:
+def test_runtime_inside_a_denied_root_is_refused(
+    tmp_path: Path, pinned_launcher: Launcher
+) -> None:
     home = tmp_path / "home"
     runtime = home / ".codex" / "bin" / "codex"
     runtime.parent.mkdir(parents=True)
     runtime.write_text("#!/bin/sh\n", encoding="utf-8")
-    policy = _policy(denied_roots=(DeniedRoot(path=home, reason="operator home"),))
+    policy = _policy(
+        pinned_launcher, denied_roots=(DeniedRoot(path=home, reason="operator home"),)
+    )
     with pytest.raises(ContainmentError, match="copy it outside"):
         policy.validate_readable(runtime, what="runtime")
 
@@ -166,14 +177,18 @@ def test_runtime_inside_a_denied_root_is_refused(tmp_path: Path) -> None:
 # -- rendered profile ------------------------------------------------------
 
 
-def test_profile_is_deny_by_default_with_an_exact_write_allowlist(tmp_path: Path) -> None:
+def test_profile_is_deny_by_default_with_an_exact_write_allowlist(
+    tmp_path: Path, pinned_launcher: Launcher
+) -> None:
     workspace = tmp_path / "ws"
     attempt = tmp_path / "state" / "attempt"
     workspace.mkdir(parents=True)
     attempt.mkdir(parents=True)
     denied = tmp_path / "home"
     denied.mkdir()
-    policy = _policy(denied_roots=(DeniedRoot(path=denied, reason="home"),))
+    policy = _policy(
+        pinned_launcher, denied_roots=(DeniedRoot(path=denied, reason="home"),)
+    )
     text = policy.profile_text(workspace=workspace, attempt_dir=attempt)
     assert "(deny default)" in text
     assert "(allow process-exec* process-fork)" in text
@@ -187,23 +202,29 @@ def test_profile_is_deny_by_default_with_an_exact_write_allowlist(tmp_path: Path
     assert text == policy.profile_text(workspace=workspace, attempt_dir=attempt)
 
 
-def test_profile_records_declared_allowances_verbatim(tmp_path: Path) -> None:
+def test_profile_records_declared_allowances_verbatim(
+    tmp_path: Path, pinned_launcher: Launcher
+) -> None:
     workspace = tmp_path / "ws"
     attempt = tmp_path / "attempt"
     workspace.mkdir()
     attempt.mkdir()
-    policy = _policy(allowances=("ipc-posix-shm",))
+    policy = _policy(pinned_launcher, allowances=("ipc-posix-shm",))
     text = policy.profile_text(workspace=workspace, attempt_dir=attempt)
     assert "(allow ipc-posix-shm)" in text
 
 
-def test_profile_hash_changes_when_the_policy_changes(tmp_path: Path) -> None:
+def test_profile_hash_changes_when_the_policy_changes(
+    tmp_path: Path, pinned_launcher: Launcher
+) -> None:
     workspace = tmp_path / "ws"
     attempt = tmp_path / "attempt"
     workspace.mkdir()
     attempt.mkdir()
-    denied = _policy(egress=EgressPolicy())
-    localhost = _policy(egress=EgressPolicy(mode="localhost", port=11434))
+    denied = _policy(pinned_launcher, egress=EgressPolicy())
+    localhost = _policy(
+        pinned_launcher, egress=EgressPolicy(mode="localhost", port=11434)
+    )
     assert denied.profile_sha256(
         workspace=workspace, attempt_dir=attempt
     ) != localhost.profile_sha256(workspace=workspace, attempt_dir=attempt)
@@ -244,6 +265,7 @@ def test_tree_digest_requires_a_directory(tmp_path: Path) -> None:
 # -- residual process sweep ------------------------------------------------
 
 
+@pytest.mark.macos_process_table
 def test_residual_processes_finds_a_detached_child_then_nothing() -> None:
     marker = f"containment-probe-{os.getpid()}-{int(time.time() * 1000)}"
     env = dict(os.environ)
@@ -290,13 +312,15 @@ def containment_paths(tmp_path: Path) -> tuple[Path, Path, DeniedRoot]:
     return workspace, attempt, DeniedRoot(path=denied, reason="operator home")
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_self_test_proves_every_denial(
-    containment_paths: tuple[Path, Path, DeniedRoot],
+    containment_paths: tuple[Path, Path, DeniedRoot], seatbelt_launcher: Launcher
 ) -> None:
     workspace, attempt, denied = containment_paths
     result = run_self_test(
-        _policy(denied_roots=(denied,)), workspace=workspace, attempt_dir=attempt
+        _policy(seatbelt_launcher, denied_roots=(denied,)),
+        workspace=workspace,
+        attempt_dir=attempt,
     )
     names = {check.name: check for check in result.checks}
     assert result.ok, result.as_dict()
@@ -309,7 +333,7 @@ def test_self_test_proves_every_denial(
     assert not (workspace / ".containment-write-probe").exists()
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_self_test_catches_a_launcher_that_does_not_apply_the_profile(
     containment_paths: tuple[Path, Path, DeniedRoot], tmp_path: Path
 ) -> None:
@@ -329,13 +353,17 @@ def test_self_test_catches_a_launcher_that_does_not_apply_the_profile(
     assert not by_name["read_denied_root"].ok
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_self_test_records_the_localhost_allowance_as_two_checks(
-    containment_paths: tuple[Path, Path, DeniedRoot],
+    containment_paths: tuple[Path, Path, DeniedRoot], seatbelt_launcher: Launcher
 ) -> None:
     workspace, attempt, denied = containment_paths
     result = run_self_test(
-        _policy(denied_roots=(denied,), egress=EgressPolicy(mode="localhost", port=11434)),
+        _policy(
+            seatbelt_launcher,
+            denied_roots=(denied,),
+            egress=EgressPolicy(mode="localhost", port=11434),
+        ),
         workspace=workspace,
         attempt_dir=attempt,
     )
@@ -345,13 +373,13 @@ def test_self_test_records_the_localhost_allowance_as_two_checks(
     assert by_name["connect_denied_other_port"].ok
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_self_test_runs_the_runtime_probe_through_the_launcher(
-    containment_paths: tuple[Path, Path, DeniedRoot],
+    containment_paths: tuple[Path, Path, DeniedRoot], seatbelt_launcher: Launcher
 ) -> None:
     workspace, attempt, denied = containment_paths
     result = run_self_test(
-        _policy(denied_roots=(denied,)),
+        _policy(seatbelt_launcher, denied_roots=(denied,)),
         workspace=workspace,
         attempt_dir=attempt,
         runtime_probe_argv=("/bin/echo", "probe-ok"),
@@ -361,13 +389,13 @@ def test_self_test_runs_the_runtime_probe_through_the_launcher(
     assert by_name["runtime_probe_through_launcher"].detail.strip() == "probe-ok"
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_self_test_fails_when_the_probe_cannot_run_through_the_launcher(
-    containment_paths: tuple[Path, Path, DeniedRoot],
+    containment_paths: tuple[Path, Path, DeniedRoot], seatbelt_launcher: Launcher
 ) -> None:
     workspace, attempt, denied = containment_paths
     result = run_self_test(
-        _policy(denied_roots=(denied,)),
+        _policy(seatbelt_launcher, denied_roots=(denied,)),
         workspace=workspace,
         attempt_dir=attempt,
         runtime_probe_argv=("/bin/false",),

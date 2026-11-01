@@ -22,12 +22,12 @@ import pytest
 
 from tactus.runtime import (
     REQUEST_PLACEHOLDER,
-    RuntimeSupervisionError,
     RecoveryReport,
     RuntimeDescriptor,
     RuntimeLimits,
     RuntimeRecoveryRequired,
     RuntimeRequest,
+    RuntimeSupervisionError,
     RuntimeSupervisor,
     TerminationReport,
     Workspace,
@@ -36,6 +36,7 @@ from tactus.runtime import (
     process_start_marker,
     terminate_process_group,
 )
+from tactus.runtime.containment import Launcher
 
 FAKE_AGENT = Path(__file__).with_name("fake_agent.py")
 
@@ -636,37 +637,33 @@ def test_operator_resolution_releases_the_hold_and_is_audited(tmp_path):
 
 
 # -- containment integration -------------------------------------------------
+#
+# A launcher comes from one of the fixtures in ``tests/conftest.py``:
+# ``seatbelt_launcher`` where a real child must be spawned through it, and
+# ``pinned_launcher`` (a stand-in pinned by a real digest) where the test only
+# renders policy data or proves a refusal before anything runs.
 
 
-def _containment_launcher():
-    import shutil
-
-    from tactus.runtime.containment import Launcher
-
-    found = shutil.which("sandbox-exec")
-    if found is None:
-        pytest.skip("seatbelt launcher is not available on this host")
-    return Launcher.for_path(found)
-
-
-def _containment_policy(denied_root: Path):
+def _containment_policy(launcher: Launcher, denied_root: Path):
     from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy
 
     return ContainmentPolicy(
-        launcher=_containment_launcher(),
+        launcher=launcher,
         denied_roots=(DeniedRoot(path=denied_root, reason="operator home"),),
         egress=EgressPolicy(),
     )
 
 
-def _containment_supervisor(tmp_path: Path, mode: str, *, denied_root: Path | None = None):
-    from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy, Launcher
+def _containment_supervisor(
+    tmp_path: Path, mode: str, *, launcher: Launcher, denied_root: Path | None = None
+):
+    from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy
 
     workspace = _workspace(tmp_path)
     denied = denied_root or (tmp_path / "home")
     denied.mkdir(parents=True, exist_ok=True)
     policy = ContainmentPolicy(
-        launcher=_containment_launcher(),
+        launcher=launcher,
         denied_roots=(DeniedRoot(path=denied, reason="operator home"),),
         egress=EgressPolicy(),
     )
@@ -687,8 +684,11 @@ def _containment_supervisor(tmp_path: Path, mode: str, *, denied_root: Path | No
     )
 
 
-def test_containment_is_proven_before_the_agent_runs(tmp_path):
-    supervisor = _containment_supervisor(tmp_path, "success")
+@pytest.mark.seatbelt
+def test_containment_is_proven_before_the_agent_runs(tmp_path, seatbelt_launcher):
+    supervisor = _containment_supervisor(
+        tmp_path, "success", launcher=seatbelt_launcher
+    )
     evidence = supervisor.run(_request())
 
     assert evidence.status == "success"
@@ -745,7 +745,7 @@ def test_a_boundary_that_cannot_be_proven_starts_nothing(tmp_path):
     assert record["phase"] == "settled"
 
 
-def test_a_descriptor_launcher_without_a_policy_is_refused(tmp_path):
+def test_a_descriptor_launcher_without_a_policy_is_refused(tmp_path, pinned_launcher):
     workspace = _workspace(tmp_path)
     descriptor = RuntimeDescriptor(
         runtime_id="fake-agent-contained",
@@ -754,13 +754,13 @@ def test_a_descriptor_launcher_without_a_policy_is_refused(tmp_path):
         argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
         preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
         expected_version_token="fake-agent 1.0.0",
-        launcher=_containment_launcher(),
+        launcher=pinned_launcher,
     )
     with pytest.raises(RuntimeSupervisionError, match="containment policy is required"):
         RuntimeSupervisor(descriptor, workspace, state_dir=tmp_path / "state")
 
 
-def test_a_policy_without_a_pinned_launcher_is_refused(tmp_path):
+def test_a_policy_without_a_pinned_launcher_is_refused(tmp_path, pinned_launcher):
     workspace = _workspace(tmp_path)
     denied = tmp_path / "home"
     denied.mkdir()
@@ -769,18 +769,21 @@ def test_a_policy_without_a_pinned_launcher_is_refused(tmp_path):
             _descriptor("success"),
             workspace,
             state_dir=tmp_path / "state",
-            containment=_containment_policy(denied),
+            containment=_containment_policy(pinned_launcher, denied),
         )
 
 
-def test_a_surviving_marker_keeps_the_workspace_owned(tmp_path):
+@pytest.mark.seatbelt
+def test_a_surviving_marker_keeps_the_workspace_owned(tmp_path, seatbelt_launcher):
     """A detached helper outliving its group means termination is unconfirmed.
 
     The durable protection is the record, not the file descriptor: the next writer
     is refused because a process still carries the attempt marker, and the attempt
     is marked unresolved for an explicit operator decision.
     """
-    evidence = _containment_supervisor(tmp_path, "detach").run(_request())
+    evidence = _containment_supervisor(
+        tmp_path, "detach", launcher=seatbelt_launcher
+    ).run(_request())
     survivors = list(evidence.containment.get("survivors") or [])
     try:
         assert evidence.status == "unterminated"
@@ -792,9 +795,9 @@ def test_a_surviving_marker_keeps_the_workspace_owned(tmp_path):
         # A restart must refuse: the marker it recorded is still in the process
         # table, so the previous attempt is unresolved, not recovered.
         with pytest.raises(RuntimeRecoveryRequired, match="still alive"):
-            _containment_supervisor(tmp_path, "success").run(
-                _request(attempt_id="attempt-2")
-            )
+            _containment_supervisor(
+                tmp_path, "success", launcher=seatbelt_launcher
+            ).run(_request(attempt_id="attempt-2"))
         record = json.loads((tmp_path / "state" / "attempt.json").read_text())
         assert record["phase"] == "unresolved"
         assert record["attempt_marker"]
@@ -1117,7 +1120,9 @@ def test_an_unknown_result_contract_is_refused():
 # -- the boundary that was proven must be the boundary that runs -------------
 
 
-def test_a_policy_launcher_that_differs_from_the_descriptor_is_refused(tmp_path):
+def test_a_policy_launcher_that_differs_from_the_descriptor_is_refused(
+    tmp_path, pinned_launcher
+):
     """A green matrix for one launcher must never certify another."""
     from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy, Launcher
 
@@ -1128,7 +1133,7 @@ def test_a_policy_launcher_that_differs_from_the_descriptor_is_refused(tmp_path)
     shim.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
     shim.chmod(0o755)
     policy = ContainmentPolicy(
-        launcher=_containment_launcher(),
+        launcher=pinned_launcher,
         denied_roots=(DeniedRoot(path=denied, reason="home"),),
         egress=EgressPolicy(),
     )
@@ -1147,9 +1152,11 @@ def test_a_policy_launcher_that_differs_from_the_descriptor_is_refused(tmp_path)
         )
 
 
-def test_a_state_directory_inside_the_workspace_is_refused_when_contained(tmp_path):
+def test_a_state_directory_inside_the_workspace_is_refused_when_contained(
+    tmp_path, pinned_launcher
+):
     workspace = _workspace(tmp_path)
-    policy = _containment_policy(tmp_path / "home")
+    policy = _containment_policy(pinned_launcher, tmp_path / "home")
     (tmp_path / "home").mkdir(exist_ok=True)
     descriptor = RuntimeDescriptor(
         runtime_id="fake-agent",
@@ -1169,7 +1176,10 @@ def test_a_state_directory_inside_the_workspace_is_refused_when_contained(tmp_pa
         )
 
 
-def test_an_unavailable_survivor_check_never_reads_as_clear(tmp_path, monkeypatch):
+@pytest.mark.seatbelt
+def test_an_unavailable_survivor_check_never_reads_as_clear(
+    tmp_path, monkeypatch, seatbelt_launcher
+):
     """'Nothing found' by a check that could not run is not evidence."""
     import tactus.runtime.supervision as supervision_module
 
@@ -1184,7 +1194,9 @@ def test_an_unavailable_survivor_check_never_reads_as_clear(tmp_path, monkeypatc
             supervision_module.ContainmentError("ps unavailable")
         ),
     )
-    supervisor = _containment_supervisor(tmp_path, "success")
+    supervisor = _containment_supervisor(
+        tmp_path, "success", launcher=seatbelt_launcher
+    )
     evidence = supervisor.run(_request())
 
     assert evidence.status == "unterminated"
@@ -1194,9 +1206,12 @@ def test_an_unavailable_survivor_check_never_reads_as_clear(tmp_path, monkeypatc
 
     # A later attempt must refuse rather than assume the previous one recovered.
     with pytest.raises(RuntimeRecoveryRequired, match="sweep"):
-        _containment_supervisor(tmp_path, "success").run(_request(attempt_id="attempt-2"))
+        _containment_supervisor(tmp_path, "success", launcher=seatbelt_launcher).run(
+            _request(attempt_id="attempt-2")
+        )
 
 
+@pytest.mark.macos_process_table
 def test_a_survivor_is_found_even_when_its_environment_is_invisible(tmp_path):
     """The holder check catches a platform-binary survivor the marker check misses."""
     import subprocess as sp

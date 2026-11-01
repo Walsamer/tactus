@@ -330,15 +330,7 @@ def test_fixture_agent_is_executable_and_self_reporting():
 # -- phase 2: containment, artifacts, credentials in the operator pin --------
 
 
-def _sandbox_launcher():
-    found = shutil.which("sandbox-exec")
-    if found is None:
-        pytest.skip("seatbelt launcher is not available on this host")
-    return attempt.Launcher.for_path(found)
-
-
-def _containment_block(tmp_path: Path) -> dict:
-    launcher = _sandbox_launcher()
+def _containment_block(tmp_path: Path, launcher: attempt.Launcher) -> dict:
     denied = tmp_path / "home"
     denied.mkdir(exist_ok=True)
     return {
@@ -353,9 +345,12 @@ def _containment_block(tmp_path: Path) -> dict:
     }
 
 
-def test_the_pin_can_declare_containment_and_the_account_records_it(tmp_path):
+@pytest.mark.seatbelt
+def test_the_pin_can_declare_containment_and_the_account_records_it(
+    tmp_path, seatbelt_launcher
+):
     config_path = _write_config(
-        tmp_path, _config(containment=_containment_block(tmp_path))
+        tmp_path, _config(containment=_containment_block(tmp_path, seatbelt_launcher))
     )
     summary = attempt.run_agent_attempt(
         intent_id="intent:contained",
@@ -452,8 +447,8 @@ def test_a_named_credential_reaches_the_child_by_name_only(tmp_path, monkeypatch
     assert "sk-from-environment" not in json.dumps(summary)
 
 
-def test_an_unknown_containment_key_is_refused(tmp_path):
-    block = _containment_block(tmp_path)
+def test_an_unknown_containment_key_is_refused(tmp_path, pinned_launcher):
+    block = _containment_block(tmp_path, pinned_launcher)
     block["surprise"] = True
     config_path = _write_config(tmp_path, _config(containment=block))
     with pytest.raises(attempt.AgentRuntimePinError, match="unknown keys"):
@@ -477,8 +472,8 @@ def test_the_task_is_recorded_as_a_digest_in_the_account(tmp_path):
     assert task not in json.dumps({k: v for k, v in summary.items() if k != "request"})
 
 
-def test_a_containment_launcher_without_a_digest_is_refused(tmp_path):
-    block = _containment_block(tmp_path)
+def test_a_containment_launcher_without_a_digest_is_refused(tmp_path, pinned_launcher):
+    block = _containment_block(tmp_path, pinned_launcher)
     del block["launcher"]["sha256"]
     config_path = _write_config(tmp_path, _config(containment=block))
     with pytest.raises(attempt.AgentRuntimePinError, match="pinned by digest"):

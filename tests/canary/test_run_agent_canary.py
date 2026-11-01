@@ -7,8 +7,10 @@ repository and the denial matrix — with a throwaway pinned runtime and
 ``--dry-run``.
 
 The staging, fixture and denial-matrix tests run through ``sandbox-exec``, so
-they are skipped on a host that has no seatbelt launcher (the CI image is
-Linux). The refusal and digest tests need no launcher and always run.
+they are marked ``seatbelt`` and run only where that boundary exists (on Linux
+they skip with a reason; on macOS a missing launcher fails them). The refusal and
+digest tests need no launcher to execute and always run: their pin names a
+stand-in binary pinned by its real digest.
 """
 
 from __future__ import annotations
@@ -29,10 +31,6 @@ from tactus.runtime.containment import digest_tree
 REPOSITORY = Path(__file__).resolve().parents[2]
 SCRIPT = REPOSITORY / "scripts" / "run_agent_canary.py"
 SANDBOX = shutil.which("sandbox-exec")
-
-requires_seatbelt = pytest.mark.skipif(
-    SANDBOX is None, reason="seatbelt launcher is not available on this host"
-)
 
 #: A stand-in for the pinned runtime: version, model list, and (never reached in
 #: these tests) a successful JSONL turn. ``/bin/sh`` keeps it readable inside the
@@ -65,6 +63,20 @@ def _load_command() -> ModuleType:
 command = _load_command()
 
 
+def _launcher(tmp_path: Path) -> Path:
+    """The launcher this pin names: the host's seatbelt, or a pinned stand-in.
+
+    Off macOS the launcher is only data here — the staging and refusal tests never
+    execute it, and the tests that do carry ``seatbelt`` and never run there.
+    """
+    if SANDBOX is not None:
+        return Path(SANDBOX)
+    path = tmp_path / "sandbox-exec-stand-in"
+    path.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
     """A complete, self-consistent pin for a throwaway runtime and its denials."""
     runtime = tmp_path / "runtime"
@@ -80,7 +92,7 @@ def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
     (denied / "credentials.txt").write_text("must stay unreadable\n", encoding="utf-8")
     (denied / "home").mkdir()
 
-    launcher = Path(SANDBOX) if SANDBOX is not None else Path("/usr/bin/sandbox-exec")
+    launcher = _launcher(tmp_path)
     pin = {
         "schema_version": 1,
         "runtime_id": "fake-canary-1.0.0",
@@ -252,7 +264,7 @@ def test_staging_refuses_a_digest_mismatch(
 # -- the fixture and the denial matrix -------------------------------------
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_fixture_repository_initialises_and_the_denial_matrix_holds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -323,7 +335,7 @@ def test_fixture_repository_initialises_and_the_denial_matrix_holds(
     assert denied_roots, "the pin must deny something for the matrix to be meaningful"
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_dry_run_skips_the_model_call_and_records_the_matrix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -391,6 +403,7 @@ def test_the_survivor_sweep_accepts_a_workspace_root(tmp_path):
     assert result["checks"]["workspace_holders"] in (True, False)
 
 
+@pytest.mark.macos_process_table
 def test_the_survivor_sweep_finds_a_helper_holding_the_workspace(tmp_path):
     """A leftover helper whose environment is invisible is found as a holder."""
     import subprocess
@@ -411,7 +424,7 @@ def test_the_survivor_sweep_finds_a_helper_holding_the_workspace(tmp_path):
         helper.wait(timeout=10)
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_a_workspace_inside_a_denied_root_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -433,7 +446,7 @@ def test_a_workspace_inside_a_denied_root_is_refused(
     assert code != 0
 
 
-@requires_seatbelt
+@pytest.mark.seatbelt
 def test_a_staging_root_inside_a_denied_root_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
