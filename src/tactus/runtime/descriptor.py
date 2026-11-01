@@ -38,6 +38,7 @@ __all__ = [
     "PROFILE_PLACEHOLDER",
     "PROMPT_PLACEHOLDER",
     "REQUEST_PLACEHOLDER",
+    "RESULT_CONTRACTS",
     "STDIN_SOURCES",
     "TREE_DIGEST_ORDER",
     "WILDCARD_PLACEHOLDER",
@@ -69,6 +70,13 @@ PLACEHOLDERS = (
 
 #: How the agent receives its task: nothing, or the prompt file on stdin.
 STDIN_SOURCES = ("none", "prompt")
+
+#: Where the result comes from. ``agent-artifacts`` expects the runtime to write
+#: ``result.json``/``patch.diff`` itself (the fake canary does). ``workspace-diff``
+#: expects nothing: the supervisor takes the changed paths and the patch from the
+#: workspace, so a runtime that reports in its own shape — or not at all — is
+#: still accounted for without inventing a fake artifact.
+RESULT_CONTRACTS = ("agent-artifacts", "workspace-diff")
 
 #: The only tree digest ordering this module defines. Declared in the pin so a
 #: recorded digest is reproducible rather than incidental.
@@ -207,6 +215,7 @@ class RuntimeDescriptor:
     launcher: Launcher | None = None
     env_allowlist: tuple[str, ...] = ()
     stdin_from: str = "none"
+    result_contract: str = "agent-artifacts"
 
     def __post_init__(self) -> None:
         for name in ("runtime_id", "adapter", "executable", "expected_version_token"):
@@ -245,6 +254,11 @@ class RuntimeDescriptor:
         if self.stdin_from not in STDIN_SOURCES:
             raise ValueError(
                 f"stdin_from must be one of {list(STDIN_SOURCES)}, not {self.stdin_from!r}"
+            )
+        if self.result_contract not in RESULT_CONTRACTS:
+            raise ValueError(
+                f"result_contract must be one of {list(RESULT_CONTRACTS)}, "
+                f"not {self.result_contract!r}"
             )
         object.__setattr__(self, "argv", argv)
         object.__setattr__(self, "preflight_argv", tuple(self.preflight_argv))
@@ -311,6 +325,7 @@ class RuntimeDescriptor:
             "launcher": self.launcher.as_dict() if self.launcher else None,
             "env_allowlist": list(self.env_allowlist),
             "stdin_from": self.stdin_from,
+            "result_contract": self.result_contract,
         }
 
 

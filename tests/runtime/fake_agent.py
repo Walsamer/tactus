@@ -102,6 +102,12 @@ def main(argv: list[str]) -> int:
         _write(output_dir, status="completed", changed=["src/example.py"], summary=task)
         (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
         return 0
+    if mode == "edit-only":
+        # A real runtime's shape: change the workspace, write no artifacts.
+        (Path(request["workspace"]["root"]) / "src" / "example.py").write_text(
+            "x = 2\n", encoding="utf-8"
+        )
+        return 0
     if mode == "no-result":
         return 0
     if mode == "failed":

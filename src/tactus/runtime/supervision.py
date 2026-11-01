@@ -1329,7 +1329,17 @@ class RuntimeSupervisor:
         declared contract is a violation — that distinction drives ``failed``
         versus ``invalid``. Both files are read with a hard byte cap: nothing is
         loaded and then measured.
+
+        With ``result_contract='workspace-diff'`` the runtime is expected to write
+        nothing in that shape: the changed paths and the patch are taken from the
+        workspace, so a real coding agent is accounted for by what it actually
+        changed instead of by an artifact format it does not speak.
         """
+        if self._descriptor.result_contract == "workspace-diff":
+            return self._collect_from_workspace_diff(
+                output_dir=output_dir, exit_code=exit_code
+            )
+
         result_path = output_dir / RESULT_FILE
         if not result_path.is_file():
             return (
@@ -1470,6 +1480,122 @@ class RuntimeSupervisor:
             patch_bytes,
             tuple(errors),
             bool(errors),
+        )
+
+    def _workspace_patch(self) -> tuple[bytes, dict[str, Any]]:
+        """The bounded patch the workspace itself shows (``git diff``)."""
+        limit = self._limits.max_patch_bytes
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(self._workspace.root), "diff", "--no-color", "--binary"],
+                capture_output=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeContractError(f"workspace diff unavailable: {exc}") from exc
+        if completed.returncode != 0:
+            raise RuntimeContractError(
+                "workspace diff failed: "
+                + (completed.stderr or b"").decode("utf-8", "replace").strip()[:200]
+            )
+        raw = completed.stdout or b""
+        if len(raw) > limit:
+            raise RuntimeContractError(
+                f"workspace diff is {len(raw)} bytes; the limit is {limit}"
+            )
+        return raw, {"verified": True, "source": "workspace-diff"}
+
+    def _collect_from_workspace_diff(
+        self, *, output_dir: Path, exit_code: int | None
+    ) -> tuple[
+        str,
+        str,
+        tuple[str, ...],
+        tuple[str, ...],
+        dict[str, Any],
+        str,
+        int,
+        tuple[str, ...],
+        bool,
+    ]:
+        """Account for a run whose result is the workspace, not an artifact."""
+        errors: list[str] = []
+        contract_violation = False
+        if self._workspace_paths is None:
+            raise RuntimeContractError(
+                "result_contract='workspace-diff' requires a workspace diff provider"
+            )
+        try:
+            observed = tuple(
+                normalize_changed_path(item)
+                for item in self._workspace_paths(self._workspace.root)
+            )
+        except WorkspaceScopeError as exc:
+            return (
+                "failed",
+                "",
+                (),
+                (),
+                {"verified": False, "reason": str(exc), "source": "workspace-diff"},
+                "",
+                0,
+                (f"workspace diff is unusable: {exc}",),
+                True,
+            )
+        try:
+            declared = validate_changed_paths(
+                list(observed),
+                workspace=self._workspace,
+                max_paths=self._limits.max_changed_paths,
+            )
+        except WorkspaceScopeError as exc:
+            errors.append(f"workspace changes are outside the allowed scope: {exc}")
+            contract_violation = True
+            declared = ()
+
+        patch_bytes = 0
+        patch_sha256 = ""
+        patch_paths: tuple[str, ...] = ()
+        filesystem: dict[str, Any] = {
+            "verified": True,
+            "source": "workspace-diff",
+            "paths": list(observed),
+            "mismatches": [],
+        }
+        if declared:
+            try:
+                raw, extra = self._workspace_patch()
+            except RuntimeContractError as exc:
+                errors.append(str(exc))
+                contract_violation = True
+                filesystem = {"verified": False, "reason": str(exc), "source": "workspace-diff"}
+            else:
+                filesystem.update(extra)
+                patch_bytes = len(raw)
+                patch_sha256 = hashlib.sha256(raw).hexdigest()
+                patch_paths = patch_header_paths(raw.decode("utf-8", "replace"))
+                undeclared = [path for path in patch_paths if path not in declared]
+                if undeclared:
+                    errors.append(
+                        "patch touches undeclared paths: " + ", ".join(undeclared)
+                    )
+                    contract_violation = True
+                repaired = output_dir / PATCH_FILE
+                repaired.parent.mkdir(parents=True, exist_ok=True)
+                repaired.write_bytes(raw)
+
+        status = "completed" if exit_code in (0, None) else "failed"
+        summary = ", ".join(declared) if declared else ""
+        return (
+            status,
+            summary,
+            declared,
+            patch_paths,
+            filesystem,
+            patch_sha256,
+            patch_bytes,
+            tuple(errors),
+            contract_violation,
         )
 
     def _verify_filesystem(self, declared: tuple[str, ...]) -> dict[str, Any]:

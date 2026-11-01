@@ -921,3 +921,114 @@ def test_declared_paths_are_checked_against_the_real_diff(tmp_path):
     assert evidence.filesystem["mismatches"] == ["src/stale.py"]
     assert evidence.status == "invalid"
     assert any("do not match the declared paths" in error for error in evidence.errors)
+
+
+# -- workspace-diff result contract (a real runtime writes no artifacts) -----
+
+
+def _git_workspace(tmp_path: Path) -> Path:
+    import subprocess as sp
+
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "example.py").write_text("x = 1\n", encoding="utf-8")
+    for command in (
+        ["git", "init", "-q", "."],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+    ):
+        sp.run(command, cwd=root, check=True)
+    return root
+
+
+def _workspace_diff_supervisor(tmp_path: Path, mode: str):
+    root = _git_workspace(tmp_path)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), mode, REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        result_contract="workspace-diff",
+    )
+    return RuntimeSupervisor(
+        descriptor,
+        Workspace(root=root, allowed_scope=("src",)),
+        state_dir=tmp_path / "state",
+        workspace_paths=lambda _root: ("src/example.py",),
+    ), root
+
+
+def test_workspace_diff_contract_needs_no_agent_artifacts(tmp_path):
+    """A runtime that writes no result.json is still accounted for by its diff."""
+    supervisor, root = _workspace_diff_supervisor(tmp_path, "edit-only")
+    # The fake agent writes result.json; delete it after the fact is not possible
+    # here, so instead assert the supervisor ignored it and used the workspace.
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "success"
+    assert evidence.declared_paths == ("src/example.py",)
+    assert evidence.filesystem["source"] == "workspace-diff"
+    assert evidence.patch_bytes > 0
+    assert evidence.agent_status == "completed"
+    patch = Path(evidence.attempt_dir) / "output" / "patch.diff"
+    assert patch.is_file()
+    assert hashlib.sha256(patch.read_bytes()).hexdigest() == evidence.patch_sha256
+
+
+def test_workspace_diff_contract_rejects_a_path_outside_the_scope(tmp_path):
+    root = _git_workspace(tmp_path)
+    (root / "outside.py").write_text("nope = 1\n", encoding="utf-8")
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        result_contract="workspace-diff",
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor,
+        Workspace(root=root, allowed_scope=("src",)),
+        state_dir=tmp_path / "state",
+        workspace_paths=lambda _root: ("src/example.py", "outside.py"),
+    )
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "invalid"
+    assert any("outside the allowed scope" in error for error in evidence.errors)
+
+
+def test_workspace_diff_contract_requires_a_provider(tmp_path):
+    root = _git_workspace(tmp_path)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        result_contract="workspace-diff",
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor,
+        Workspace(root=root, allowed_scope=("src",)),
+        state_dir=tmp_path / "state",
+    )
+    with pytest.raises(RuntimeSupervisionError, match="workspace diff provider"):
+        supervisor.run(_request())
+
+
+def test_an_unknown_result_contract_is_refused():
+    with pytest.raises(ValueError, match="result_contract"):
+        RuntimeDescriptor(
+            runtime_id="fake-agent",
+            adapter="process.exec@1",
+            executable=sys.executable,
+            argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+            preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+            expected_version_token="fake-agent 1.0.0",
+            result_contract="whatever",
+        )
