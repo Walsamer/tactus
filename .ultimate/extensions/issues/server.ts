@@ -159,9 +159,12 @@ async function rules(projectRoot: string): Promise<string[] | undefined> {
 function promptFor(issue: Issue, rules: readonly string[] | undefined): string {
   const start = authorized(issue.labels)
   const fleet = fleetLabels(issue.labels)
-  const gate = fleet.length
-    ? `This issue is labelled ${fleet.map((label) => `fleet:${label}`).join(' and ')}, and only fleet:ready authorizes intake in this project.`
-    : 'This issue carries no fleet: label, and only fleet:ready authorizes intake in this project.'
+  const named = fleet.map((label) => `fleet:${label}`).join(' and ')
+  const gate = !fleet.length
+    ? 'This issue carries no fleet: label, and only fleet:ready authorizes intake in this project.'
+    : fleet.includes('ready')
+      ? `This issue carries fleet:ready together with ${named.replace('fleet:ready and ', '')}, and a conflicting label withdraws the authorization fleet:ready gives in this project.`
+      : `This issue is labelled ${named}, and only fleet:ready authorizes intake in this project.`
   const ticks =
     issue.total === 0
       ? ['(this issue states no acceptance criteria; read the issue and say what done means)']

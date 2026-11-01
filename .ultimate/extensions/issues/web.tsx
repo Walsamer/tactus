@@ -69,8 +69,9 @@ function tone(label: string) {
       : value === 'p1'
         ? 'border-warning/40 text-warning'
         : 'border-border/80 text-muted-foreground'
-  // The closed set the project's domain owns: src/tactus/domain/work_source.py (`fleet:ready` authorizes intake).
-  if (prefix === 'fleet')    switch (value) {
+  // The closed set the project's domain owns: src/tactus/domain/work_source.py (READY_LABEL, CONFLICTING_LABELS).
+  if (prefix === 'fleet') {
+    switch (value) {
       case 'ready':
         return 'border-success/40 text-success'
       case 'human':
@@ -80,6 +81,7 @@ function tone(label: string) {
       default:
         return 'border-border/80 text-muted-foreground'
     }
+  }
   return 'border-border/70 text-muted-foreground/80'
 }
 
@@ -201,7 +203,7 @@ function Hand({
       title={
         start
           ? 'Hand this issue to @ultimate with its criteria and the project rules'
-          : `Hand this issue to @ultimate to assess it: ${fleet.length ? `${fleet.map((label) => `fleet:${label}`).join(' and ')} is` : 'no fleet: label is'} not authorized for intake`
+          : `Hand this issue to @ultimate to assess it: ${fleet.length ? `${fleet.map((label) => `fleet:${label}`).join(' and ')} leaves it` : 'a missing fleet: label leaves it'} not authorized for intake`
       }
       variant="ghost"
     >
