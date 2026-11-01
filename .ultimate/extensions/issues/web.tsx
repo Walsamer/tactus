@@ -12,40 +12,29 @@ import {
   defineWebExtension,
   docRef,
   errorMessage,
+  events,
   formatAgo,
+  notify,
   useAction,
   useCopy,
   useDocOf,
   useNow,
   useUltimate,
 } from '@/sdk'
-import { store } from '@/sdk/client'
+import type { Issue, Issues } from './types.ts'
 
-/** One open issue, as the `list` and `refresh` actions of `server.ts` return it. */
-type Issue = {
-  number: number
-  title: string
-  url: string
-  milestone: string | null
-  labels: string[]
-  criteria: { text: string; done: boolean }[]
-  done: number
-  total: number
-  updatedAt: string
-}
-
-/** The listing, or the setup step that keeps `gh` from reading it. */
-type Issues =
-  | { status: 'ok'; repo: string; fetchedAt: number; issues: Issue[] }
-  | { status: 'setup'; reason: string; detail?: string }
-
-/** No arguments → the open issues (`refresh` reads `gh` again); an issue number → the prompt that starts work on it. */
+/** No arguments → the open issues (`refresh` reads `gh` again); an issue number → the prompt that hands it on. */
 const ListAction = actionRef<null, Issues>('issues', 'list')
 const RefreshAction = actionRef<null, Issues>('issues', 'refresh')
 const PromptAction = actionRef<number, string>('issues', 'prompt')
 
-/** The standing agents' index on the root conversation: `ultimate` names @ultimate's conversation. */
+/**
+ * The standing agents' index on the root conversation: `ultimate` names @ultimate's conversation. Declared here
+ * rather than imported from `subagents`: a project extension cannot resolve another extension's files (`refs.ts` holds
+ * only its kind), and `subagents`' `standing` action resolves the conversation when the index does not name it yet.
+ */
 const StandingDoc = docRef<Record<string, number>>('ultimate.standing-agents')
+const StandingAction = actionRef<{ name: string }, number>('subagents', 'standing')
 
 /** The milestone's number, so M3 comes before M10; issues without one go last. */
 const milestoneOrder = (title: string | null) => {
@@ -69,6 +58,16 @@ function group(issues: readonly Issue[]) {
     }))
 }
 
+/** The issue's fleet label; `undefined` when it carries none. Only `fleet:ready` authorizes intake (see server.ts). */
+const fleetOf = (issue: Issue) =>
+  issue.labels.find((label) => label.startsWith('fleet:'))?.slice('fleet:'.length)
+
+/** Whether the project's own gate lets this issue be started, which is what the row's action says it will do. */
+const authorized = (issue: Issue) => {
+  const fleet = fleetOf(issue)
+  return fleet === undefined || fleet === 'ready'
+}
+
 /** The tone of one label: priority and fleet state carry colour, what the work is stays quiet. */
 function tone(label: string) {
   const at = label.indexOf(':')
@@ -79,6 +78,7 @@ function tone(label: string) {
       : value === 'p1'
         ? 'border-warning/40 text-warning'
         : 'border-border/80 text-muted-foreground'
+  // The closed set the project's domain owns: src/tactus/domain/work_source.py (`fleet:ready` authorizes intake).
   if (prefix === 'fleet')
     switch (value) {
       case 'ready':
@@ -133,8 +133,8 @@ function Criteria({ issue }: { issue: Issue }) {
   )
 }
 
-/** What the handing button shows: waiting while @ultimate is resolved, else start, busy, handed or copy. */
-type HandState = 'waiting' | 'idle' | 'busy' | 'handed' | 'copy'
+/** What the handing button shows: idle, working, or done. */
+type HandState = 'idle' | 'busy' | 'handed'
 
 /** One issue: its number and title, the labels that matter, its criteria and when it last moved. */
 function Row({
@@ -149,7 +149,7 @@ function Row({
   now: number
 }) {
   return (
-    <div className="group/row border-b border-border/50 px-3 py-2 last:border-b-0" data-issue={issue.number}>
+    <div className="border-b border-border/50 px-3 py-2 last:border-b-0" data-issue={issue.number}>
       <div className="flex min-w-0 items-start gap-2">
         <span className="mt-[3px] shrink-0 font-mono text-[10.5px] text-muted-foreground/60 tabular-nums">
           #{issue.number}
@@ -187,7 +187,10 @@ function Row({
   )
 }
 
-/** The click that starts the work: hand the issue to @ultimate, or copy the prompt when there is no @ultimate. */
+/**
+ * The click that removes the friction: hand the issue to @ultimate. On an issue the project's gate lets be started
+ * that says *start*; on a gated one it says *assess*, and the prompt asks @ultimate to say what has to change first.
+ */
 function Hand({
   issue,
   hand,
@@ -197,28 +200,26 @@ function Hand({
   hand: (issue: Issue) => void
   state: HandState
 }) {
-  const copying = state === 'copy'
+  const start = authorized(issue)
   return (
     <Button
       className="h-5 gap-1 px-1.5 font-mono text-[10.5px] text-muted-foreground hover:text-foreground"
-      disabled={state === 'busy' || state === 'waiting'}
+      disabled={state === 'busy'}
       onClick={() => hand(issue)}
       size="sm"
       title={
-        copying
-          ? 'Copy the prompt that starts work on this issue'
-          : 'Hand this issue to @ultimate with its criteria and the project rules'
+        start
+          ? 'Hand this issue to @ultimate with its criteria and the project rules'
+          : `Hand this issue to @ultimate to assess: ${fleetOf(issue)}, which is not authorized for intake`
       }
       variant="ghost"
     >
       {state === 'handed' ? (
         <CheckIcon className="size-3 text-success" />
-      ) : copying ? (
-        <CopyIcon className="size-3" />
       ) : (
         <PlayIcon className={cn('size-3', state === 'busy' && 'animate-pulse')} />
       )}
-      {state === 'handed' ? 'handed' : copying ? 'copy' : 'start'}
+      {state === 'handed' ? 'handed' : start ? 'start' : 'assess'}
     </Button>
   )
 }
@@ -262,9 +263,7 @@ function Notice({
 function IssuesPanel() {
   const listing = useAction(ListAction)
   const { conversationId, switchConversation } = useUltimate()
-  // `undefined` while the index loads, `null` when it does not name @ultimate: then there is only the prompt to copy.
   const standing = useDocOf(1, StandingDoc)
-  const ultimate = standing === undefined ? undefined : (standing?.ultimate ?? null)
   const { copy } = useCopy()
   const [busy, setBusy] = useState<number | null>(null)
   const [handed, setHanded] = useState<number | null>(null)
@@ -277,43 +276,45 @@ function IssuesPanel() {
       await api.action(RefreshAction)
       await listing.refetch()
     } catch (error) {
-      store.notify({ level: 'error', message: errorMessage(error) })
+      notify({ level: 'error', message: errorMessage(error) })
     } finally {
       setRefreshing(false)
     }
   }
 
-  /** The prompt of `issue`, from the server, which reads the project's rules for it. */
+  /** @ultimate's conversation: the standing index, or the action that resolves (and creates) it. */
+  const target = async () => standing?.ultimate ?? api.action(StandingAction, { name: 'ultimate' })
+
+  /** The prompt of `issue`, from the server, which reads the project's rules and the issue's gate for it. */
   const hand = async (issue: Issue) => {
-    if (ultimate === undefined) return
     setBusy(issue.number)
     try {
       const text = await api.action(PromptAction, issue.number)
-      if (ultimate === null) {
+      let to: number
+      try {
+        to = await target()
+      } catch {
+        // Nothing to send to: the prompt is still worth having, so it goes on the clipboard with the reason.
         copy(text)
+        notify({ level: 'warning', message: '@ultimate is not reachable; copied the prompt instead' })
         return
       }
-      await api.submit(text, 'followUp', ultimate)
+      await api.submit(text, 'followUp', to)
+      events.emit('ultimate:sent', { conversationId: to })
       setHanded(issue.number)
-      if (conversationId !== ultimate) switchConversation(ultimate)
+      if (conversationId !== to) switchConversation(to)
     } catch (error) {
-      store.notify({ level: 'error', message: errorMessage(error) })
+      notify({ level: 'error', message: errorMessage(error) })
     } finally {
       setBusy(null)
     }
   }
 
-  const state = (issue: Issue): HandState => {
-    if (busy === issue.number) return 'busy'
-    if (ultimate === undefined) return 'waiting'
-    if (ultimate === null) return 'copy'
-    return handed === issue.number ? 'handed' : 'idle'
-  }
+  const state = (issue: Issue): HandState =>
+    busy === issue.number ? 'busy' : handed === issue.number ? 'handed' : 'idle'
 
-  if (listing.error)
-    return <Notice text={listing.error.message} tone="error" />
-  if (!listing.data)
-    return <Notice text="reading the issues…" />
+  if (listing.error) return <Notice text={listing.error.message} tone="error" />
+  if (!listing.data) return <Notice text="reading the issues…" />
   if (listing.data.status === 'setup')
     return <Notice detail={listing.data.detail} text={listing.data.reason} />
 
@@ -322,7 +323,7 @@ function IssuesPanel() {
   const total = issues.reduce((sum, issue) => sum + issue.total, 0)
   const groups = group(issues)
   return (
-    <div className="pb-2">
+    <div className="pb-2" data-issues>
       <div className="flex h-8 items-center gap-2 px-3">
         <span className="section-label">{listing.data.repo}</span>
         <span className="ml-auto font-mono text-[10.5px] text-muted-foreground/70 tabular-nums">
