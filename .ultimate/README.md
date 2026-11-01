@@ -32,6 +32,20 @@ Both are read-only and resolve the Ictus checkout through the worktree's
 `agentic-control` link, reading the pinned revision out of it with
 `git show <commit>:<file>` rather than trusting its working tree.
 
+## `extensions/issues/`
+
+The right panel's **Issues** tab, because this project's open work lives as
+GitHub issues (`docs/ROADMAP.md` is only a snapshot). It lists `Walsamer/tactus`'s
+open issues grouped by milestone — `type:/area:/priority:/fleet:` labels,
+how many acceptance criteria are ticked, when each last moved — and hands one
+to @ultimate as a single prepared prompt: the issue, its criteria and the
+project's own hard rules, read from `AGENTS.md` at that moment. The action
+follows the intake gate (`fleet:ready` only, as
+`src/tactus/domain/work_source.py` says): **start** on an authorized issue,
+**assess** on a gated one, where the prompt asks what has to change first. The
+listing is read on the server with `gh issue list --repo … --state open --json …`
+(a minute's cache and an explicit refresh), so no token reaches the browser.
+
 ## `worktree-setup.sh`
 
 `uv sync` for dependencies, then a symlink to the Ictus checkout beside the
