@@ -1,17 +1,27 @@
-"""Durable, mocked publication port for one authorized review pull request.
+"""Durable, idempotent publication of one authorized review pull request.
 
-The port composes the Tactus-owned publication grant guard with a **fake**
-GitHub transport. It owns only publication identity, ordering and durable
-evidence; it never touches the network, a real credential store, the canonical
-checkout or an execution agent. Implementation verification and publication are
-reported as two separate statuses.
+The state machine here is shared by two ports that differ in exactly one
+reviewed way:
+
+* :class:`GitHubPublicationPort` is the **mocked** port. Its transport must be
+  non-live and non-network, enforced in the constructor, and no flag, setting or
+  environment value can change that.
+* :class:`GitHubLivePublicationPort` is the **live** port over ``git push`` and
+  ``gh api``. Its transport must be live and networked, it resolves the single
+  credential before reading, and it still never merges, never force-pushes and
+  never writes the trunk.
+
+Both keep the same rules: authorization before any effect, one credential per
+attempt, durable content-addressed identity, create/reuse/reconcile outcomes,
+separated implementation and publication statuses, and redacted evidence that
+names the grant that authorized the publication.
 
 Ordering for one authorized intent::
 
     validate implementation evidence and exact change binding
         -> validate authority/binding/scope/freshness/revocation
         -> reuse a durable publication record, or refuse a changed digest
-        -> check remote base/branch/duplicate state
+        -> read remote base/branch/duplicate state
         -> resolve exactly one opaque credential
         -> ensure one deterministic branch
         -> create (or reconcile) exactly one pull request
@@ -20,6 +30,9 @@ Ordering for one authorized intent::
 A failure after publication starts returns ``PublicationStatus.FAILED`` with
 ``ImplementationStatus.VERIFIED`` unchanged: a publication problem never
 invalidates the verified patch and never restarts agent editing.
+
+See ``docs/architecture/MOCKED_PUBLICATION.md`` and
+``docs/architecture/LIVE_PUBLICATION.md``.
 """
 
 from __future__ import annotations
@@ -33,14 +46,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Protocol
+from typing import Any, ClassVar, Iterable, Iterator, Mapping, Protocol
 
-from tactus.integrations.github.fake import (
+from tactus.integrations.github.transport import (
     GitHubAcknowledgmentLostError,
     GitHubBaseMovedError,
     GitHubBranchConflictError,
     GitHubDuplicatePullRequestError,
     GitHubPermissionDeniedError,
+    GitHubProtectedDestinationError,
     GitHubPullRequest,
     GitHubTransport,
     GitHubTransportError,
@@ -58,8 +72,10 @@ from .models import (
 )
 
 __all__ = [
+    "LIVE_PUBLICATION_CONTRACT_ID",
     "PUBLICATION_CONTRACT_ID",
     "PUBLICATION_VERSION",
+    "GitHubLivePublicationPort",
     "GitHubPublicationPort",
     "ImplementationStatus",
     "PublicationBusyError",
@@ -76,6 +92,9 @@ PUBLICATION_VERSION = "1.0.0"
 
 #: Stable identifier for the publication protocol family.
 PUBLICATION_CONTRACT_ID = "tactus.publication.github/v1"
+
+#: Contract identifier for the live (git push + gh api) publication port.
+LIVE_PUBLICATION_CONTRACT_ID = "tactus.publication.github.live/v1"
 
 _PR_TITLE_TEMPLATE = "Tactus: publish {work_order_id}"
 _PR_BODY_TEMPLATE = (
@@ -136,6 +155,7 @@ class PublicationErrorCode(str, Enum):
     PUBLICATION_CONFLICT = "publication_conflict"
     CREDENTIAL_UNAVAILABLE = "credential_unavailable"
     PERMISSION_DENIED = "permission_denied"
+    PROTECTED_DESTINATION = "protected_destination"
     ACKNOWLEDGMENT_LOST = "acknowledgment_lost"
     TRANSPORT_FAILED = "transport_failed"
     STATE_ERROR = "state_error"
@@ -378,13 +398,18 @@ def _change_binding_error(
     return None
 
 
-class GitHubPublicationPort:
-    """Durable publication evidence over a fake GitHub transport.
+class _PublicationStateMachine:
+    """Shared durable publication state machine.
 
-    The transport is required to be non-live and non-network. No live adapter is
-    wired here; a later gated Work Order must add one behind a reviewed,
-    credential-aware boundary.
+    One implementation serves both ports, so the create/reuse/reconcile rules
+    cannot drift between the mocked and live paths. Which transports a concrete
+    port accepts is decided here in the constructor, from the class and never
+    from configuration: the mocked port refuses a live or networked transport,
+    and the live port refuses anything that is not both.
     """
+
+    #: Set by a concrete port class. Never a setting, flag or environment value.
+    _requires_live_transport: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -396,9 +421,18 @@ class GitHubPublicationPort:
         clock: Any = _utcnow,
     ) -> None:
         contract = getattr(transport, "contract", None)
-        if contract is None or bool(getattr(contract, "live", True)) or bool(
-            getattr(contract, "network", True)
-        ):
+        live = contract is None or bool(getattr(contract, "live", True))
+        network = contract is None or bool(getattr(contract, "network", True))
+        if self._requires_live_transport:
+            if (
+                contract is None
+                or not bool(getattr(contract, "live", False))
+                or not bool(getattr(contract, "network", False))
+            ):
+                raise PublicationStateError(
+                    "live publication requires a live, networked transport"
+                )
+        elif live or network:
             raise PublicationStateError(
                 "mocked publication requires a non-live, non-network transport"
             )
@@ -424,7 +458,17 @@ class GitHubPublicationPort:
         if not callable(clock):
             raise PublicationStateError("clock must be callable")
         self._clock = clock
-        self._contract = PublicationContract()
+        self._contract = (
+            PublicationContract(
+                contract_id=LIVE_PUBLICATION_CONTRACT_ID,
+                version=PUBLICATION_VERSION,
+                transport="gh",
+                live=True,
+                network=True,
+            )
+            if self._requires_live_transport
+            else PublicationContract()
+        )
 
     @property
     def contract(self) -> PublicationContract:
@@ -476,6 +520,7 @@ class GitHubPublicationPort:
     def _save_success(
         self,
         request: PublicationRequest,
+        grant: PublicationGrant,
         change: PreparedChange,
         result: PublicationResult,
     ) -> dict[str, Any]:
@@ -497,6 +542,12 @@ class GitHubPublicationPort:
             "branch_revision": result.branch_revision,
             "pull_request_number": result.pull_request_number,
             "pull_request_url": result.pull_request_url,
+            "grant_id": result.grant_id,
+            "authority": grant.authority,
+            "grant_issued_at": grant.issued_at.isoformat(),
+            "grant_expires_at": (
+                grant.expires_at.isoformat() if grant.expires_at else None
+            ),
             "publication_status": result.publication_status.value,
             "published_at": (
                 result.recorded_at.isoformat() if result.recorded_at else None
@@ -718,13 +769,63 @@ class GitHubPublicationPort:
             body="",
         )
 
-    def _publish_locked(
+    def _resolve_credential(
         self,
         request: PublicationRequest,
         grant: PublicationGrant,
         change: PreparedChange,
         now: datetime,
-    ) -> PublicationResult:
+    ) -> PublicationCredential | PublicationResult:
+        """Resolve exactly one opaque credential, or return the failed result.
+
+        Provider text is never chained into the surfaced error: a provider
+        message or traceback may contain credential material.
+        """
+
+        try:
+            credential = self._credentials.resolve(grant, request, at=now)
+        except Exception as exc:  # noqa: BLE001 - never expose provider text
+            return self._fail(
+                self._result(
+                    request,
+                    grant,
+                    change,
+                    PublicationStatus.FAILED,
+                    error_code=PublicationErrorCode.CREDENTIAL_UNAVAILABLE,
+                    reason=(
+                        "publication credential provider failed closed "
+                        f"({type(exc).__name__})"
+                    ),
+                )
+            )
+        if not isinstance(credential, PublicationCredential):
+            return self._fail(
+                self._result(
+                    request,
+                    grant,
+                    change,
+                    PublicationStatus.FAILED,
+                    error_code=PublicationErrorCode.CREDENTIAL_UNAVAILABLE,
+                    reason="credential provider did not return an opaque credential",
+                )
+            )
+        return credential
+
+    def _preflight_reads(
+        self,
+        request: PublicationRequest,
+        grant: PublicationGrant,
+        change: PreparedChange,
+        now: datetime,
+    ) -> PublicationResult | None:
+        """Read the remote facts a publication depends on, before any mutation.
+
+        Returns a finished result when those facts already decide the outcome (a
+        moved base, a stale branch, an existing pull request to reconcile), and
+        ``None`` when publication may proceed. Transport failures propagate so
+        the caller records them as a failed attempt rather than crashing.
+        """
+
         repository = request.repository
         base = self._transport.base_revision(repository, request.destination)
         if base is None:
@@ -809,7 +910,7 @@ class GitHubPublicationPort:
                 recorded_at=now,
                 reason="reconciled an existing pull request for this publication",
             )
-            self._save_success(request, change, result)
+            self._save_success(request, grant, change, result)
             return self._finish(result)
 
         remote_branch = self._transport.branch_revision(repository, request.branch)
@@ -827,40 +928,70 @@ class GitHubPublicationPort:
                     ),
                 )
             )
+        return None
+
+    def _publish_locked(
+        self,
+        request: PublicationRequest,
+        grant: PublicationGrant,
+        change: PreparedChange,
+        now: datetime,
+    ) -> PublicationResult:
+        repository = request.repository
+
+        # A live transport cannot read a private repository without the
+        # credential, so a live contract resolves and binds the one credential
+        # *before* any read. A fake needs no credential to read, so it keeps the
+        # stricter order and resolves only once a publication is certain.
+        resolved: PublicationCredential | PublicationResult | None = None
+        if self._transport.contract.reads_require_credential:
+            resolved = self._resolve_credential(request, grant, change, now)
+            if isinstance(resolved, PublicationResult):
+                return resolved
+            self._transport.bind_credential(resolved)
 
         try:
-            credential: PublicationCredential = self._credentials.resolve(
-                grant, request, at=now
-            )
-        except Exception as exc:  # noqa: BLE001 - never expose provider text
+            preflight_failure = self._preflight_reads(request, grant, change, now)
+        except GitHubTransportError as exc:
+            # A live read can fail (401, rate limit, 5xx, network). That is a
+            # failed attempt, not a crash: it must come back as a result and be
+            # recorded as evidence like every other outcome.
             return self._fail(
                 self._result(
                     request,
                     grant,
                     change,
                     PublicationStatus.FAILED,
-                    error_code=PublicationErrorCode.CREDENTIAL_UNAVAILABLE,
-                    reason=(
-                        "publication credential provider failed closed "
-                        f"({type(exc).__name__})"
-                    ),
+                    error_code=PublicationErrorCode.TRANSPORT_FAILED,
+                    reason=f"publication transport read failed ({type(exc).__name__})",
                 )
             )
-        if not isinstance(credential, PublicationCredential):
-            return self._fail(
-                self._result(
-                    request,
-                    grant,
-                    change,
-                    PublicationStatus.FAILED,
-                    error_code=PublicationErrorCode.CREDENTIAL_UNAVAILABLE,
-                    reason="credential provider did not return an opaque credential",
-                )
-            )
+        if preflight_failure is not None:
+            return preflight_failure
+
+        if not isinstance(resolved, PublicationCredential):
+            resolved = self._resolve_credential(request, grant, change, now)
+            if isinstance(resolved, PublicationResult):
+                return resolved
+            self._transport.bind_credential(resolved)
 
         try:
             branch_revision = self._transport.ensure_branch(
                 repository, request.branch, change.branch_revision
+            )
+        except GitHubProtectedDestinationError as exc:
+            return self._refuse(
+                self._result(
+                    request,
+                    grant,
+                    change,
+                    PublicationStatus.REFUSED,
+                    error_code=PublicationErrorCode.PROTECTED_DESTINATION,
+                    reason=(
+                        "the publication transport refused a protected "
+                        f"destination ({exc.ref!r}): {exc.reason}"
+                    ),
+                )
             )
         except GitHubBranchConflictError:
             return self._fail(
@@ -881,7 +1012,7 @@ class GitHubPublicationPort:
                     change,
                     PublicationStatus.FAILED,
                     error_code=PublicationErrorCode.PERMISSION_DENIED,
-                    reason="fake GitHub denied branch publication",
+                    reason="GitHub denied branch publication",
                 )
             )
         except GitHubTransportError as exc:
@@ -893,7 +1024,7 @@ class GitHubPublicationPort:
                     PublicationStatus.FAILED,
                     error_code=PublicationErrorCode.TRANSPORT_FAILED,
                     reason=(
-                        "fake GitHub branch publication failed "
+                        "GitHub branch publication failed "
                         f"({type(exc).__name__})"
                     ),
                 )
@@ -910,7 +1041,7 @@ class GitHubPublicationPort:
                 reason="published the deterministic review branch only",
                 operations=self._transport.operations,
             )
-            self._save_success(request, change, result)
+            self._save_success(request, grant, change, result)
             return self._finish(result)
 
         title = _PR_TITLE_TEMPLATE.format(work_order_id=request.work_order_id)
@@ -931,6 +1062,21 @@ class GitHubPublicationPort:
                 title=title,
                 body=body,
             )
+        except GitHubProtectedDestinationError as exc:
+            return self._refuse(
+                self._result(
+                    request,
+                    grant,
+                    change,
+                    PublicationStatus.REFUSED,
+                    error_code=PublicationErrorCode.PROTECTED_DESTINATION,
+                    reason=(
+                        "the publication transport refused a protected "
+                        f"destination ({exc.ref!r}): {exc.reason}"
+                    ),
+                    operations=self._transport.operations,
+                )
+            )
         except GitHubAcknowledgmentLostError:
             reconciled = self._reconcile_lost_acknowledgment(
                 request, grant, change, now
@@ -944,7 +1090,7 @@ class GitHubPublicationPort:
                     change,
                     PublicationStatus.FAILED,
                     error_code=PublicationErrorCode.PERMISSION_DENIED,
-                    reason="fake GitHub denied pull-request creation",
+                    reason="GitHub denied pull-request creation",
                     operations=self._transport.operations,
                 )
             )
@@ -956,7 +1102,7 @@ class GitHubPublicationPort:
                     change,
                     PublicationStatus.FAILED,
                     error_code=PublicationErrorCode.BASE_MOVED,
-                    reason="fake GitHub base ref moved during publication",
+                    reason="GitHub base ref moved during publication",
                     operations=self._transport.operations,
                 )
             )
@@ -968,7 +1114,7 @@ class GitHubPublicationPort:
                     change,
                     PublicationStatus.FAILED,
                     error_code=PublicationErrorCode.STALE_BRANCH,
-                    reason="fake GitHub review branch conflicts at creation time",
+                    reason="GitHub review branch conflicts at creation time",
                     operations=self._transport.operations,
                 )
             )
@@ -980,7 +1126,7 @@ class GitHubPublicationPort:
                     change,
                     PublicationStatus.FAILED,
                     error_code=PublicationErrorCode.DUPLICATE_PULL_REQUEST,
-                    reason="fake GitHub already has a pull request for this head/base",
+                    reason="GitHub already has a pull request for this head/base",
                     operations=self._transport.operations,
                 )
             )
@@ -993,7 +1139,7 @@ class GitHubPublicationPort:
                     PublicationStatus.FAILED,
                     error_code=PublicationErrorCode.TRANSPORT_FAILED,
                     reason=(
-                        "fake GitHub pull-request creation failed "
+                        "GitHub pull-request creation failed "
                         f"({type(exc).__name__})"
                     ),
                     operations=self._transport.operations,
@@ -1011,7 +1157,7 @@ class GitHubPublicationPort:
             reason="published one deterministic review branch and pull request",
             operations=self._transport.operations,
         )
-        self._save_success(request, change, result)
+        self._save_success(request, grant, change, result)
         return self._finish(result)
 
     def _reconcile_lost_acknowledgment(
@@ -1073,5 +1219,39 @@ class GitHubPublicationPort:
             reason="reconciled a pull request after a lost acknowledgment",
             operations=self._transport.operations,
         )
-        self._save_success(request, change, result)
+        self._save_success(request, grant, change, result)
         return self._finish(result)
+
+
+class GitHubPublicationPort(_PublicationStateMachine):
+    """Durable publication evidence over a deterministic fake transport.
+
+    The transport must be non-live and non-network. This is enforced in the
+    constructor and there is no flag, setting or environment value that changes
+    it: a caller that wants a live publication must construct
+    :class:`GitHubLivePublicationPort` explicitly, so the choice is visible in
+    review rather than in configuration.
+    """
+
+    _requires_live_transport = False
+
+
+class GitHubLivePublicationPort(_PublicationStateMachine):
+    """Publication over a live transport: ``git push`` and ``gh api``.
+
+    Behaviour differs from the mocked port in exactly two reviewed ways, both
+    driven by the transport contract rather than by a setting:
+
+    * the transport must be live **and** networked (refused otherwise); and
+    * the single credential is resolved and bound *before* any read, because a
+      live transport cannot read a private repository without it. The fake
+      keeps the stricter order and resolves only once a publication is certain.
+
+    Everything else - authorization first, one credential, one effect, durable
+    idempotent records, separated implementation/publication statuses and
+    redacted evidence - is the same state machine both ports share. This port
+    still never merges, never force-pushes, never deploys and never restarts
+    agent editing after a publication failure.
+    """
+
+    _requires_live_transport = True

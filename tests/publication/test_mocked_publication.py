@@ -212,6 +212,12 @@ def test_first_publication_records_branch_and_pr_durably(
     assert record["pull_request_url"] == result.pull_request_url
     assert record["patch_digest"] == PATCH_DIGEST
     assert record["publication_status"] == "PUBLISHED"
+    # The record names the grant that authorized this pull request, so an audit
+    # can answer "which grant" rather than only "a PR exists".
+    assert record["grant_id"] == "grant-publication-1"
+    assert record["authority"] == "operator"
+    assert record["grant_issued_at"] == (NOW - timedelta(minutes=5)).isoformat()
+    assert record["grant_expires_at"] == (NOW + timedelta(hours=1)).isoformat()
 
     attempts = list(
         (publisher.state_root / ".tactus" / "publications" / "attempts").glob("*.json")

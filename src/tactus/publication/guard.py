@@ -100,6 +100,18 @@ class PublicationCredential:
         provider = f", provider={self.provider_id!r}" if self.provider_id else ""
         return f"PublicationCredential(<redacted>{provider})"
 
+    def reveal(self) -> str:
+        """Return the credential material for the transport boundary only.
+
+        Only the transport bound for one authorized publication may call this,
+        and only to authenticate its own remote operations. The material must
+        never reach argv, a log line, an exception message, evidence or any
+        durable record. It goes in the environment of the one subprocess that
+        needs it, never the environment of a coding-agent process.
+        """
+
+        return self._material
+
     def __str__(self) -> str:
         return "<redacted publication credential>"
 
@@ -112,11 +124,12 @@ class PublicationCredential:
 
 @runtime_checkable
 class PublicationCredentialProvider(Protocol):
-    """Mock-only boundary that resolves exactly one credential per call.
+    """Boundary that resolves exactly one credential per publication call.
 
-    A real credential store is deliberately out of scope for this Work Order.
-    Implementations must not attach the credential to the publication request,
-    evidence or any process environment handed to a coding agent.
+    Test doubles and the operator-token provider in
+    :mod:`tactus.publication.credentials` both satisfy this. Implementations must
+    not attach the credential to the publication request, evidence or any
+    process environment handed to a coding agent.
     """
 
     def resolve(
