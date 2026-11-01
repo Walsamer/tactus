@@ -2,9 +2,19 @@
 
 Status: implemented **against a fake GitHub transport only**. There is no
 network call, push to a real remote, PR creation on GitHub, credential-store
-access, merge or deployment in this Work Order. The `software.promote` Dagster
-wiring and every live credential path remain a later gated Work Order after
-ICT-WO-201 and explicit publication authority are accepted.
+access, merge or deployment in this Work Order. Tactus's publication port stays
+mocked only: `GitHubPublicationPort` refuses any transport whose contract is not
+explicitly non-live and non-network, no grant issuer is decided, and every live
+credential path remains a later gated Work Order after explicit publication
+authority is accepted.
+
+The `software.promote` Dagster wiring this document once deferred to "a later
+gated Work Order after ICT-WO-201" now exists upstream: ICT-WO-201 landed as
+Ictus `c140af3` (Walsamer/ictus#21), which adds `software.implement` and
+`software.promote` as explicit Dagster workflow routes. Both are **fail-closed
+placeholders** — the jobs refuse the capability and never report success, so
+that backend performs no implementation and no publication either. The route is
+a refusal, not a live path.
 
 Normative neighbours:
 
@@ -138,8 +148,10 @@ also records the error code, reason, simulated operations and
 
 - No real GitHub API call, `git push`, remote branch creation, PR creation,
   credential read, merge or deployment.
-- No Dagster `software.promote` wiring, production credentials or live
-  publication authority.
+- No Dagster wiring from Tactus, no production credentials and no live
+  publication authority. The upstream `software.implement`/`software.promote`
+  routes are Ictus's fail-closed placeholders (see Status), not a publication
+  path this port can use.
 - No direct `main` mutation, force-push, automatic agent re-run on publication
   failure, or Fleet workspace/pool reuse.
 - No claim that the fake transport is a safe live adapter. A live adapter must be
