@@ -5,6 +5,14 @@ launched.** The adapter wraps the hardened runtime supervisor from TCT-WO-022a.
 A real Pi/Codex/provider runtime remains gated by an execution-permission
 boundary and an explicit provider/model decision.
 
+The adapter now has a **caller**: the Tactus-owned Dagster code location
+(`integrations/dagster/agent_location.py`) executes exactly one attempt per
+`software.implement` run under the operator-owned pin
+`config/agent-runtime.json`. See
+[`AGENT_EXECUTION_SLICE.md`](AGENT_EXECUTION_SLICE.md) for what that proves and
+for the one link still pending: B4, the Ictus job skeleton that Ictus has agreed
+and scheduled.
+
 ## Boundary
 
 ```text

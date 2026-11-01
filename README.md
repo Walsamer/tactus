@@ -38,6 +38,14 @@ and completion before merge. The first vertical slice uses a deterministic local
 subprocess. Real agents and Stax follow in M3; directory placeholders do not
 establish that those integrations are installed.
 
+A Tactus-owned Dagster code location now executes one supervised agent attempt
+for the `software.implement` route under an operator-owned runtime pin, and
+re-checks the bounded patch evidence before reporting it (see the
+[agent execution slice](docs/architecture/AGENT_EXECUTION_SLICE.md)). That
+runtime is the deterministic **fake** agent: no provider, no credentials, no OS
+containment, no publication. Durable submission of that route waits on Ictus's
+agreed job skeleton (B4), and Issue #22 remains open.
+
 ## Collaboration
 
 ```text

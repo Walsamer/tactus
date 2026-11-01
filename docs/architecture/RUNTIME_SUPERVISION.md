@@ -2,9 +2,11 @@
 
 Status: bounded supervision port implemented and hardened; the fake-runtime
 coding-agent adapter contract is documented in
-[`AGENT_ADAPTER_CONTRACT.md`](AGENT_ADAPTER_CONTRACT.md). **No real coding agent
-is attached yet** (Issue #22 continues with a pinned real runtime and an
-execution-permission boundary that does not exist yet).
+[`AGENT_ADAPTER_CONTRACT.md`](AGENT_ADAPTER_CONTRACT.md). It now has a caller:
+the Tactus-owned Dagster code location runs one supervised attempt per
+`software.implement` run ([`AGENT_EXECUTION_SLICE.md`](AGENT_EXECUTION_SLICE.md)).
+**No real coding agent is attached yet** (Issue #22 continues with a pinned real
+runtime and an execution-permission boundary that does not exist yet).
 
 Tactus owns the *process* of one agent attempt. This document states exactly what
 is enforced, what is merely observed, and what is deliberately **not** claimed.
