@@ -2,7 +2,7 @@
 
 Pinned contract
 ---------------
-* Ictus commit: ``e7419210d5bdfec3169e375d4957077951cc231c``
+* Ictus commit: ``c140af38304b401d6628109cb45d818f3d8aeeb1``
 * Contract source: ``contracts/observation.schema.json`` (``ExecutionObservation``)
 * Supported ``schema_version``: ``1``
 
@@ -39,7 +39,7 @@ from enum import Enum
 from typing import Any
 
 #: Ictus commit pinned by this compatibility boundary.
-ICTUS_COMMIT = "e7419210d5bdfec3169e375d4957077951cc231c"
+ICTUS_COMMIT = "c140af38304b401d6628109cb45d818f3d8aeeb1"
 
 #: Ictus ``ExecutionObservation`` contract version supported here.
 SUPPORTED_SCHEMA_VERSION = 1

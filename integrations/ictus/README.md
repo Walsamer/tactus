@@ -24,7 +24,7 @@ TACTUS_ICTUS_ROOT=/path/to/agentic-control \
 | Item | Value |
 |---|---|
 | Pinned Ictus repository | `Walsamer/ictus` |
-| Pinned Ictus commit | `e7419210d5bdfec3169e375d4957077951cc231c` |
+| Pinned Ictus commit | `c140af38304b401d6628109cb45d818f3d8aeeb1` |
 | Overrides | `TACTUS_ICTUS_ROOT`, `TACTUS_ICTUS_TARGET_DIR` |
 
 The normal test entry point (`uv run pytest`) executes the same boundary; a
