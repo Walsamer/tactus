@@ -1,8 +1,10 @@
 # Runtime supervision (TCT-WO-022a)
 
-Status: bounded supervision port implemented and hardened; **no real coding agent
-attached yet** (Issue #22 continues with a pinned real runtime and an execution-
-permission boundary that does not exist yet).
+Status: bounded supervision port implemented and hardened; the fake-runtime
+coding-agent adapter contract is documented in
+[`AGENT_ADAPTER_CONTRACT.md`](AGENT_ADAPTER_CONTRACT.md). **No real coding agent
+is attached yet** (Issue #22 continues with a pinned real runtime and an
+execution-permission boundary that does not exist yet).
 
 Tactus owns the *process* of one agent attempt. This document states exactly what
 is enforced, what is merely observed, and what is deliberately **not** claimed.
@@ -95,10 +97,12 @@ Statuses: `success | failed | timeout | cancelled | invalid | unterminated`.
   Publication is a separate authorization (Issue #23) and cannot be inferred from
   a successful run.
 
-## Prerequisite for TCT-WO-022b (real agent)
+## Prerequisite for a real coding agent (TCT-WO-022b keeps them gated)
 
-A real coding agent **must not** be started by this port until an execution-
-permission boundary exists. Specifically:
+TCT-WO-022b adds a versioned adapter contract and a fake-agent canary only; it
+does not select a real provider/model. A real coding agent **must not** be
+started by this port until an execution-permission boundary exists.
+Specifically:
 
 1. **Filesystem containment** — the agent must not be able to read the operator's
    home, other repositories, or the state directory; a same-user Git worktree
