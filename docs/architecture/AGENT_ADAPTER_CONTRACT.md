@@ -53,10 +53,12 @@ code (`src/tactus/runtime/descriptor.py`). The descriptor carries:
   self-test rather than outside it;
 * the environment variable **names** the attempt may receive;
 * the **result contract** — `agent-artifacts` (the runtime writes `result.json`
-  and `patch.diff`) or `workspace-diff` (it writes neither: the supervisor takes
-  the changed paths and the patch from the workspace, so a general-purpose CLI is
-  accounted for by what it actually changed). The patch is always the
-  supervisor's own bounded diff, never the agent's prose;
+  and `patch.diff`) or `workspace-diff` (it writes neither: the supervisor stages
+  the workspace, diffs it against the revision recorded before the child spawned,
+  and takes both the changed paths and the patch from that one source, so a
+  general-purpose CLI is accounted for by what it actually changed). Both are
+  pin data (`result_contract` in the pin file) and both are refused rather than
+  guessed when the workspace cannot answer;
 * next to it, a **containment policy** — launcher, denied roots, egress mode,
   recorded allowances — that names no runtime either.
 

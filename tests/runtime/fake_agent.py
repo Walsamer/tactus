@@ -102,6 +102,23 @@ def main(argv: list[str]) -> int:
         _write(output_dir, status="completed", changed=["src/example.py"], summary=task)
         (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
         return 0
+    if mode == "commit-only":
+        workspace = Path(request["workspace"]["root"])
+        (workspace / "src" / "example.py").write_text("x = 3\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(workspace), "add", "-A"], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(workspace),
+                "-c", "user.email=t@t", "-c", "user.name=t",
+                "commit", "-qm", "agent commit",
+            ],
+            check=True,
+        )
+        return 0
+    if mode == "edit-outside":
+        workspace = Path(request["workspace"]["root"])
+        (workspace / "outside.py").write_text("nope = 1\n", encoding="utf-8")
+        return 0
     if mode == "edit-only":
         # A real runtime's shape: change the workspace, write no artifacts.
         (Path(request["workspace"]["root"]) / "src" / "example.py").write_text(

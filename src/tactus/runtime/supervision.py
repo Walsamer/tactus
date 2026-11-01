@@ -69,6 +69,7 @@ from tactus.runtime.containment import (
     ContainmentPolicy,
     residual_processes,
     run_self_test,
+    sweep_is_visible,
 )
 from tactus.runtime.descriptor import (
     RuntimeDescriptor,
@@ -588,6 +589,21 @@ class RuntimeSupervisor:
             raise RuntimeSupervisionError(
                 "a containment policy requires the descriptor to pin its launcher"
             )
+        if containment is not None and descriptor.launcher is not None:
+            # The matrix exercises the policy's launcher; the command uses the
+            # descriptor's. If they differ, a green matrix would certify a
+            # boundary the run never applies.
+            policy_launcher = containment.launcher
+            run_launcher = descriptor.launcher
+            if (
+                Path(policy_launcher.path).resolve() != Path(run_launcher.path).resolve()
+                or tuple(policy_launcher.argv_prefix) != tuple(run_launcher.argv_prefix)
+                or policy_launcher.sha256 != run_launcher.sha256
+            ):
+                raise RuntimeSupervisionError(
+                    "the containment policy's launcher and the descriptor's launcher "
+                    "differ; the run would not apply the boundary that was proven"
+                )
         self._descriptor = descriptor
         self._workspace = workspace
         self._containment = containment
@@ -598,11 +614,25 @@ class RuntimeSupervisor:
             if state_dir is not None
             else (workspace.root / ".tactus-runtime").resolve()
         )
+        if containment is not None:
+            # Attempt state inside the workspace would be inside the write
+            # allowlist: the child could rewrite its own recovery record, and the
+            # "write outside the workspace" probe would land in an allowed path.
+            state_root = Path(self._state_dir)
+            if state_root == workspace.root or workspace.root in state_root.parents:
+                raise RuntimeSupervisionError(
+                    f"the state directory {state_root} is inside the workspace "
+                    f"{workspace.root}; a contained attempt needs its state outside "
+                    "the write allowlist"
+                )
         self._terminate = terminate or terminate_process_group
         self._workspace_paths = workspace_paths
         self._start_marker = start_marker or process_start_marker
         self._cancel = threading.Event()
         self._cancel_reason = ""
+        self._sweep_visible: tuple[bool, str] | None = None
+        self._base_revision: str | None = None
+        self._sweep_detail = ""
 
     # -- read-only views -------------------------------------------------
 
@@ -627,11 +657,27 @@ class RuntimeSupervisor:
         return self._containment
 
     def _sweep(self, marker: str) -> tuple[Any, ...] | None:
-        """Processes still carrying the attempt marker; None if unverifiable."""
+        """Processes still carrying the attempt marker; None if unverifiable.
+
+        An empty result is only meaningful when this host's process table can show
+        a marker at all: ``ps -E`` does not expose the environment of every binary,
+        so "nothing found" from a blind sweep must never be read as "nothing alive".
+        """
+        visible, detail = self._sweep_visibility()
+        if not visible:
+            self._sweep_detail = detail
+            return None
         try:
             return tuple(residual_processes(marker))
-        except ContainmentError:
+        except ContainmentError as exc:
+            self._sweep_detail = str(exc)
             return None
+
+    def _sweep_visibility(self) -> tuple[bool, str]:
+        """Whether a planted marker is visible to the sweep (measured once)."""
+        if self._sweep_visible is None:
+            self._sweep_visible = sweep_is_visible()
+        return self._sweep_visible
 
     @property
     def attempt_record_path(self) -> Path:
@@ -838,6 +884,12 @@ class RuntimeSupervisor:
                         ),
                         reason="containment self-test failed",
                     )
+
+            # The baseline for a workspace-diff account must be taken *before* the
+            # child runs: a runtime may commit its own work, and a diff against the
+            # post-run HEAD would show nothing.
+            if self._descriptor.result_contract == "workspace-diff":
+                self._workspace_base()
 
             stdin_handle = (
                 prompt_path.open("rb") if prompt_path is not None else subprocess.DEVNULL
@@ -1482,14 +1534,16 @@ class RuntimeSupervisor:
             bool(errors),
         )
 
-    def _workspace_patch(self) -> tuple[bytes, dict[str, Any]]:
-        """The bounded patch the workspace itself shows (``git diff``)."""
-        limit = self._limits.max_patch_bytes
+    #: The revision the workspace was at before the attempt spawned. A runtime may
+    #: commit its own work, so the diff is taken against this, not against HEAD.
+    EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+    def _git(self, *args: str, timeout: float = 120.0) -> bytes:
         try:
             completed = subprocess.run(
-                ["git", "-C", str(self._workspace.root), "diff", "--no-color", "--binary"],
+                ["git", "-C", str(self._workspace.root), *args],
                 capture_output=True,
-                timeout=60,
+                timeout=timeout,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeContractError(f"workspace diff unavailable: {exc}") from exc
@@ -1498,12 +1552,37 @@ class RuntimeSupervisor:
                 "workspace diff failed: "
                 + (completed.stderr or b"").decode("utf-8", "replace").strip()[:200]
             )
-        raw = completed.stdout or b""
-        if len(raw) > limit:
+        return completed.stdout or b""
+
+    def _workspace_base(self) -> str:
+        """The workspace revision at attempt start (empty tree if no commit yet)."""
+        if self._base_revision is not None:
+            return self._base_revision
+        try:
+            self._base_revision = self._git("rev-parse", "HEAD").decode().strip()
+        except RuntimeContractError:
+            self._base_revision = self.EMPTY_TREE
+        return self._base_revision
+
+    def _workspace_diff_snapshot(self) -> tuple[tuple[str, ...], bytes]:
+        """Changed paths and patch from one source: the workspace's own git diff.
+
+        Staging first is deliberate. ``git status`` and ``git diff`` disagree about
+        staged and untracked files, so an agent that stages its work would report
+        paths with no matching patch; taking both from ``diff --cached <base>``
+        makes the two halves of the account the same observation.
+        """
+        base = self._workspace_base()
+        self._git("add", "-A")
+        names = self._git("diff", "--cached", "--name-only", "-z", base)
+        paths = tuple(part for part in names.decode("utf-8", "replace").split("\0") if part)
+        patch = self._git("diff", "--cached", "--no-color", "--binary", base)
+        if len(patch) > self._limits.max_patch_bytes:
             raise RuntimeContractError(
-                f"workspace diff is {len(raw)} bytes; the limit is {limit}"
+                f"workspace diff is {len(patch)} bytes; the limit is "
+                f"{self._limits.max_patch_bytes}"
             )
-        return raw, {"verified": True, "source": "workspace-diff"}
+        return paths, patch
 
     def _collect_from_workspace_diff(
         self, *, output_dir: Path, exit_code: int | None
@@ -1521,16 +1600,9 @@ class RuntimeSupervisor:
         """Account for a run whose result is the workspace, not an artifact."""
         errors: list[str] = []
         contract_violation = False
-        if self._workspace_paths is None:
-            raise RuntimeContractError(
-                "result_contract='workspace-diff' requires a workspace diff provider"
-            )
         try:
-            observed = tuple(
-                normalize_changed_path(item)
-                for item in self._workspace_paths(self._workspace.root)
-            )
-        except WorkspaceScopeError as exc:
+            observed, raw = self._workspace_diff_snapshot()
+        except RuntimeContractError as exc:
             return (
                 "failed",
                 "",
@@ -1539,7 +1611,7 @@ class RuntimeSupervisor:
                 {"verified": False, "reason": str(exc), "source": "workspace-diff"},
                 "",
                 0,
-                (f"workspace diff is unusable: {exc}",),
+                (str(exc),),
                 True,
             )
         try:
@@ -1551,44 +1623,34 @@ class RuntimeSupervisor:
         except WorkspaceScopeError as exc:
             errors.append(f"workspace changes are outside the allowed scope: {exc}")
             contract_violation = True
-            declared = ()
+            declared = tuple()
 
-        patch_bytes = 0
-        patch_sha256 = ""
-        patch_paths: tuple[str, ...] = ()
+        patch_bytes = len(raw)
+        patch_sha256 = hashlib.sha256(raw).hexdigest() if raw else ""
+        patch_paths = patch_header_paths(raw.decode("utf-8", "replace"))
+        if patch_paths:
+            undeclared = [path for path in patch_paths if path not in declared]
+            if undeclared:
+                errors.append("patch touches undeclared paths: " + ", ".join(undeclared))
+                contract_violation = True
+        if declared and not raw:
+            errors.append("the workspace shows no diff for the declared paths")
+            contract_violation = True
+        if raw:
+            repaired = output_dir / PATCH_FILE
+            repaired.parent.mkdir(parents=True, exist_ok=True)
+            repaired.write_bytes(raw)
+
         filesystem: dict[str, Any] = {
             "verified": True,
             "source": "workspace-diff",
             "paths": list(observed),
             "mismatches": [],
         }
-        if declared:
-            try:
-                raw, extra = self._workspace_patch()
-            except RuntimeContractError as exc:
-                errors.append(str(exc))
-                contract_violation = True
-                filesystem = {"verified": False, "reason": str(exc), "source": "workspace-diff"}
-            else:
-                filesystem.update(extra)
-                patch_bytes = len(raw)
-                patch_sha256 = hashlib.sha256(raw).hexdigest()
-                patch_paths = patch_header_paths(raw.decode("utf-8", "replace"))
-                undeclared = [path for path in patch_paths if path not in declared]
-                if undeclared:
-                    errors.append(
-                        "patch touches undeclared paths: " + ", ".join(undeclared)
-                    )
-                    contract_violation = True
-                repaired = output_dir / PATCH_FILE
-                repaired.parent.mkdir(parents=True, exist_ok=True)
-                repaired.write_bytes(raw)
-
         status = "completed" if exit_code in (0, None) else "failed"
-        summary = ", ".join(declared) if declared else ""
         return (
             status,
-            summary,
+            ", ".join(declared),
             declared,
             patch_paths,
             filesystem,

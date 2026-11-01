@@ -31,6 +31,7 @@ when the checkout lives inside a denied root.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import os
@@ -38,6 +39,9 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -55,8 +59,10 @@ __all__ = [
     "SelfTestResult",
     "describe_host",
     "digest_tree",
+    "redact_process_command",
     "residual_processes",
     "run_self_test",
+    "sweep_is_visible",
     "which_launcher",
 ]
 
@@ -183,8 +189,23 @@ class Launcher:
         if self.sha256 and not _SHA256_RE.fullmatch(self.sha256):
             raise ContainmentError("launcher sha256 must be a lowercase SHA-256 digest")
 
-    def verify(self) -> str:
-        """Return the launcher's digest, or raise if it is unusable or drifted."""
+    @classmethod
+    def for_path(cls, path: str | Path, argv_prefix: Sequence[str] | None = None) -> "Launcher":
+        """Record a launcher and its digest together (the only safe way to pin one)."""
+        resolved = Path(path).expanduser()
+        prefix = tuple(argv_prefix) if argv_prefix is not None else (str(resolved), "-f", "{profile}")
+        return cls(
+            path=resolved,
+            argv_prefix=prefix,
+            sha256=hashlib.sha256(Path(resolved).read_bytes()).hexdigest(),
+        )
+
+    def verify(self, *, require_digest: bool = True) -> str:
+        """Return the launcher's digest, or raise if it is unusable or drifted.
+
+        ``require_digest`` defaults to true: a launcher pinned by path alone can be
+        replaced in place, which is exactly the swap the pin exists to stop.
+        """
         path = Path(self.path)
         if not path.is_file():
             raise ContainmentUnavailable(f"containment launcher not found: {path}")
@@ -195,6 +216,11 @@ class Launcher:
             raise ContainmentError(
                 f"launcher argv_prefix[0] ({self.argv_prefix[0]}) is not the pinned "
                 f"launcher ({path})"
+            )
+        if require_digest and not self.sha256:
+            raise ContainmentUnavailable(
+                f"containment launcher {path} has no pinned digest; a launcher pinned "
+                "by path alone can be replaced in place"
             )
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if self.sha256 and digest != self.sha256:
@@ -234,6 +260,11 @@ class ContainmentPolicy:
         for allowance in self.allowances:
             if not isinstance(allowance, str) or not allowance.strip():
                 raise ContainmentError("allowances must be non-empty strings")
+        if not self.launcher.sha256:
+            raise ContainmentError(
+                "a containment policy requires a launcher pinned by digest "
+                "(Launcher.for_path records it); a path-only pin can be swapped in place"
+            )
 
     # -- validation ------------------------------------------------------
 
@@ -316,15 +347,78 @@ class ContainmentPolicy:
         }
 
 
+_SECRET_TOKEN_RE = re.compile(
+    r"\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*)=\S*"
+)
+
+
+def redact_process_command(command: str) -> str:
+    """Keep a survivor's argv, drop the environment ``ps -E`` appends to it.
+
+    ``ps -E`` prints the child's whole environment after its argv, so a survivor
+    would otherwise copy its credentials into attempt evidence. The argv is what
+    identifies a process; the environment is not evidence and must not become it.
+    """
+    text = str(command or "")
+    for marker in (" TACTUS_ATTEMPT_DIR=", " TACTUS_ATTEMPT_ID=", " PATH="):
+        index = text.find(marker)
+        if index > 0:
+            text = text[:index]
+            break
+    return _SECRET_TOKEN_RE.sub(lambda match: match.group(1) + "=<redacted>", text).strip()
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessRef:
-    """One live process the sweep found."""
+    """One live process the sweep found, with its environment material removed."""
 
     pid: int
-    command: str
+    argv: str
+    matched_by: str = "attempt-marker"
+
+    @property
+    def command(self) -> str:
+        return self.argv
 
     def as_dict(self) -> dict[str, Any]:
-        return {"pid": self.pid, "command": self.command}
+        return {"pid": self.pid, "command": self.argv, "matched_by": self.matched_by}
+
+
+def sweep_is_visible(*, timeout: float = 10.0) -> tuple[bool, str]:
+    """Prove this host's sweep can see a marker before trusting an empty result.
+
+    ``ps -E`` does not expose the environment of every binary on macOS (Apple
+    platform binaries hide it), so "no process carries the marker" is only
+    meaningful if a marker we planted ourselves is visible. Returns
+    ``(visible, detail)``.
+    """
+
+    token = f"containment-sweep-control-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    env = dict(os.environ)
+    env[ATTEMPT_MARKER_VARIABLE] = token
+    try:
+        control = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return (False, f"control process could not start: {exc}")
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(item.pid == control.pid for item in residual_processes(token)):
+                return (True, "marker visible")
+            if control.poll() is not None:
+                break
+            time.sleep(0.02)
+        return (False, "a planted marker was not visible to the sweep")
+    finally:
+        with contextlib.suppress(OSError):
+            control.terminate()
+        with contextlib.suppress(Exception):
+            control.wait(timeout=5)
 
 
 def residual_processes(marker: str, *, timeout: float = 5.0) -> tuple[ProcessRef, ...]:
@@ -360,7 +454,7 @@ def residual_processes(marker: str, *, timeout: float = 5.0) -> tuple[ProcessRef
             pid = int(pid_text)
         except ValueError:
             continue
-        found.append(ProcessRef(pid=pid, command=command.strip()))
+        found.append(ProcessRef(pid=pid, argv=redact_process_command(command)))
     return tuple(found)
 
 
@@ -502,10 +596,11 @@ def run_self_test(
 
     def launch(argv: Sequence[str]) -> tuple[int, str]:
         command = [
-            part.replace("{profile}", str(profile_path))
+            str(item)
+            .replace("{profile}", str(profile_path))
             .replace("{workspace}", str(workspace))
-            for part in policy.launcher.argv_prefix
-        ] + [str(item) for item in argv]
+            for item in list(policy.launcher.argv_prefix) + [str(part) for part in argv]
+        ]
         try:
             completed = subprocess.run(
                 command,

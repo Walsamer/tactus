@@ -85,6 +85,7 @@ from tactus.runtime.containment import (  # noqa: E402  (after the sys.path boot
     SelfTestResult,
     describe_host,
     residual_processes,
+    sweep_is_visible,
     run_self_test,
 )
 from tactus.runtime.descriptor import (  # noqa: E402
@@ -1543,9 +1544,22 @@ def _host_record() -> dict[str, Any]:
 
 
 def _survivor_sweep(marker: str) -> dict[str, Any]:
-    """Nothing of the attempt may still be running once the attempt is over."""
+    """Nothing of the attempt may still be running once the attempt is over.
+
+    An empty result only counts when this host's process table can show a marker
+    at all: ``ps -E`` hides the environment of some binaries, so "not found" from
+    a blind sweep is reported as unverified, never as clear.
+    """
     if not marker:
         return {"marker": "", "verified": False, "reason": "no attempt marker recorded"}
+    visible, detail = sweep_is_visible()
+    if not visible:
+        return {
+            "marker": marker,
+            "verified": False,
+            "reason": f"the sweep cannot see a planted marker: {detail}",
+            "processes": [],
+        }
     try:
         survivors = residual_processes(marker)
     except ContainmentError as exc:

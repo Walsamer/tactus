@@ -646,7 +646,7 @@ def _containment_launcher():
     found = shutil.which("sandbox-exec")
     if found is None:
         pytest.skip("seatbelt launcher is not available on this host")
-    return Launcher(path=Path(found), argv_prefix=(found, "-f", "{profile}"))
+    return Launcher.for_path(found)
 
 
 def _containment_policy(denied_root: Path):
@@ -714,7 +714,7 @@ def test_a_boundary_that_cannot_be_proven_starts_nothing(tmp_path):
     fake.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
     fake.chmod(0o755)
     policy = ContainmentPolicy(
-        launcher=Launcher(path=fake, argv_prefix=(str(fake),)),
+        launcher=Launcher.for_path(fake, (str(fake),)),
         denied_roots=(DeniedRoot(path=denied, reason="operator home"),),
         egress=EgressPolicy(),
     )
@@ -1001,13 +1001,16 @@ def test_workspace_diff_contract_rejects_a_path_outside_the_scope(tmp_path):
     assert any("outside the allowed scope" in error for error in evidence.errors)
 
 
-def test_workspace_diff_contract_requires_a_provider(tmp_path):
-    root = _git_workspace(tmp_path)
+def test_workspace_diff_contract_needs_a_git_workspace(tmp_path):
+    """The supervisor is the diff source, so a non-git workspace is refused."""
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "example.py").write_text("x = 1\n", encoding="utf-8")
     descriptor = RuntimeDescriptor(
         runtime_id="fake-agent",
         adapter="process.exec@1",
         executable=sys.executable,
-        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        argv=(sys.executable, str(FAKE_AGENT), "edit-only", REQUEST_PLACEHOLDER),
         preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
         expected_version_token="fake-agent 1.0.0",
         result_contract="workspace-diff",
@@ -1017,8 +1020,85 @@ def test_workspace_diff_contract_requires_a_provider(tmp_path):
         Workspace(root=root, allowed_scope=("src",)),
         state_dir=tmp_path / "state",
     )
-    with pytest.raises(RuntimeSupervisionError, match="workspace diff provider"):
-        supervisor.run(_request())
+    evidence = supervisor.run(_request())
+    assert evidence.status == "invalid"
+    assert evidence.filesystem["verified"] is False
+    assert any("workspace diff" in error for error in evidence.errors)
+
+
+def test_workspace_diff_sees_a_staged_change_as_a_patch(tmp_path):
+    """An agent that stages its own work must not report paths with no patch."""
+    import subprocess as sp
+
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "example.py").write_text("x = 1\n", encoding="utf-8")
+    for command in (
+        ["git", "init", "-q", "."],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+    ):
+        sp.run(command, cwd=root, check=True)
+    # The agent edits and stages, the way a real CLI does.
+    (root / "src" / "example.py").write_text("x = 2\n", encoding="utf-8")
+    (root / "src" / "new_module.py").write_text("y = 3\n", encoding="utf-8")
+    sp.run(["git", "add", "-A"], cwd=root, check=True)
+
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "no-result", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        result_contract="workspace-diff",
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor,
+        Workspace(root=root, allowed_scope=("src",)),
+        state_dir=tmp_path / "state",
+    )
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "success"
+    assert set(evidence.declared_paths) == {"src/example.py", "src/new_module.py"}
+    assert evidence.patch_bytes > 0
+    patch = (Path(evidence.attempt_dir) / "output" / "patch.diff").read_text()
+    assert "src/new_module.py" in patch
+
+
+def test_workspace_diff_accepts_a_run_that_committed_its_work(tmp_path):
+    import subprocess as sp
+
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "example.py").write_text("x = 1\n", encoding="utf-8")
+    for command in (
+        ["git", "init", "-q", "."],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+    ):
+        sp.run(command, cwd=root, check=True)
+
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "commit-only", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        result_contract="workspace-diff",
+    )
+    supervisor = RuntimeSupervisor(
+        descriptor,
+        Workspace(root=root, allowed_scope=("src",)),
+        state_dir=tmp_path / "state",
+    )
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "success", evidence.errors
+    assert evidence.declared_paths == ("src/example.py",)
+    assert evidence.patch_bytes > 0
 
 
 def test_an_unknown_result_contract_is_refused():
@@ -1032,3 +1112,81 @@ def test_an_unknown_result_contract_is_refused():
             expected_version_token="fake-agent 1.0.0",
             result_contract="whatever",
         )
+
+
+# -- the boundary that was proven must be the boundary that runs -------------
+
+
+def test_a_policy_launcher_that_differs_from_the_descriptor_is_refused(tmp_path):
+    """A green matrix for one launcher must never certify another."""
+    from tactus.runtime.containment import ContainmentPolicy, DeniedRoot, EgressPolicy, Launcher
+
+    workspace = _workspace(tmp_path)
+    denied = tmp_path / "home"
+    denied.mkdir()
+    shim = tmp_path / "shim.sh"
+    shim.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    policy = ContainmentPolicy(
+        launcher=_containment_launcher(),
+        denied_roots=(DeniedRoot(path=denied, reason="home"),),
+        egress=EgressPolicy(),
+    )
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        launcher=Launcher.for_path(shim, (str(shim),)),
+    )
+    with pytest.raises(RuntimeSupervisionError, match="would not apply the boundary"):
+        RuntimeSupervisor(
+            descriptor, workspace, state_dir=tmp_path / "state", containment=policy
+        )
+
+
+def test_a_state_directory_inside_the_workspace_is_refused_when_contained(tmp_path):
+    workspace = _workspace(tmp_path)
+    policy = _containment_policy(tmp_path / "home")
+    (tmp_path / "home").mkdir(exist_ok=True)
+    descriptor = RuntimeDescriptor(
+        runtime_id="fake-agent",
+        adapter="process.exec@1",
+        executable=sys.executable,
+        argv=(sys.executable, str(FAKE_AGENT), "success", REQUEST_PLACEHOLDER),
+        preflight_argv=(sys.executable, str(FAKE_AGENT), "--version"),
+        expected_version_token="fake-agent 1.0.0",
+        launcher=policy.launcher,
+    )
+    with pytest.raises(RuntimeSupervisionError, match="inside the workspace"):
+        RuntimeSupervisor(
+            descriptor,
+            workspace,
+            state_dir=workspace.root / ".tactus-runtime",
+            containment=policy,
+        )
+
+
+def test_a_blind_sweep_never_reads_as_clear(tmp_path, monkeypatch):
+    """'Nothing found' from a sweep that cannot see a marker is not evidence."""
+    import tactus.runtime.supervision as supervision_module
+
+    monkeypatch.setattr(
+        supervision_module, "sweep_is_visible", lambda **_: (False, "planted marker invisible")
+    )
+    supervisor = _containment_supervisor(tmp_path, "success")
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "unterminated"
+    assert evidence.termination.confirmed is False
+    assert evidence.writer_lock["released"] is False
+    assert evidence.containment.get("sweep") == "unverifiable"
+
+    # A later attempt must refuse rather than assume the previous one recovered.
+    monkeypatch.setattr(
+        supervision_module, "sweep_is_visible", lambda **_: (False, "planted marker invisible")
+    )
+    with pytest.raises(RuntimeRecoveryRequired, match="sweep"):
+        _containment_supervisor(tmp_path, "success").run(_request(attempt_id="attempt-2"))

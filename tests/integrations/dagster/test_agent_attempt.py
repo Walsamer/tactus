@@ -334,7 +334,7 @@ def _sandbox_launcher():
     found = shutil.which("sandbox-exec")
     if found is None:
         pytest.skip("seatbelt launcher is not available on this host")
-    return attempt.Launcher(path=Path(found), argv_prefix=(found, "-f", "{profile}"))
+    return attempt.Launcher.for_path(found)
 
 
 def _containment_block(tmp_path: Path) -> dict:
@@ -342,7 +342,11 @@ def _containment_block(tmp_path: Path) -> dict:
     denied = tmp_path / "home"
     denied.mkdir(exist_ok=True)
     return {
-        "launcher": {"path": str(launcher.path), "argv_prefix": list(launcher.argv_prefix)},
+        "launcher": {
+            "path": str(launcher.path),
+            "argv_prefix": list(launcher.argv_prefix),
+            "sha256": launcher.sha256,
+        },
         "denied_roots": [{"path": str(denied), "reason": "operator home"}],
         "egress": {"mode": "deny"},
         "allowances": [],
@@ -471,3 +475,11 @@ def test_the_task_is_recorded_as_a_digest_in_the_account(tmp_path):
     )
     assert summary["task_sha256"] == hashlib.sha256(task.encode()).hexdigest()
     assert task not in json.dumps({k: v for k, v in summary.items() if k != "request"})
+
+
+def test_a_containment_launcher_without_a_digest_is_refused(tmp_path):
+    block = _containment_block(tmp_path)
+    del block["launcher"]["sha256"]
+    config_path = _write_config(tmp_path, _config(containment=block))
+    with pytest.raises(attempt.AgentRuntimePinError, match="pinned by digest"):
+        attempt.load_agent_runtime_pin(config_path, repo_root=REPO_ROOT)

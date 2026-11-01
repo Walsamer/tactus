@@ -294,13 +294,12 @@ def test_an_artifact_without_a_digest_is_refused(tmp_path: Path):
 def _launcher(tmp_path: Path):
     from tactus.runtime.containment import Launcher
 
-    sandbox = pytest.importorskip  # noqa: F841  (keeps the intent explicit)
     import shutil
 
     found = shutil.which("sandbox-exec")
     if found is None:
         pytest.skip("seatbelt launcher is not available on this host")
-    return Launcher(path=Path(found), argv_prefix=(found, "-f", "{profile}"))
+    return Launcher.for_path(found)
 
 
 def test_launcher_is_pinned_and_the_probe_is_deferred_to_the_self_test(tmp_path: Path):

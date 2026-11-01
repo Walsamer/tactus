@@ -84,7 +84,10 @@ XPC layer instead. A path-only denial does not close the Keychain.
 | A launcher that ignores its profile is caught | every check is a real child | `…::test_self_test_catches_a_launcher_that_does_not_apply_the_profile` |
 | The task never appears in argv | prompt written to the attempt dir, fed on stdin | `test_runtime_supervision.py::test_the_task_is_fed_on_stdin_never_on_the_command_line` |
 | Only allowlisted credential names reach the child | env allowlist, values from the supervisor | `…::test_allowlisted_credentials_reach_the_child_and_nothing_else_does`, `…::test_child_environment_is_minimal_and_attempt_local` |
-| Terminated means nothing of the attempt is alive | attempt-marker sweep after killpg | `test_containment.py::test_residual_processes_finds_a_detached_child_then_nothing` |
+| Terminated means nothing of the attempt is alive | attempt-marker sweep after killpg, trusted only once a planted marker is visible | `test_containment.py::test_residual_processes_finds_a_detached_child_then_nothing`, `test_runtime_supervision.py::test_a_blind_sweep_never_reads_as_clear` |
+| The launcher that was proven is the launcher that runs | policy and descriptor launchers must match by path, prefix and digest | `test_runtime_supervision.py::test_a_policy_launcher_that_differs_from_the_descriptor_is_refused` |
+| A launcher pinned by path alone is refused | `Launcher.verify` requires a digest | `test_containment.py::test_a_launcher_pinned_by_path_alone_is_refused` |
+| Attempt state may not sit inside the workspace | the write allowlist would cover the recovery record | `test_runtime_supervision.py::test_a_state_directory_inside_the_workspace_is_refused_when_contained` |
 | A survivor keeps the workspace owned, also across restarts | recorded marker swept before a previous attempt may be `recovered` | `test_runtime_supervision.py::test_a_surviving_marker_keeps_the_workspace_owned` |
 | Artifact drift is refused before anything runs | file digest, tree manifest digest + file count | `test_runtime_contract.py::test_tree_artifact_digest_drift_fails_closed`, `…::test_an_artifact_without_a_digest_is_refused` |
 | Launcher drift is refused before anything runs | pinned launcher digest | `…::test_launcher_digest_mismatch_fails_closed` |
@@ -145,6 +148,10 @@ publication authority.
 | Artifact digest or file count drift | `RuntimePreflightError` before the lock |
 | Attempt marker still in the process table | termination stays unconfirmed, lock held, status `unterminated`; a later attempt records `unresolved` and requires an operator |
 | Survivor sweep itself unavailable (`ps` fails) | treated as unverifiable ⇒ not confirmed |
+| Survivor sweep cannot see a planted marker | treated as unverifiable ⇒ not confirmed, and a later attempt records `unresolved` |
+| Containment policy and descriptor name different launchers | refused before a child exists |
+| Launcher declared without a digest | refused: a path-only pin can be swapped in place |
+| State directory inside the workspace while contained | refused before the profile is rendered |
 
 Re-recording a pin (a new macOS build changes `/usr/bin/sandbox-exec`) is an
 operator change reviewed like any other: the launcher digest and the host build
@@ -169,6 +176,16 @@ live in the pin file, and a mismatch is a refusal, never a warning.
   to start a thread under `(deny default)`; that is a same-user shared-memory
   channel. Pinned runtimes record their allowances in the pin file, so an
   allowance can be reviewed and cannot grow silently. Pi 1.3.0 needs none.
+* **The sweep is a hygiene gate, not an adversarial one.** It marks every child
+  with a per-run variable and finds survivors by that marker; a survivor that
+  clears its own environment (`env -u`) is not found. What it does catch is the
+  normal case — a `nohup`, `setsid` or background helper an agent left behind —
+  and its blindness is now measured (a planted marker must be visible) rather than
+  assumed.
+* **`workspace-diff` needs git.** The mode stages the workspace and diffs against
+  the revision recorded before the child spawned, so a run that stages or commits
+  its own work is still accounted for; a workspace that is not a git checkout is
+  refused in that mode rather than reported as an empty diff.
 * **No protection against the operator's own account.** The child runs as the
   same user; the boundary denies paths, IPC and network, it does not create a
   security principal. A distinct account or a VM remains the stronger option.

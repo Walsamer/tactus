@@ -40,7 +40,7 @@ requires_seatbelt = pytest.mark.skipif(
 
 def _launcher() -> Launcher:
     assert SANDBOX is not None
-    return Launcher(path=Path(SANDBOX), argv_prefix=(SANDBOX, "-f", "{profile}"))
+    return Launcher.for_path(SANDBOX)
 
 
 def _policy(**kwargs: object) -> ContainmentPolicy:
@@ -88,6 +88,16 @@ def test_egress_sbpl_is_explicit_per_mode() -> None:
 def test_launcher_verify_returns_the_observed_digest() -> None:
     digest = _launcher().verify()
     assert len(digest) == 64
+
+
+@requires_seatbelt
+def test_a_launcher_pinned_by_path_alone_is_refused() -> None:
+    """A path-only pin can be replaced in place, which is the swap we must stop."""
+    unpinned = Launcher(path=Path(SANDBOX), argv_prefix=(SANDBOX or "", "-f", "{profile}"))
+    with pytest.raises(ContainmentUnavailable, match="no pinned digest"):
+        unpinned.verify()
+    with pytest.raises(ContainmentError, match="pinned by digest"):
+        ContainmentPolicy(launcher=unpinned)
 
 
 @requires_seatbelt
@@ -309,7 +319,7 @@ def test_self_test_catches_a_launcher_that_does_not_apply_the_profile(
     fake.write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
     fake.chmod(0o755)
     policy = ContainmentPolicy(
-        launcher=Launcher(path=fake, argv_prefix=(str(fake),)),
+        launcher=Launcher.for_path(fake, (str(fake),)),
         denied_roots=(denied,),
     )
     result = run_self_test(policy, workspace=workspace, attempt_dir=attempt / "fake")

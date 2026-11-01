@@ -43,6 +43,7 @@ from typing import Any, Mapping
 
 from tactus.integrations.agents import RuntimeAgentAdapter
 from tactus.runtime.containment import (
+    ContainmentError,
     ContainmentPolicy,
     DeniedRoot,
     EgressPolicy,
@@ -101,7 +102,15 @@ _REQUIRED_KEYS = frozenset(
 )
 
 _OPTIONAL_KEYS = frozenset(
-    {"limits", "purpose", "containment", "artifacts", "env_allowlist", "stdin_from"}
+    {
+        "limits",
+        "purpose",
+        "containment",
+        "artifacts",
+        "env_allowlist",
+        "stdin_from",
+        "result_contract",
+    }
 )
 
 _LIMIT_KEYS = frozenset(
@@ -173,6 +182,7 @@ class AgentRuntimePin:
     containment: ContainmentPolicy | None = None
     env_allowlist: tuple[str, ...] = ()
     stdin_from: str = "none"
+    result_contract: str = "agent-artifacts"
 
     @property
     def launcher(self) -> Launcher | None:
@@ -210,6 +220,7 @@ class AgentRuntimePin:
             launcher=self.launcher,
             env_allowlist=self.env_allowlist,
             stdin_from=self.stdin_from,
+            result_contract=self.result_contract,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -230,6 +241,7 @@ class AgentRuntimePin:
             "containment": self.containment.as_dict() if self.containment else None,
             "env_allowlist": list(self.env_allowlist),
             "stdin_from": self.stdin_from,
+            "result_contract": self.result_contract,
         }
 
 
@@ -402,7 +414,7 @@ def _containment(config: Mapping[str, Any], path: Path) -> ContainmentPolicy | N
                     reason=_required_str(entry, "reason", path),
                 )
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, ContainmentError) as exc:
             raise AgentRuntimePinError(
                 f"runtime pin denied root is invalid ({path}): {exc}"
             ) from exc
@@ -431,8 +443,10 @@ def _containment(config: Mapping[str, Any], path: Path) -> ContainmentPolicy | N
             egress=egress,
             allowances=tuple(allowances_raw),
         )
-    except (TypeError, ValueError) as exc:
-        raise AgentRuntimePinError(f"runtime pin containment is invalid ({path}): {exc}") from exc
+    except (TypeError, ValueError, ContainmentError) as exc:
+        raise AgentRuntimePinError(
+            f"runtime pin containment is invalid ({path}): {exc}"
+        ) from exc
 
 
 def load_agent_runtime_pin(
@@ -517,6 +531,7 @@ def load_agent_runtime_pin(
         containment=_containment(config, path),
         env_allowlist=_optional_str_tuple(config, "env_allowlist", path),
         stdin_from=str(config.get("stdin_from", "none")),
+        result_contract=str(config.get("result_contract", "agent-artifacts")),
     )
 
 
@@ -588,12 +603,7 @@ def _summary(
         # What the boundary actually observed: policy, profile digest and the
         # denial matrix, or an explicit statement that there was none.
         "containment": dict(evidence.containment),
-        "isolation": (
-            "enforced (pinned launcher; write allowlist, read deny-list, egress "
-            f"{pin.containment.egress.mode})"
-            if pin.containment is not None
-            else "none (same OS account: no filesystem or network boundary)"
-        ),
+        "isolation": _isolation_claim(pin, evidence),
     }
 
 
@@ -698,6 +708,21 @@ def _git_changed_paths(root: Path, timeout: float = 30.0) -> tuple[str, ...]:
         if candidate and candidate not in paths:
             paths.append(candidate)
     return tuple(paths)
+
+
+def _isolation_claim(pin: "AgentRuntimePin", evidence: Any) -> str:
+    """What the boundary actually observed, never what the pin intended."""
+    if pin.containment is None:
+        return "none (same OS account: no filesystem or network boundary)"
+    containment = dict(getattr(evidence, "containment", {}) or {})
+    self_test = containment.get("self_test") or {}
+    if not containment.get("enabled") or not self_test.get("ok"):
+        return "not established (containment self-test did not hold)"
+    return (
+        "enforced (pinned launcher; write allowlist, read deny-list, egress "
+        + pin.containment.egress.mode
+        + ")"
+    )
 
 
 def _credential_values(names: tuple[str, ...]) -> dict[str, str]:
