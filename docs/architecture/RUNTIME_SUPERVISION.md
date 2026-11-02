@@ -212,7 +212,15 @@ belong to supervision, not only to containment:
   the runtime's JSONL stdout, so `thread.started` followed by
   `401 Unauthorized … invalid_api_key` (platform-key route) or
   `workspace routing discovery failed` (session route) is evidence that the model
-  call was reached inside the boundary.
+  call was reached inside the boundary;
+* **the verdict and the cause are two facts, and the evidence carries both.** The
+  pinned CLI reconnects a rejected connection until the attempt deadline, so a
+  supervision verdict can read `timeout` while the cause is an authentication
+  rejection. The deadline is the real bound and is never shortened to make a
+  report prettier; instead the canary classifies the cause into
+  `attempt.auth_rejection` (`detected`, the matching `marker`, the offending line
+  as `detail`) beside the verdict, and the 401 itself stays in
+  `attempt.stderr_tail` and in the supervisor's `output.stdout`.
 
 ## Prerequisite for a real coding agent (what phase 2 closed, what is still open)
 

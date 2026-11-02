@@ -100,11 +100,17 @@ keychain *file of its own* inside its writable workspace. It still cannot read
 the operator's keychain stores (`~/Library/Keychains/login.keychain-db` is
 `Operation not permitted`), and the operator's preferences stay out of reach
 because the child's `HOME` is attempt-local (`defaults read com.apple.dock` is
-`Domain not found` inside the boundary and outside it for that home). Reading an
-*item* out of a keychain the child can see still needs that item's ACL and an
-authorisation the sandboxed child cannot answer — which is why no denial-matrix
-check claims it: a meaningful check would need a real item on the operator's
-machine, and inventing one would be theatre.
+`Domain not found` inside the boundary and outside it for that home).
+
+**What is deliberately not proven: reading an individual keychain item.** A child
+with securityd access can *ask*; whether an item comes back depends on that item's
+ACL, and answering the authorisation prompt is something a headless sandboxed child
+cannot do. Testing it would have meant touching the operator's real secrets, and a
+machine-specific test that only passes where a particular item happens to exist is
+worse than no test: it would look like coverage and prove nothing. So the denial
+matrix proves the portable half — the store *file* stays denied
+(`read_denied_keychain_store`) — and this paragraph states the other half as
+unmeasured rather than dressed up.
 
 ## Enforced — each with its proof
 
@@ -158,6 +164,25 @@ These are the denials the matrix observes, run as real children:
 | `git push` to a remote outside the workspace | rejected; the remote's ref list is unchanged |
 | nested `sandbox-exec -p '(allow default)'` | `sandbox_apply: Operation not permitted` |
 | `kill` of the supervisor or of pid 1 | `Operation not permitted` |
+
+### Reading a canary verdict
+
+Two of the rows above are the ones an operator can misread, so they are spelled
+out:
+
+* **`timeout` can mean a rejected credential.** The pinned CLI reconnects a refused
+  connection with backoff until the attempt deadline, so the supervisor's verdict
+  reads `timeout` while the cause is an authentication rejection. The deadline is
+  the real bound and is not shortened to make a report prettier; instead the canary
+  classifies the cause into `attempt.auth_rejection` (`detected`, `marker`,
+  `detail`) beside the verdict, and the 401 itself lives in `attempt.stderr_tail`
+  and in the supervisor's `output.stdout`.
+* **`HTTP 451` is the network, not the profile.** On a network that refuses the
+  subscription backend (`chatgpt.com`) the session route authenticates and then
+  ends there, in and outside the boundary alike. A *completing* canary needs a
+  network that reaches that backend, or the platform-key route, which reaches
+  `api.openai.com` instead. Reading 451 as a containment failure would send the
+  next operator widening a boundary that was never the problem.
 
 Cost, measured rather than estimated: **8 checks in 0.17–0.18 s** (two runs, this
 host) per attempt; artifact digest **~1.0 s** for a single 246 MB binary, **~3.8 s

@@ -44,6 +44,24 @@ What it does, in order
 ``--dry-run`` does everything except the model call (a rehearsal that spends no
 quota): stage, workspace, denial matrix, evidence.
 
+What a failing run looks like, and what it means
+------------------------------------------------
+Two failures are *not* boundary failures, and the evidence says which one happened:
+
+* a **rejected credential**. The pinned CLI reconnects a refused connection until
+  the attempt deadline, so the verdict can read ``timeout`` while the cause is an
+  authentication rejection. The 401 is in ``attempt.stderr_tail`` and in the
+  supervisor's captured stdout, and ``attempt.auth_rejection`` names it beside the
+  verdict. The deadline is the real bound and is never shortened to make a verdict
+  prettier;
+* a **network that does not reach the credential's endpoint**. The session route
+  talks to the subscription backend (``chatgpt.com``); where that host answers
+  ``HTTP 451`` the attempt authenticates and then ends there — measured identically
+  outside the boundary, so it is a fact about the network, not about the profile.
+
+The environment route (``credential_env``) reaches ``api.openai.com`` instead, which
+is why a dummy platform key fails at the model call with ``401 … invalid_api_key``.
+
 The pinned runtime's argv
 -------------------------
 A :class:`RuntimeDescriptor` requires exactly one ``{request}`` placeholder, and
@@ -1534,7 +1552,51 @@ def collect_patch(
     )
 
 
-# -- usage -----------------------------------------------------------------
+# -- usage and failure classification ---------------------------------------
+
+#: What a rejected credential looks like in the pinned runtime's own output. A 401
+#: does not end the attempt — the CLI reconnects until the attempt deadline — so the
+#: supervisor's verdict can read `timeout` while the cause is an authentication
+#: rejection. These markers are how the cause is named beside the verdict.
+AUTH_REJECTION_MARKERS = (
+    "401 Unauthorized",
+    "invalid_api_key",
+    "Missing bearer",
+)
+
+
+def classify_auth_rejection(stdout: str, stderr: str) -> dict[str, Any]:
+    """Whether the attempt's failure was a rejected credential, not the boundary.
+
+    Classification only: the verdict stays exactly what the supervisor observed, so
+    a rejected credential the runtime keeps retrying still reads `timeout`. This says
+    what the cause was and where the evidence for it is, because a report that reads
+    "timeout" otherwise invites exactly the wrong conclusion about the boundary.
+    """
+    lines = [
+        line.strip()
+        for line in f"{stderr}\n{stdout}".splitlines()
+        if line.strip()
+    ]
+    for marker in AUTH_REJECTION_MARKERS:
+        for line in lines:
+            if marker in line:
+                return {
+                    "detected": True,
+                    "marker": marker,
+                    "detail": line[:MAX_DETAIL_CHARS],
+                    "verdict_unchanged": True,
+                    "evidence_of_cause": (
+                        "attempt.stderr_tail and the supervisor's output.stdout; the "
+                        "runtime retries a rejected connection, so the attempt can "
+                        "still end at its deadline"
+                    ),
+                }
+    return {
+        "detected": False,
+        "markers": list(AUTH_REJECTION_MARKERS),
+        "verdict_unchanged": True,
+    }
 
 
 def parse_usage(stdout: str, *, truncated: bool) -> dict[str, Any]:
@@ -2114,6 +2176,8 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
             ),
         }
         evidence["usage"] = parse_usage(attempt.stdout, truncated=attempt.output_truncated)
+        rejection = classify_auth_rejection(attempt.stdout, attempt.stderr)
+        evidence["attempt"]["auth_rejection"] = rejection
         evidence["patch"] = patch.as_dict()
         evidence["containment_checks"] = {
             "push": push.as_dict(),
@@ -2173,6 +2237,13 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
                 f"{usage.get('cached_input_tokens')}, output {usage.get('output_tokens')}",
             ]
         )
+        if rejection["detected"]:
+            extra.append(
+                f"cause: the credential was rejected ({rejection['marker']}); the verdict "
+                f"stays {attempt.status} because the runtime retries a rejected "
+                "connection until the deadline — the 401 is in the attempt's "
+                "stderr_tail and in the child's stdout"
+            )
 
     ok = not reasons
     verdict = {"ok": ok, "reasons": reasons}

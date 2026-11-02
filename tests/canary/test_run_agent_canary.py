@@ -692,6 +692,12 @@ def test_a_real_run_stages_the_session_file_into_the_attempt_home(
     assert staged.is_relative_to(Path(evidence["attempt"]["attempt_dir"]))
     assert not staged.exists()
 
+    # The cause of the failure is classified beside the verdict, and a run with no
+    # rejected credential says so rather than guessing.
+    rejection = evidence["attempt"]["auth_rejection"]
+    assert rejection["detected"] is False
+    assert rejection["verdict_unchanged"] is True
+
     # The child read it: its own report says the file was there.
     supervisor = json.loads(
         Path(evidence["attempt"]["supervisor_evidence"]).read_text(encoding="utf-8")
@@ -705,6 +711,33 @@ def test_a_real_run_stages_the_session_file_into_the_attempt_home(
         for path in Path(evidence["attempt"]["attempt_dir"]).rglob("*"):
             if path.is_file():
                 assert value.encode() not in path.read_bytes(), path
+
+
+def test_an_auth_rejection_is_named_beside_the_verdict_not_instead_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected credential is classified; the verdict it produced is untouched.
+
+    The pinned CLI reconnects a refused connection until the attempt deadline, so the
+    supervisor reports `timeout`. Shortening the deadline to make that read nicer
+    would trade a real bound for a prettier report; naming the cause beside it costs
+    nothing.
+    """
+    stderr = (
+        "Reading additional input from stdin...\n"
+        '2026-11-02T10:46:27.835989Z ERROR codex_api::endpoint::responses_websocket: '
+        "failed to connect to websocket: HTTP error: 401 Unauthorized, url: "
+        "wss://api.openai.com/v1/responses\n"
+    )
+    clean = command.classify_auth_rejection('{"type":"turn.started"}', "")
+    rejected = command.classify_auth_rejection("", stderr)
+
+    assert clean["detected"] is False
+    assert rejected["detected"] is True
+    assert rejected["marker"] == "401 Unauthorized"
+    assert "401 Unauthorized" in rejected["detail"]
+    # Classification never rewrites the verdict, in either direction.
+    assert rejected["verdict_unchanged"] is True and clean["verdict_unchanged"] is True
 
 
 def test_the_survivor_sweep_accepts_a_workspace_root(tmp_path):

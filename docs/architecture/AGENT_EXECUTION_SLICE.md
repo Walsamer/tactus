@@ -27,11 +27,19 @@ denial matrix holds 8/8 with those allowances, and no ambient credential is
 reachable (the denial of `$HOME`, `~/.codex`, `~/.ssh` and `~/Library/Keychains`
 is unchanged). What the run does *not* yet show is a completed edit: this
 network answers the subscription backend with `HTTP 451` (`chatgpt.com`, inside
-and outside the boundary alike), so the attempt authenticates and then fails at
-that endpoint. The platform-key route is what reaches the model endpoint
-(measured: `401 Unauthorized`, `invalid_api_key`, with a dummy key), and it stays
-documented as the alternative in the pin. See
-[`CONTAINMENT.md`](CONTAINMENT.md) "Measured on this host" for each observation.
+and outside the boundary alike — a fact about the network, **not** a boundary
+failure), so the attempt authenticates and then ends at that endpoint. The
+platform-key route is what reaches the model endpoint (measured:
+`401 Unauthorized`, `invalid_api_key`, with a dummy key), and it stays documented
+as the alternative in the pin.
+
+Two things the operator must not misread in the evidence: a verdict of `timeout`
+can mean a *rejected credential*, because the CLI reconnects until the deadline —
+the 401 is in `attempt.stderr_tail` and in the child's stdout, and
+`attempt.auth_rejection` names it beside the verdict; and `HTTP 451` is the
+network refusing the subscription backend, not the profile refusing the runtime.
+See [`CONTAINMENT.md`](CONTAINMENT.md) "Measured on this host" for each
+observation.
 
 ## What this slice is
 
