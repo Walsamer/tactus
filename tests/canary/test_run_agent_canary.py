@@ -30,7 +30,13 @@ from tactus.runtime.containment import digest_tree
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SCRIPT = REPOSITORY / "scripts" / "run_agent_canary.py"
+SHIPPED_PIN = REPOSITORY / "config" / "agent-runtime-canary.json"
 SANDBOX = shutil.which("sandbox-exec")
+
+#: The credential the pinned Codex CLI authenticates ``codex exec`` from. It is
+#: *not* ``OPENAI_API_KEY``: that name was right for an older CLI and this build
+#: ignores it, sends no bearer and fails every attempt with ``Missing bearer``.
+_CREDENTIAL = "CODEX_API_KEY"
 
 #: A stand-in for the pinned runtime: version, model list, and (never reached in
 #: these tests) a successful JSONL turn. ``/bin/sh`` keeps it readable inside the
@@ -128,8 +134,8 @@ def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
             "probe_argv": ["{executable}", "debug", "models"],
             "probe_timeout_seconds": 30.0,
         },
-        "env_allowlist": ["OPENAI_API_KEY"],
-        "credential_env": "OPENAI_API_KEY",
+        "env_allowlist": [_CREDENTIAL],
+        "credential_env": _CREDENTIAL,
         "stdin_from": "prompt",
         "allowed_scope": ["src", "tests"],
         "containment": {
@@ -220,7 +226,7 @@ def test_refuses_without_operator(
 def test_missing_key_is_refused_before_anything_is_created(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(_CREDENTIAL, raising=False)
     pin = _pin(tmp_path)
 
     code = command.main(
@@ -229,7 +235,7 @@ def test_missing_key_is_refused_before_anything_is_created(
 
     captured = capsys.readouterr()
     assert code == command.EXIT_REFUSED
-    assert "OPENAI_API_KEY" in captured.err
+    assert _CREDENTIAL in captured.err
     # Both satisfaction routes, named, so the operator knows what to do.
     assert "scoped and low-limit" in captured.err
     assert "platform API key" in captured.err
@@ -238,6 +244,42 @@ def test_missing_key_is_refused_before_anything_is_created(
     assert not (tmp_path / "stage").exists()
     assert not (tmp_path / "workspaces").exists()
     assert not (tmp_path / "evidence.json").exists()
+
+
+def test_the_missing_credential_message_follows_the_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal names the pin's variable, so a rename cannot leave a stale message."""
+    variable = "TACTUS_TEST_CREDENTIAL"
+    monkeypatch.delenv(variable, raising=False)
+    pin = _pin(tmp_path)
+    document = json.loads(pin.read_text(encoding="utf-8"))
+    document["env_allowlist"] = [variable]
+    document["credential_env"] = variable
+    pin.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+    code = command.main(
+        ["--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    captured = capsys.readouterr()
+    assert code == command.EXIT_REFUSED
+    assert f"{variable} is not set" in captured.err
+    assert not (tmp_path / "stage").exists()
+
+
+def test_the_shipped_pin_names_the_credential_the_runtime_reads() -> None:
+    """Regression: the pin once named ``OPENAI_API_KEY``, which this CLI ignores.
+
+    The pinned Codex CLI authenticates ``codex exec`` from ``CODEX_API_KEY`` only:
+    with the old name it sent no bearer at all (``Missing bearer or basic
+    authentication in header``) and every attempt failed at the model call. The
+    name is part of the pin's measured statement about one binary, so pinning a
+    different runtime means measuring this again, not editing a string.
+    """
+    pin = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
+    assert pin["credential_env"] == "CODEX_API_KEY"
+    assert pin["env_allowlist"] == [pin["credential_env"]]
 
 
 # -- staging ---------------------------------------------------------------
@@ -268,7 +310,7 @@ def test_staging_refuses_a_digest_mismatch(
 def test_fixture_repository_initialises_and_the_denial_matrix_holds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(_CREDENTIAL, raising=False)
     pin = _pin(tmp_path)
     evidence_path = tmp_path / "evidence.json"
 
@@ -339,7 +381,7 @@ def test_fixture_repository_initialises_and_the_denial_matrix_holds(
 def test_dry_run_skips_the_model_call_and_records_the_matrix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(_CREDENTIAL, raising=False)
     pin = _pin(tmp_path)
     evidence_path = tmp_path / "evidence.json"
 
@@ -376,7 +418,7 @@ def test_dry_run_skips_the_model_call_and_records_the_matrix(
     assert evidence["patch"] is None
     assert evidence["containment_checks"] is None
     assert evidence["credentials"] == {
-        "variable": "OPENAI_API_KEY",
+        "variable": _CREDENTIAL,
         "present": False,
         "used": False,
         "in_argv": False,
@@ -429,7 +471,7 @@ def test_a_workspace_inside_a_denied_root_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The boundary is the pin's own list, not a hard-coded $HOME."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(_CREDENTIAL, raising=False)
     pin = _pin(tmp_path)
     inside_denied = tmp_path / "denied" / "workspace"
     code = command.main(
@@ -450,7 +492,7 @@ def test_a_workspace_inside_a_denied_root_is_refused(
 def test_a_staging_root_inside_a_denied_root_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(_CREDENTIAL, raising=False)
     pin = _pin(tmp_path)
     inside_denied = tmp_path / "denied" / "runtime-root"
     code = command.main(

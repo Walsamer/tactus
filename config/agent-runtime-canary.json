@@ -51,8 +51,8 @@
     "probe_argv": ["{executable}", "debug", "models"],
     "probe_timeout_seconds": 60.0
   },
-  "env_allowlist": ["OPENAI_API_KEY"],
-  "credential_env": "OPENAI_API_KEY",
+  "env_allowlist": ["CODEX_API_KEY"],
+  "credential_env": "CODEX_API_KEY",
   "stdin_from": "prompt",
   "allowed_scope": ["src", "tests"],
   "containment": {

@@ -11,9 +11,11 @@ The operator runs it; the quota belongs to their credential.
 What it does, in order
 ----------------------
 1. Refuses without ``--approve`` (a human decision) and without ``--operator``.
-2. Requires ``OPENAI_API_KEY`` in the environment for a real run; the value is
-   handed to the child through the supervisor's credential channel only. It is
-   never in argv, never in the evidence file, never on stdout.
+2. Requires the credential the pin names (``credential_env``, ``CODEX_API_KEY``
+   for the shipped runtime: the pinned Codex CLI authenticates ``codex exec``
+   from it and ignores the older ``OPENAI_API_KEY``) in the environment for a
+   real run; the value is handed to the child through the supervisor's credential
+   channel only. It is never in argv, never in the evidence file, never on stdout.
 3. Stages the pinned runtime from ``config/agent-runtime-canary.json`` into a
    Tactus-owned root outside ``$HOME`` (the profile denies ``$HOME``, so the copy
    is what makes the runtime readable) and re-verifies the pinned digest of every
