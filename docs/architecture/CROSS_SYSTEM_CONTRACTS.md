@@ -65,8 +65,11 @@ limits, backend/provider/runtime/model and idempotency identity.
 Admission is **outcome-first**, never verdict-first. `EXECUTABLE` is the only
 outcome that carries an `ExecutionIntent` and may start new work. `NO_EXECUTION`
 was validated and permitted and reaches no execution backend, so Tactus acts on
-`proposal.decision` (ESCALATE, ABORT, DECOMPOSE) through the same applier and
-decision ledger as any other authorising decision. `DENIED`, `PENDING`,
+`proposal.decision` (ESCALATE and ABORT today; DECOMPOSE once its proposal
+binding can be verified) through the same applier and decision ledger as any
+other authorising decision. An executable intent must bind the validated
+proposal digest and the snapshot it was validated against: an intent for a
+different payload is not the result of that validation. `DENIED`, `PENDING`,
 `NO_ROUTE` and `INVALID` are typed non-authorising results: the caller receives
 the outcome, and no Work Order transition, intervention request or ledger row is
 written. Reading the policy verdict instead of the resolved outcome is the bug

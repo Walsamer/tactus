@@ -42,17 +42,26 @@ def _envelope(**overrides):
 
 
 def _executable(**overrides):
-    return _envelope(
+    payload = _envelope(
         proposal={"proposal_id": "proposal-1", "schema_version": 2, "decision": "REEXECUTE"},
         capability_validation={"capability": "test.verify", "admitted": True, "permitted": True, "reason": "validated"},
         outcome="EXECUTABLE",
-        intent={
+        **overrides,
+    )
+    if "intent" not in overrides:
+        snapshot = payload["snapshot"]
+        payload["intent"] = {
             "schema_version": 1, "intent_id": "intent-1", "capability": "test.verify",
             "target": {"type": "work_order", "id": "WO-1"},
             "requested_by": {"provider": "rules", "decision_id": "proposal-1"},
-        },
-        **overrides,
-    )
+            "policy_context": {
+                "proposal_digest": payload["validation"]["proposal_digest"],
+                "snapshot_id": snapshot["snapshot_id"],
+                "snapshot_revision": snapshot["revision"],
+                "snapshot_digest": snapshot["digest"],
+            },
+        }
+    return payload
 
 
 def _legacy(verdict="ALLOW", token="REEXECUTE"):
@@ -210,18 +219,95 @@ def test_executable_reexecute_normalization():
     assert admission.intent is payload["intent"]
 
 
-def test_route_normalization_and_non_route_rejection():
+def test_route_is_normalized_and_only_a_capability_decision_may_carry_one():
     payload = _executable()
     payload["proposal"]["decision"] = "ROUTE"
     payload["route"] = {"exclude_backend": "old", "preferred_backend": "new", "required_provider": "provider", "required_runtime": "runtime"}
     admission = parse_envelope(payload)
     assert admission.route == admission.decision.route == RouteConstraints(**payload["route"])
+
+    # The envelope contract forbids ``route`` only for a decision that carries no
+    # capability; a capability-bearing non-ROUTE decision may carry one, and it is
+    # preserved on the admission without becoming a ROUTE effect.
     payload["proposal"]["decision"] = "REEXECUTE"
-    with pytest.raises(MalformedEnvelopeError, match="only valid for ROUTE"):
+    admission = parse_envelope(payload)
+    assert admission.route == RouteConstraints(**payload["route"])
+    assert admission.decision.kind is DecisionKind.REEXECUTE
+    assert admission.decision.route is None
+
+    payload.pop("route")
+    payload.pop("capability_validation")
+    payload["proposal"]["decision"] = "ESCALATE"
+    payload["outcome"] = "NO_EXECUTION"
+    payload.pop("intent")
+    payload["route"] = {"preferred_backend": "new"}
+    with pytest.raises(MalformedEnvelopeError, match="carries no route"):
         parse_envelope(payload)
+
+    payload["route"] = {"unknown": "value"}
     payload["proposal"]["decision"] = "ROUTE"
-    payload["route"]["unknown"] = "value"
+    payload["capability_validation"] = {"capability": "test.verify", "admitted": True, "permitted": True, "reason": "validated"}
+    payload["outcome"] = "EXECUTABLE"
     with pytest.raises(MalformedEnvelopeError, match="unknown fields"):
+        parse_envelope(payload)
+
+
+def test_executable_intent_must_bind_the_validated_proposal_and_snapshot():
+    """Ictus refuses an intent that does not name the validated proposal."""
+
+    payload = _executable()
+    payload["intent"]["policy_context"]["proposal_digest"] = "c" * 64
+    with pytest.raises(MalformedEnvelopeError, match="proposal_digest must equal"):
+        parse_envelope(payload)
+
+    payload = _executable()
+    payload["intent"].pop("policy_context")
+    with pytest.raises(MalformedEnvelopeError, match="must carry policy_context"):
+        parse_envelope(payload)
+
+    payload = _executable()
+    payload["intent"]["policy_context"]["snapshot_digest"] = "d" * 64
+    with pytest.raises(MalformedEnvelopeError, match="must match the envelope snapshot"):
+        parse_envelope(payload)
+
+
+def _grant(**overrides):
+    grant = {
+        "grant_id": "grant-1", "approval": "human",
+        "subject": {"type": "work_order", "id": "WO-1"}, "revision": 0,
+        "capability": "test.verify", "policy_version": "policy.v1",
+        "issued_at": "2025-12-01T00:00:00Z", "expires_at": "2026-06-01T00:00:00Z",
+        "revoked": False, "evidence": [{"kind": "signature", "uri": "sig:abc"}],
+    }
+    grant.update(overrides)
+    return grant
+
+
+def test_satisfied_approval_requires_a_live_bound_grant():
+    """A claimed human approval must name a grant that binds this decision."""
+
+    payload = _executable()
+    payload["approvals"] = [{"name": "human", "satisfied": True}]
+    with pytest.raises(MalformedEnvelopeError, match="no matching bound grant"):
+        parse_envelope(payload)
+
+    payload["grants"] = [_grant()]
+    assert parse_envelope(payload).outcome is EnvelopeOutcome.EXECUTABLE
+
+    payload["grants"] = [_grant(revoked=True)]
+    with pytest.raises(MalformedEnvelopeError, match="no matching bound grant"):
+        parse_envelope(payload)
+
+    payload["grants"] = [_grant(revision=9)]
+    with pytest.raises(MalformedEnvelopeError, match="no matching bound grant"):
+        parse_envelope(payload)
+
+    payload["grants"] = [_grant(expires_at="2025-12-31T00:00:00Z")]
+    with pytest.raises(MalformedEnvelopeError, match="expire after validation"):
+        parse_envelope(payload)
+
+    payload["grants"] = [_grant(issued_at="2026-02-01T00:00:00Z")]
+    with pytest.raises(MalformedEnvelopeError, match="issued before"):
         parse_envelope(payload)
 
 

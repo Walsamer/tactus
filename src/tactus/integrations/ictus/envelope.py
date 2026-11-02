@@ -261,6 +261,12 @@ def parse_envelope(payload: Mapping[str, Any]) -> DecisionAdmission:
         _boolean(capability_validation, "admitted")
         _boolean(capability_validation, "permitted")
     route = _parse_route(payload, kind)
+    validation = _object(
+        payload, "validation", {"context_id", "proposal_digest", "capability_version", "validated_at"}
+    )
+    proposal_digest = _required_str(validation, "proposal_digest")
+    validated_at = _parse_datetime(validation.get("validated_at"), "validation.validated_at")
+    snapshot_revision = _integer(snapshot, "revision", minimum=0)
     intent = None
     if outcome is EnvelopeOutcome.EXECUTABLE:
         if capability_validation is None or not (
@@ -277,14 +283,29 @@ def parse_envelope(payload: Mapping[str, Any]) -> DecisionAdmission:
         target = _subject(intent, "target")
         if (target["type"], target["id"]) != (subject["type"], subject["id"]):
             raise MalformedEnvelopeError("intent.target must match subject")
+        # An intent must bind the exact validated proposal and snapshot, or the
+        # arguments that would execute were never the ones policy approved.
+        _bind_intent_to_validation(
+            intent,
+            proposal_digest=proposal_digest,
+            snapshot_id=_required_str(snapshot, "snapshot_id"),
+            snapshot_revision=snapshot_revision,
+            snapshot_digest=_required_str(snapshot, "digest"),
+        )
     elif "intent" in payload:
         raise MalformedEnvelopeError("non-EXECUTABLE outcome must not carry intent")
 
     _validate_approvals(approvals)
-    _validate_grants(grants)
-    validation = _object(
-        payload, "validation", {"context_id", "proposal_digest", "capability_version", "validated_at"}
-    )
+    _validate_grants(grants, validated_at=validated_at)
+    if capability is not None:
+        _validate_approval_bindings(
+            approvals,
+            grants,
+            subject=subject,
+            revision=snapshot_revision,
+            capability=capability,
+            policy_version=_required_str(policy, "policy_version"),
+        )
     proposal_id = _required_str(proposal, "proposal_id")
     return DecisionAdmission(
         source=DecisionSource.ENVELOPE,
@@ -294,7 +315,7 @@ def parse_envelope(payload: Mapping[str, Any]) -> DecisionAdmission:
         subject_type=subject["type"],
         subject_id=subject["id"],
         snapshot_id=_required_str(snapshot, "snapshot_id"),
-        snapshot_revision=_integer(snapshot, "revision", minimum=0),
+        snapshot_revision=snapshot_revision,
         snapshot_digest=_required_str(snapshot, "digest"),
         proposal_id=proposal_id,
         proposal_schema_version=proposal_version,
@@ -307,15 +328,18 @@ def parse_envelope(payload: Mapping[str, Any]) -> DecisionAdmission:
         intent=intent,
         validation=EnvelopeValidation(
             context_id=_required_str(validation, "context_id"),
-            proposal_digest=_required_str(validation, "proposal_digest"),
+            proposal_digest=proposal_digest,
             capability_version=_required_str(validation, "capability_version"),
-            validated_at=_parse_datetime(validation.get("validated_at"), "validation.validated_at"),
+            validated_at=validated_at,
         ),
         expires_at=_parse_datetime(payload.get("expiry"), "expiry"),
         decision=(
             SemanticDecision(
                 decision_id=proposal_id, kind=kind, capability=capability,
-                route=route, schema_version=proposal_version,
+                # Route constraints belong to a ROUTE effect; the admission keeps
+                # what the envelope said for reporting either way.
+                route=route if kind is DecisionKind.ROUTE else None,
+                schema_version=proposal_version,
             ) if outcome in _AUTHORISING else None
         ),
         non_authorising=None if outcome in _AUTHORISING else outcome,
@@ -469,10 +493,78 @@ def _array(payload: Mapping[str, Any], field_name: str) -> tuple[Mapping[str, An
 def _parse_route(payload: Mapping[str, Any], kind: DecisionKind) -> RouteConstraints | None:
     if "route" not in payload:
         return None
-    if kind is not DecisionKind.ROUTE:
-        raise MalformedEnvelopeError(f"route constraints are only valid for ROUTE, not {kind.value}")
+    if not kind.requires_capability:
+        raise MalformedEnvelopeError(
+            "a decision without capability carries no route constraints"
+        )
     raw = _object(payload, "route", _ROUTE_FIELDS)
     return RouteConstraints(**{name: _optional_str(raw, name) for name in _ROUTE_FIELDS})
+
+
+def _bind_intent_to_validation(
+    intent: Mapping[str, Any],
+    *,
+    proposal_digest: str,
+    snapshot_id: str,
+    snapshot_revision: int,
+    snapshot_digest: str,
+) -> None:
+    """Require the intent to bind the validated proposal and the exact snapshot.
+
+    Ictus refuses an executable envelope whose intent does not name the validated
+    ``proposal_digest`` (``envelope.rs``); without that binding the arguments that
+    would execute are not the ones policy approved. The snapshot triple is checked
+    when present, because the composition writes it into every intent it emits.
+    """
+
+    policy_context = intent.get("policy_context")
+    if not isinstance(policy_context, Mapping):
+        raise MalformedEnvelopeError(
+            "an EXECUTABLE intent must carry policy_context binding the validated proposal"
+        )
+    if policy_context.get("proposal_digest") != proposal_digest:
+        raise MalformedEnvelopeError(
+            "intent.policy_context.proposal_digest must equal validation.proposal_digest"
+        )
+    for field_name, expected in (
+        ("snapshot_id", snapshot_id),
+        ("snapshot_revision", snapshot_revision),
+        ("snapshot_digest", snapshot_digest),
+    ):
+        if field_name in policy_context and policy_context[field_name] != expected:
+            raise MalformedEnvelopeError(
+                f"intent.policy_context.{field_name} must match the envelope snapshot"
+            )
+
+
+def _validate_approval_bindings(
+    approvals: tuple[Mapping[str, Any], ...],
+    grants: tuple[Mapping[str, Any], ...],
+    *,
+    subject: Mapping[str, Any],
+    revision: int,
+    capability: str,
+    policy_version: str,
+) -> None:
+    """A satisfied approval must name a live grant that binds this decision."""
+
+    for approval in approvals:
+        if not approval["satisfied"]:
+            continue
+        bound = any(
+            not grant["revoked"]
+            and grant["approval"] == approval["name"]
+            and (grant["subject"]["type"], grant["subject"]["id"])
+            == (subject["type"], subject["id"])
+            and grant["revision"] == revision
+            and grant["capability"] == capability
+            and grant["policy_version"] == policy_version
+            for grant in grants
+        )
+        if not bound:
+            raise MalformedEnvelopeError(
+                f"satisfied approval {approval['name']!r} has no matching bound grant"
+            )
 
 
 def _validate_approvals(approvals: tuple[Mapping[str, Any], ...]) -> None:
@@ -482,7 +574,9 @@ def _validate_approvals(approvals: tuple[Mapping[str, Any], ...]) -> None:
         _boolean(approval, "satisfied")
 
 
-def _validate_grants(grants: tuple[Mapping[str, Any], ...]) -> None:
+def _validate_grants(
+    grants: tuple[Mapping[str, Any], ...], *, validated_at: datetime
+) -> None:
     for grant in grants:
         _object({"grant": grant}, "grant", {
             "grant_id", "approval", "subject", "revision", "capability", "policy_version",
@@ -495,8 +589,13 @@ def _validate_grants(grants: tuple[Mapping[str, Any], ...]) -> None:
         _subject(grant, "subject")
         _integer(grant, "revision", minimum=0)
         _boolean(grant, "revoked")
-        for name in ("issued_at", "expires_at"):
-            _parse_datetime(grant.get(name), name)
+        issued_at = _parse_datetime(grant.get("issued_at"), "issued_at")
+        expires_at = _parse_datetime(grant.get("expires_at"), "expires_at")
+        # A grant only counts for the instant this decision was validated at.
+        if issued_at > validated_at or expires_at <= validated_at:
+            raise MalformedEnvelopeError(
+                "grant must be issued before and expire after validation.validated_at"
+            )
         evidence = _array(grant, "evidence")
         if not evidence:
             raise MalformedEnvelopeError("grant.evidence must not be empty")

@@ -85,7 +85,6 @@ def _envelope(
         "DENIED" if policy == "DENY" else
         "EXECUTABLE" if capability_bearing else "NO_EXECUTION"
     )
-    now = utcnow()
     payload = {
         "schema_version": 2,
         "envelope_id": f"envelope-{proposal_id}",
@@ -97,14 +96,16 @@ def _envelope(
             "policy_version": "1",
             "verdict": policy,
         },
+        # Fact time, canonical and in the past: admission compares expiry with
+        # validated_at, never with a clock, so this fixture stays valid forever.
         "validation": {
             "context_id": "context-1",
             "proposal_digest": "b" * 64,
             "capability_version": "1",
-            "validated_at": now.isoformat(),
+            "validated_at": "2026-10-01T00:00:00Z",
         },
         "outcome": outcome,
-        "expiry": (now + timedelta(minutes=10)).isoformat(),
+        "expiry": "2026-10-01T00:15:00Z",
     }
     if capability_bearing:
         payload["capability_validation"] = {
@@ -112,9 +113,16 @@ def _envelope(
             "reason": "test validation",
         }
     if outcome == "EXECUTABLE" and include_intent:
-        payload["intent"] = intent or _intent(
-            decision_id=proposal_id, work_order_id=target_id
-        )
+        resolved = dict(intent or _intent(decision_id=proposal_id, work_order_id=target_id))
+        # An executable intent must bind the validated proposal and snapshot.
+        resolved["policy_context"] = {
+            **(resolved.get("policy_context") or {}),
+            "proposal_digest": payload["validation"]["proposal_digest"],
+            "snapshot_id": payload["snapshot"]["snapshot_id"],
+            "snapshot_revision": payload["snapshot"]["revision"],
+            "snapshot_digest": payload["snapshot"]["digest"],
+        }
+        payload["intent"] = resolved
     return payload
 
 
@@ -126,8 +134,8 @@ def _legacy_triple() -> dict:
         "proposal_id": proposal_id,
         "decision": "RETRY",
         "subject": {"type": "work_order", "id": WORK_ORDER},
-        "provider": {"id": "rules.v1", "version": "0.1.0"},
-        "timestamp": utcnow().isoformat(),
+        "provider": {"provider_type": "RULES", "provider_id": "test.rules"},
+        "proposed_at": "2026-10-01T00:00:00Z",
         "reason": "test decision",
     }
     proposal["capability"] = CAPABILITY

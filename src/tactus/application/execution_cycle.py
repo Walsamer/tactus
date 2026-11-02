@@ -780,6 +780,15 @@ class ExecutionCycle:
                 outcome=admission.outcome.value,
                 verdict=admission.verdict,
                 envelope_id=admission.envelope_id,
+                # Bind what Ictus actually validated: two decisions for the same
+                # proposal id over different payloads must not collapse into one
+                # idempotent replay.
+                proposal_digest=(
+                    None if admission.validation is None
+                    else admission.validation.proposal_digest
+                ),
+                snapshot_revision=admission.snapshot_revision,
+                snapshot_digest=admission.snapshot_digest,
             )
         else:
             assert admission.raw is not None  # deprecated replay provenance
@@ -818,9 +827,14 @@ class ExecutionCycle:
                         "INITIAL context source revision does not match the Work Order"
                     )
             if admission.proposal_decision == "DECOMPOSE":
-                # An envelope does not carry the raw proposal. The binding stub
-                # cannot verify it and fails closed by design, before children.
-                verify_proposal_binding(admission, None)
+                # An envelope carries no raw proposal, so nothing can be re-hashed
+                # against validation.proposal_digest yet; the deprecated triple
+                # still carries its proposal and passes it. The hook fails closed
+                # until Ictus publishes canonical digest vectors, so no child is
+                # created for a plan nothing binds.
+                verify_proposal_binding(
+                    admission, None if admission.raw is None else admission.raw.get("proposal")
+                )
             state["application"] = applier.apply(
                 work_order, decision, child_plan=child_plan, at=at
             )
