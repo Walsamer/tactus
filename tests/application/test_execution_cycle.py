@@ -15,7 +15,6 @@ from tactus.application import (
 )
 from tactus.domain import (
     ActionNotPermittedError,
-    ChildCreationUnavailableError,
     ClaimToken,
     DagsterRunId,
     HumanAction,
@@ -23,7 +22,6 @@ from tactus.domain import (
     ImmutableRecordConflictError,
     InitialAuthorizationContext,
     InterventionReason,
-    MissingChildPlanError,
     RequestAlreadyResolvedError,
     UnknownInterventionRequestError,
     StaleWorkOrderRevisionError,
@@ -38,6 +36,9 @@ from tactus.domain import (
 )
 from tactus.domain._clock import utcnow
 from tactus.integrations.ictus import (
+    EnvelopeOutcome,
+    MalformedEnvelopeError,
+    ProposalBindingUnverifiedError,
     SemanticBudget,
     StepRetryDiagnostic,
     parse_observation,
@@ -77,32 +78,70 @@ def _envelope(
     intent: dict | None = None,
     policy: str = "ALLOW",
     include_intent: bool = True,
+    outcome: str | None = None,
 ) -> dict:
-    proposal = {
+    capability_bearing = decision in {"REEXECUTE", "ROUTE", "EXECUTE_CAPABILITY"}
+    outcome = outcome or (
+        "DENIED" if policy == "DENY" else
+        "EXECUTABLE" if capability_bearing else "NO_EXECUTION"
+    )
+    now = utcnow()
+    payload = {
         "schema_version": 2,
-        "proposal_id": proposal_id,
-        "decision": decision,
+        "envelope_id": f"envelope-{proposal_id}",
         "subject": {"type": "work_order", "id": target_id},
+        "snapshot": {"snapshot_id": "snapshot-1", "revision": 1, "digest": "a" * 64},
+        "proposal": {"schema_version": 2, "proposal_id": proposal_id, "decision": decision},
+        "policy": {
+            "policy_decision_id": f"policy-{proposal_id}",
+            "policy_version": "1",
+            "verdict": policy,
+        },
+        "validation": {
+            "context_id": "context-1",
+            "proposal_digest": "b" * 64,
+            "capability_version": "1",
+            "validated_at": now.isoformat(),
+        },
+        "outcome": outcome,
+        "expiry": (now + timedelta(minutes=10)).isoformat(),
+    }
+    if capability_bearing:
+        payload["capability_validation"] = {
+            "capability": CAPABILITY, "admitted": True, "permitted": True,
+            "reason": "test validation",
+        }
+    if outcome == "EXECUTABLE" and include_intent:
+        payload["intent"] = intent or _intent(
+            decision_id=proposal_id, work_order_id=target_id
+        )
+    return payload
+
+
+def _legacy_triple() -> dict:
+    """Deprecated real-binary shape, retained explicitly for compatibility."""
+    proposal_id = "proposal-legacy"
+    proposal = {
+        "schema_version": 1,
+        "proposal_id": proposal_id,
+        "decision": "RETRY",
+        "subject": {"type": "work_order", "id": WORK_ORDER},
         "provider": {"id": "rules.v1", "version": "0.1.0"},
         "timestamp": utcnow().isoformat(),
         "reason": "test decision",
     }
-    if decision in {"REEXECUTE", "ROUTE", "EXECUTE_CAPABILITY"}:
-        proposal["capability"] = CAPABILITY
-    payload = {
+    proposal["capability"] = CAPABILITY
+    return {
+        "schema_version": 1,
         "proposal": proposal,
         "policy_decision": {
             "schema_version": 1,
-            "decision": policy,
+            "decision": "ALLOW",
             "proposal_id": proposal_id,
             "reason": "test policy",
         },
+        "execution_intent": _intent(decision_id=proposal_id),
     }
-    if include_intent:
-        payload["execution_intent"] = intent or _intent(
-            decision_id=proposal_id, work_order_id=target_id
-        )
-    return payload
 
 
 def _observation(
@@ -288,6 +327,7 @@ def test_recovery_decision_reopens_and_allows_a_new_semantic_attempt(tmp_path):
         expected_revision=WorkOrderRevision(1),
     )
 
+    assert recovery.decision is not None
     assert recovery.decision.kind.value == "REEXECUTE"
     assert recovery.next_intent is not None
     assert recovery.next_intent.intent_id.value == "intent-2"
@@ -372,12 +412,14 @@ def test_observation_correlation_rejects_unreceipted_and_closed_attempts(tmp_pat
         )
 
 
-def test_decision_envelope_must_be_allow_with_matching_intent():
-    with pytest.raises(IntentDecisionError, match="ALLOW"):
+def test_decision_envelope_requires_executable_with_matching_intent():
+    with pytest.raises(IntentDecisionError, match="EXECUTABLE decision.*DENIED"):
         parse_execution_decision(_envelope(policy="DENY"))
-    with pytest.raises(IntentDecisionError, match="no ExecutionIntent"):
+    with pytest.raises(IntentDecisionError, match="EXECUTABLE decision.*NO_EXECUTION"):
+        parse_execution_decision(_envelope(decision="ABORT", include_intent=False))
+    with pytest.raises(MalformedEnvelopeError, match="intent must be an object"):
         parse_execution_decision(_envelope(include_intent=False))
-    with pytest.raises(IntentDecisionError, match="does not match"):
+    with pytest.raises(MalformedEnvelopeError, match="intent.target must match subject"):
         parse_execution_decision(_envelope(intent=_intent(target_id="WO-OTHER")))
     with pytest.raises(IntentDecisionError, match="not Work Order"):
         parse_execution_decision(_envelope(), expected_work_order_id="WO-OTHER")
@@ -387,11 +429,18 @@ def test_decision_envelope_must_be_allow_with_matching_intent():
         )
 
 
-def test_decision_envelope_accepts_legacy_retry_token():
-    parsed = parse_execution_decision(_envelope(decision="RETRY"))
+def test_deprecated_legacy_triple_still_applies(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    result = cycle.apply_recovery_decision(
+        work_order, _legacy_triple(), state_port=db, expected_revision=_rev(db)
+    )
 
-    assert parsed.decision_kind == "REEXECUTE"
-    assert parsed.intent_id.value == "intent-1"
+    assert result.applied is True
+    assert result.decision is not None
+    assert result.decision.kind.value == "REEXECUTE"
+    assert result.next_intent is not None
+    assert result.next_intent.intent_id.value == "intent-1"
+    assert work_order.state is WorkOrderState.OPEN
 
 
 def test_observation_parser_rejects_unknown_categories_and_versions():
@@ -429,10 +478,16 @@ def test_recovery_decision_is_idempotent_on_redelivery(tmp_path):
         intent=_intent(intent_id="intent-2", decision_id="proposal-idem-1"),
     )
 
+    transition_count = len(work_order.transitions)
     first = cycle.apply_recovery_decision(
         work_order, envelope, state_port=db, expected_revision=_rev(db)
     )
     revision_after_first = db.work_order_snapshot(WORK_ORDER)[0]
+    transitions_after_first = work_order.transitions
+    digest = db._connection.execute(
+        "SELECT decision_digest FROM recovery_decision_inbox"
+    ).fetchone()[0]
+    assert digest.startswith("sha256:v1:")
     second = cycle.apply_recovery_decision(
         work_order, envelope, state_port=db, expected_revision=revision_after_first
     )
@@ -440,8 +495,72 @@ def test_recovery_decision_is_idempotent_on_redelivery(tmp_path):
     assert first.applied is True
     assert second.applied is False
     assert second.application is None
+    assert second.envelope_id == envelope["envelope_id"]
+    assert work_order.transitions == transitions_after_first
+    assert len(work_order.transitions) == transition_count + 1
     assert db.work_order_snapshot(WORK_ORDER)[0] == revision_after_first
     assert work_order.state is WorkOrderState.OPEN
+
+
+@pytest.mark.parametrize(
+    ("outcome", "decision", "verdict"),
+    [
+        (EnvelopeOutcome.DENIED, "ESCALATE", "DENY"),
+        (EnvelopeOutcome.PENDING, "REEXECUTE", "REQUIRE_APPROVAL"),
+        (EnvelopeOutcome.NO_ROUTE, "REEXECUTE", "ALLOW"),
+        (EnvelopeOutcome.INVALID, "ESCALATE", "ALLOW"),
+    ],
+)
+def test_non_authorising_outcome_changes_nothing(tmp_path, monkeypatch, outcome, decision, verdict):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    interventions = SqliteHumanIntervention(tmp_path / "ledger.sqlite")
+    before = db.work_order_snapshot(WORK_ORDER)
+    entity_before = (work_order.state, work_order.readiness, work_order.transitions)
+    tables = ("recovery_decision_inbox", "human_intervention_requests")
+    counts = [db._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+              for table in tables]
+
+    def forbidden_write(*args, **kwargs):
+        pytest.fail("non-authorising outcome reached the decision ledger write")
+
+    monkeypatch.setattr(db, "apply_recovery_decision", forbidden_write)
+    envelope = _envelope(decision=decision, policy=verdict, outcome=outcome.value)
+    result = cycle.apply_recovery_decision(
+        work_order, envelope, state_port=db, expected_revision=_rev(db),
+        intervention_store=interventions,
+    )
+
+    assert result.non_authorising is outcome
+    assert result.applied is False
+    assert result.decision is result.application is result.next_intent is None
+    assert result.envelope_id == envelope["envelope_id"]
+    assert result.work_order_revision == before[0]
+    assert db.work_order_snapshot(WORK_ORDER) == before
+    assert (work_order.state, work_order.readiness, work_order.transitions) == entity_before
+    assert [db._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables] == counts
+    interventions.close()
+    db.close()
+
+
+def test_recovery_decision_v0_row_conflicts_with_v1_envelope(tmp_path):
+    cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    envelope = _decision_envelope("proposal-v0")
+    db._connection.execute(
+        """INSERT INTO recovery_decision_inbox(
+               decision_id, work_order_id, attempt_id, decision_digest, applied_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("proposal-v0", WORK_ORDER, accepted.attempt.attempt_id.value,
+         "a" * 64, utcnow().isoformat()),
+    )
+    before = db.work_order_snapshot(WORK_ORDER)
+    with pytest.raises(ImmutableRecordConflictError, match="sha256:v0.*sha256:v1"):
+        cycle.apply_recovery_decision(
+            work_order, envelope, state_port=db, expected_revision=_rev(db)
+        )
+    assert db.work_order_snapshot(WORK_ORDER) == before
+    assert work_order.state is WorkOrderState.ACTIVE
+    db.close()
 
 
 def test_recovery_decision_replay_with_changed_payload_conflicts(tmp_path):
@@ -479,24 +598,30 @@ def test_recovery_decision_rejects_a_stale_revision_and_changes_nothing(tmp_path
     assert work_order.state is WorkOrderState.ACTIVE
 
 
-def test_recovery_decision_escalates_durably_and_closes_in_one_step(tmp_path):
+def test_no_execution_escalates_durably_and_closes_in_one_step(tmp_path):
     cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
+    interventions = SqliteHumanIntervention(tmp_path / "ledger.sqlite")
     decision = cycle.apply_recovery_decision(
         work_order,
-        _envelope(decision="ESCALATE", proposal_id="proposal-esc", include_intent=False),
+        _envelope(decision="ESCALATE", proposal_id="proposal-esc", include_intent=False,
+                  policy="MODIFY", outcome="NO_EXECUTION"),
         state_port=db,
         expected_revision=_rev(db),
-        intervention_store=SqliteHumanIntervention(tmp_path / "ledger.sqlite"),
+        intervention_store=interventions,
     )
     assert decision.applied is True
     assert decision.application is not None
     assert decision.application.intervention is not None
+    assert interventions.request(
+        decision.application.intervention.intervention_id
+    ) == decision.application.intervention
+    interventions.close()
     assert work_order.state is WorkOrderState.OPEN
     assert work_order.readiness is OpenStatus.BLOCKED
     assert db.work_order_snapshot(WORK_ORDER)[1] is WorkOrderState.OPEN
 
 
-def test_recovery_decision_abort_is_terminal_and_audited(tmp_path):
+def test_no_execution_abort_is_terminal_and_audited(tmp_path):
     cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
     decision = cycle.apply_recovery_decision(
         work_order,
@@ -512,7 +637,7 @@ def test_recovery_decision_abort_is_terminal_and_audited(tmp_path):
 def test_decompose_fails_closed_and_leaves_the_ledger_untouched(tmp_path):
     cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
     before = db.work_order_snapshot(WORK_ORDER)
-    with pytest.raises((ChildCreationUnavailableError, MissingChildPlanError)):
+    with pytest.raises(ProposalBindingUnverifiedError):
         cycle.apply_recovery_decision(
             work_order,
             _envelope(decision="DECOMPOSE", proposal_id="proposal-dec", include_intent=False),

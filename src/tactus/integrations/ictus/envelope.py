@@ -133,6 +133,9 @@ class DecisionAdmission:
     expires_at: datetime | None = None
     approvals: tuple[Mapping[str, Any], ...] = ()
     grants: tuple[Mapping[str, Any], ...] = ()
+    #: Replay provenance only for the deprecated LEGACY_TRIPLE path; envelopes
+    #: do not carry the raw proposal or policy mappings.
+    raw: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, DecisionSource) or not isinstance(
@@ -353,6 +356,7 @@ def _parse_legacy_triple(payload: Mapping[str, Any]) -> DecisionAdmission:
         capability=decision.capability, route=decision.route, intent=raw_intent,
         decision=decision if outcome in _AUTHORISING else None,
         non_authorising=None if outcome in _AUTHORISING else outcome,
+        raw=payload,
     )
 
 

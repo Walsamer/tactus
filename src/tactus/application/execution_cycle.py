@@ -4,7 +4,7 @@ This module is the missing application seam between the pure Work Order domain,
 the durable admission ledger and the already-versioned Ictus contracts. It owns
 only *composition*:
 
-* an Ictus ``ALLOW`` decision envelope plus its ``ExecutionIntent`` is the only
+* an Ictus ``EXECUTABLE`` decision plus its ``ExecutionIntent`` is the only
   input that may be admitted; Tactus does not evaluate policy or synthesize an
   intent;
 * the accepted intent is committed through the fenced durable admission port
@@ -67,6 +67,9 @@ from tactus.domain import (
 from tactus.integrations.ictus import (
     AuthorizationGrant,
     BackendFacts,
+    DecisionAdmission,
+    DecisionSource,
+    EnvelopeOutcome,
     EvidenceRef,
     IctusObservationCategory,
     SemanticBudget,
@@ -74,10 +77,11 @@ from tactus.integrations.ictus import (
     StepRetryDiagnostic,
     TactusObservation,
     build_state_snapshot,
-    parse_decision,
+    parse_decision_payload,
     parse_observation,
+    verify_proposal_binding,
 )
-from tactus.integrations.ictus.digests import canonical_digest
+from tactus.integrations.ictus.digests import canonical_digest, versioned_digest
 
 
 class ExecutionCycleError(ValueError):
@@ -147,7 +151,7 @@ class DurableWorkOrderStatePort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ValidatedExecutionIntent:
-    """A validated ``ALLOW`` decision and the exact intent it authorizes.
+    """A validated ``EXECUTABLE`` decision and the exact intent it authorizes.
 
     ``payload`` is the original Ictus-owned intent mapping. ``digest`` is the
     same canonical SHA-256 digest the Ictus Dagster bridge uses for receipt
@@ -174,34 +178,29 @@ def parse_execution_decision(
     *,
     expected_work_order_id: WorkOrderId | str | None = None,
 ) -> ValidatedExecutionIntent:
-    """Validate the execution-relevant part of an Ictus decision envelope.
+    """Admit only an EXECUTABLE outcome with an exactly bound ExecutionIntent.
 
-    The real boundary emits ``{proposal, policy_decision, execution_intent}``.
-    Tactus accepts it only when:
-
-    * the policy verdict is ``ALLOW``;
-    * an ``ExecutionIntent`` v1 is present and structurally valid;
-    * the intent target, proposal subject and (when supplied) Tactus Work Order
-      all identify the same subject;
-    * the intent's ``requested_by.decision_id`` is the proposal that was allowed.
-
-    No policy, routing, capability or recovery decision is re-evaluated here.
+    Both validated envelopes and the deprecated triple use the same inbound
+    boundary. No policy, routing or recovery decision is re-evaluated here.
     """
 
-    if not isinstance(envelope, Mapping):
-        raise IntentDecisionError("Ictus decision envelope must be a mapping")
-    policy = _required_mapping(envelope, "policy_decision")
-    if policy.get("decision") != "ALLOW":
-        raise IntentDecisionError(
-            "Tactus admits only an Ictus ALLOW decision "
-            f"(got {policy.get('decision')!r})"
-        )
-    proposal = _required_mapping(envelope, "proposal")
-    raw_intent = envelope.get("execution_intent")
-    if not isinstance(raw_intent, Mapping):
-        raise IntentDecisionError("Ictus ALLOW decision carries no ExecutionIntent")
+    return _validated_intent_from(
+        parse_decision_payload(envelope), expected_work_order_id=expected_work_order_id
+    )
 
-    intent = _validate_intent_payload(raw_intent)
+
+def _validated_intent_from(
+    admission: DecisionAdmission,
+    *,
+    expected_work_order_id: WorkOrderId | str | None,
+) -> ValidatedExecutionIntent:
+    if admission.outcome is not EnvelopeOutcome.EXECUTABLE:
+        raise IntentDecisionError(
+            "Tactus admits only an Ictus EXECUTABLE decision "
+            f"(got {admission.outcome.value!r})"
+        )
+    assert admission.intent is not None  # guaranteed by the inbound boundary
+    intent = _validate_intent_payload(admission.intent)
     intent_id = _required_str(intent, "intent_id")
     capability = _required_str(intent, "capability")
     target = _required_mapping(intent, "target")
@@ -212,13 +211,8 @@ def parse_execution_decision(
             f"ExecutionIntent target type must be 'work_order', got {target_type!r}"
         )
 
-    proposal_id = _required_str(proposal, "proposal_id")
-    if policy.get("proposal_id") != proposal_id:
-        raise IntentDecisionError(
-            "policy decision does not belong to the supplied proposal"
-        )
-    subject = _required_mapping(proposal, "subject")
-    if subject.get("type") != target_type or subject.get("id") != target_id:
+    proposal_id = admission.proposal_id
+    if admission.subject_type != target_type or admission.subject_id != target_id:
         raise IntentDecisionError(
             "ExecutionIntent target does not match the proposal subject"
         )
@@ -235,7 +229,7 @@ def parse_execution_decision(
         raise IntentDecisionError(
             "ExecutionIntent is not requested by the allowed proposal"
         )
-    decision_kind = _required_str(proposal, "decision")
+    decision_kind = admission.proposal_decision
     try:
         kind = DecisionKind.from_token(decision_kind)
     except UnknownDecisionError as exc:
@@ -245,7 +239,7 @@ def parse_execution_decision(
             f"proposal decision {decision_kind!r} cannot carry an execution intent"
         )
     decision_kind = kind.value
-    proposal_capability = proposal.get("capability")
+    proposal_capability = admission.capability
     if proposal_capability is not None and proposal_capability != capability:
         raise IntentDecisionError(
             "ExecutionIntent capability does not match the allowed proposal"
@@ -324,13 +318,15 @@ class ObservationApplication:
 class RecoveryApplication:
     """Outcome of applying one validated Ictus recovery decision."""
 
-    decision: SemanticDecision
-    #: ``None`` on an idempotent replay (the decision already applied).
+    decision: SemanticDecision | None
+    #: ``None`` on an idempotent replay or a non-authorising outcome.
     application: DecisionApplicationRecord | None
     next_intent: ValidatedExecutionIntent | None
     work_order_revision: WorkOrderRevision | None
-    #: ``False`` when this decision was already applied (idempotent replay).
+    #: ``False`` on an idempotent replay or a non-authorising outcome.
     applied: bool = True
+    non_authorising: EnvelopeOutcome | None = None
+    envelope_id: str | None = None
 
 
 # -- the cycle --------------------------------------------------------------
@@ -677,7 +673,7 @@ class ExecutionCycle:
         initial_context: InitialAuthorizationContext | None = None,
         intervention_store: InterventionRequestPort | None = None,
     ) -> RecoveryApplication:
-        """Apply one ALLOWED Ictus recovery decision and persist its projection.
+        """Apply one authorising Ictus outcome and persist its projection.
 
         The decision vocabulary and mapping stay in the existing domain applier;
         this method only binds the envelope subject to the Work Order and writes
@@ -690,21 +686,13 @@ class ExecutionCycle:
         of existing only in the caller's memory.
         """
 
-        if not isinstance(envelope, Mapping):
-            raise IntentDecisionError("Ictus decision envelope must be a mapping")
-        policy = _required_mapping(envelope, "policy_decision")
-        if policy.get("decision") != "ALLOW":
-            raise IntentDecisionError(
-                "Tactus applies only an Ictus ALLOW decision "
-                f"(got {policy.get('decision')!r})"
-            )
-        proposal = _required_mapping(envelope, "proposal")
-        subject = _required_mapping(proposal, "subject")
-        if subject.get("type") != "work_order" or subject.get("id") != work_order.id.value:
+        admission = parse_decision_payload(envelope)
+        if admission.subject_type != "work_order" or admission.subject_id != work_order.id.value:
             raise IntentDecisionError(
                 "Ictus recovery decision does not target this Work Order"
             )
-        decision = parse_decision(proposal)
+        decision = admission.decision
+        kind = DecisionKind.from_token(admission.proposal_decision)
 
         # Fail closed: an ESCALATE decision *is* a typed human-intervention
         # request, and only this method can persist it in the same transaction
@@ -712,23 +700,18 @@ class ExecutionCycle:
         # blocked Work Order whose request exists only in this process, which no
         # restart could resolve — so refuse instead of half-applying it.
         if (
-            DECISION_EFFECTS[decision.kind] is DecisionEffect.REOPEN_BLOCKED_INTERVENTION
+            DECISION_EFFECTS[kind] is DecisionEffect.REOPEN_BLOCKED_INTERVENTION
             and intervention_store is None
         ):
             raise IntentDecisionError(
-                f"Ictus {decision.kind.value} requires a durable intervention store; "
+                f"Ictus {kind.value} requires a durable intervention store; "
                 "refusing to apply an escalation that no restart could resolve"
             )
 
         next_intent: ValidatedExecutionIntent | None = None
-        raw_intent = envelope.get("execution_intent")
-        if raw_intent is None and decision.kind.requires_capability:
-            raise IntentDecisionError(
-                f"Ictus {decision.kind.value} ALLOW decision carries no ExecutionIntent"
-            )
-        if raw_intent is not None:
-            next_intent = parse_execution_decision(
-                envelope, expected_work_order_id=work_order.id
+        if admission.outcome is EnvelopeOutcome.EXECUTABLE:
+            next_intent = _validated_intent_from(
+                admission, expected_work_order_id=work_order.id
             )
 
         # Bind the decision to the exact attempt it recovers and to the
@@ -750,12 +733,24 @@ class ExecutionCycle:
             # that creates the first semantic attempt. Recovery effects
             # (ESCALATE / ABORT / DECOMPOSE) require a correlated attempt and
             # must never be reachable without one.
-            if not decision.kind.requires_capability:
+            if not kind.requires_capability:
                 raise IntentDecisionError(
-                    f"Ictus {decision.kind.value} requires a correlated execution "
+                    f"Ictus {kind.value} requires a correlated execution "
                     "attempt; the absence of an attempt authorizes only the "
                     "INITIAL execution decision"
                 )
+        if admission.non_authorising is not None:
+            return RecoveryApplication(
+                decision=None,
+                application=None,
+                next_intent=None,
+                work_order_revision=self._current_revision(work_order.id),
+                applied=False,
+                non_authorising=admission.non_authorising,
+                envelope_id=admission.envelope_id,
+            )
+        assert decision is not None  # only authorising outcomes reach application
+        if attempt is None:
             if next_intent is None:
                 raise IntentDecisionError(
                     "an INITIAL authorization requires the Ictus ExecutionIntent"
@@ -774,19 +769,29 @@ class ExecutionCycle:
                 raise IntentDecisionError(
                     "INITIAL authorization requires a snapshot identity and digest"
                 )
+        digest_payload = {
+            "source": admission.source.value,
+            "proposal_id": admission.proposal_id,
+            "decision": admission.proposal_decision,
+            "capability": admission.capability,
+        }
+        if admission.source is DecisionSource.ENVELOPE:
+            digest_payload.update(
+                outcome=admission.outcome.value,
+                verdict=admission.verdict,
+                envelope_id=admission.envelope_id,
+            )
+        else:
+            assert admission.raw is not None  # deprecated replay provenance
+            digest_payload.update(
+                proposal=dict(admission.raw["proposal"]),
+                policy=dict(admission.raw["policy_decision"]),
+            )
         record = RecoveryDecisionRecord(
             decision_id=decision.decision_id,
             work_order_id=work_order.id,
             attempt_id=None if attempt is None else attempt.attempt_id,
-            decision_digest=canonical_digest(
-                {
-                    "decision": decision.kind.value,
-                    "decision_id": decision.decision_id,
-                    "capability": decision.capability,
-                    "proposal": dict(proposal),
-                    "policy": dict(policy),
-                }
-            ),
+            decision_digest=versioned_digest(digest_payload),
             expected_revision=expected_revision,
         )
 
@@ -812,6 +817,10 @@ class ExecutionCycle:
                     raise IntentDecisionError(
                         "INITIAL context source revision does not match the Work Order"
                     )
+            if admission.proposal_decision == "DECOMPOSE":
+                # An envelope does not carry the raw proposal. The binding stub
+                # cannot verify it and fails closed by design, before children.
+                verify_proposal_binding(admission, None)
             state["application"] = applier.apply(
                 work_order, decision, child_plan=child_plan, at=at
             )
@@ -851,6 +860,7 @@ class ExecutionCycle:
             next_intent=next_intent if applied else None,
             work_order_revision=revision,
             applied=applied,
+            envelope_id=admission.envelope_id,
         )
 
     # -- durable helpers -------------------------------------------------
