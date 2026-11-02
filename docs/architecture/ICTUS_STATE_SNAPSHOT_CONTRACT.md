@@ -102,9 +102,9 @@ Optional: `facts`, `capabilities`, `constraints`.
     { "key": "recovery.intent_id", "value": "intent-0001" },
     { "key": "work_order.id", "value": "WO-1" },
     { "key": "work_order.state", "value": "ACTIVE" },
-    { "key": "recovery.semantic_attempts", "value": 1 },
-    { "key": "recovery.max_semantic_attempts", "value": 3 },
-    { "key": "execution.step_retry_index", "value": 2 },
+    { "key": "attempts.semantic", "value": 1 },
+    { "key": "attempts.max_semantic", "value": 3 },
+    { "key": "attempts.step_retries", "value": 2 },
     { "key": "backend.descriptors", "value": [ { "backend_id": "backend-a" } ] },
     { "key": "authorization.grants", "value": [ { "grant_id": "grant-0001" } ] },
     { "key": "snapshot.digest", "value": "ecf6c114…" }
@@ -155,9 +155,9 @@ vocabulary is never widened, narrowed or reclassified.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `recovery.semantic_attempts` | integer | Already accepted semantic attempts (zero before the first; includes the failed current attempt during recovery). |
-| `recovery.max_semantic_attempts` | integer | Authorized total accepted-attempt limit. |
-| `execution.step_retry_index` | integer | Execution-owned (Dagster) diagnostic step-retry index only. |
+| `attempts.semantic` | integer | Already accepted semantic attempts (zero before the first; includes the failed current attempt during recovery). |
+| `attempts.max_semantic` | integer | Authorized total accepted-attempt limit. |
+| `attempts.step_retries` | integer | Execution-owned (Dagster) diagnostic step-retry index only. |
 
 Another attempt is permitted only while `count < limit`. Missing or invalid
 budget is a hard validation failure (`StateSnapshotContractError`), never an
@@ -198,10 +198,10 @@ Tactus records grants; it never asserts that a grant is sufficient or that an
 ## Two counters — never conflated
 
 ```text
-recovery.semantic_attempts / recovery.max_semantic_attempts
+attempts.semantic / attempts.max_semantic
     canonical, decision-relevant semantic count/limit
 
-execution.step_retry_index
+attempts.step_retries
     execution-owned diagnostic (Dagster); never a semantic attempt
 
 attempt.number / retry.attempt / retry.budget
@@ -215,13 +215,14 @@ attempt.number / retry.attempt / retry.budget
   `translate_legacy_budget_facts()` (and `semantic_budget_from_legacy()` for the
   Tactus `AttemptHistory` shim).
 
-The pinned Ictus `RuleDecisionProvider`/`DefaultPolicyEvaluator` still read the
-legacy `retry.attempt`/`retry.budget` keys. `to_ictus_legacy_boundary_payload()`
-is the explicit **compatibility projection** that maps the canonical semantic
-count/limit onto those keys (additively, preserving the canonical body and
-digest) so the real boundary can be conformance-tested. It fails closed for a
-missing, boolean, negative or inconsistent canonical budget instead of letting
-Ictus default a missing value to `0` — the former mismatch.
+The pinned Ictus `RuleDecisionProvider`/`DefaultPolicyEvaluator` read the same
+canonical `attempts.semantic`/`attempts.max_semantic` keys this adapter emits,
+so the payload crosses the boundary unchanged: **there is no compatibility
+projection between the two ends.** One payload cannot mean two things, because
+there is only one statement of the budget in it. `validate_snapshot_profile()`
+keeps that true from our side: it fails closed for a missing, boolean, negative
+or inconsistent canonical budget, and for a payload that also carries the
+superseded `retry.*` pair.
 
 ## Real pinned Ictus boundary conformance
 
@@ -290,6 +291,5 @@ has a valid slot and nothing is dropped or invented.
 
 `src/tactus/integrations/ictus/state_snapshot.py` — `build_state_snapshot()`,
 `SemanticBudget`, `StepRetryDiagnostic`, `SnapshotPhase`,
-`to_ictus_legacy_boundary_payload()`, `validate_snapshot_profile()`,
-`compute_snapshot_digest()` and the fact-key constants. Domain fact adapters
-live in `src/tactus/integrations/ictus/facts.py`.
+`validate_snapshot_profile()`, `compute_snapshot_digest()` and the fact-key
+constants. Domain fact adapters live in `src/tactus/integrations/ictus/facts.py`.

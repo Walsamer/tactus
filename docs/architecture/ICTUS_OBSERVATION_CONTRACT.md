@@ -210,9 +210,10 @@ backend and authorization facts.
   disguised as execution categories.
 - Recovery context is **correlated**: a wrong subject, intent or attempt/run —
   or a `SUCCESS` observation — fails closed.
-- The canonical semantic count/limit (`recovery.semantic_attempts`,
-  `recovery.max_semantic_attempts`) is kept strictly separate from the
-  execution-owned diagnostic step-retry index (`execution.step_retry_index`).
+- The canonical semantic count/limit (`attempts.semantic`,
+  `attempts.max_semantic`) is kept strictly separate from the execution-owned
+diagnostic step-retry index (`attempts.step_retries`). These are Ictus's own
+  fact keys, emitted verbatim: no translation layer sits between the two ends.
   The superseded `attempt.number`/`retry.attempt`/`retry.budget` facts are never
   emitted and are only translated explicitly.
 - The adapter is pure: no Work Order mutation, no lifecycle transition, no

@@ -105,7 +105,6 @@ from tactus.integrations.ictus import (  # noqa: E402
     StepRetryDiagnostic,
     build_state_snapshot,
     parse_observation,
-    to_ictus_legacy_boundary_payload,
 )
 from tactus.persistence.human_intervention import (  # noqa: E402
     SqliteHumanIntervention,
@@ -183,7 +182,7 @@ def _verify_ictus(ictus_root: Path) -> tuple[dict[str, Any], Path]:
 
 def _decide(binary: Path, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Invoke the real pinned Ictus CLI with a versioned snapshot on stdin."""
-    payload = to_ictus_legacy_boundary_payload(snapshot)
+    payload = dict(snapshot)
     completed = subprocess.run(
         [str(binary), "decide", "--approve"],
         input=json.dumps(payload),

@@ -12,10 +12,10 @@ of Ictus policy. It is the cross-repository half of the Ictus adapter evidence:
 * it feeds a snapshot payload to ``ictus decide`` over stdin/stdout and returns
   the real ``{proposal, policy_decision, execution_intent}`` envelope.
 
-The pinned Ictus policy reads the legacy ``retry.attempt``/``retry.budget``
-keys. :func:`tactus.integrations.ictus.to_ictus_legacy_boundary_payload` is the
-explicit compatibility projection that maps the canonical semantic count/limit
-onto those keys; this harness never reimplements ``count < limit`` itself.
+The pinned Ictus policy reads the canonical ``attempts.semantic`` /
+``attempts.max_semantic`` budget keys that Tactus emits, so the payload goes to
+the binary unchanged: no compatibility projection sits between the two ends and
+this harness never reimplements ``count < limit`` itself.
 
 Everything here is read-only with respect to the Ictus checkout and bounded in
 time via process timeouts. It is **not** part of the Tactus runtime: it exists
@@ -394,15 +394,11 @@ def run_decide(
 
 
 def _report_snapshot(boundary: IctusBoundary, path: Path) -> dict[str, Any]:
-    from tactus.integrations.ictus import (
-        to_ictus_legacy_boundary_payload,
-        validate_snapshot_profile,
-    )
+    from tactus.integrations.ictus import validate_snapshot_profile
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     validate_snapshot_profile(payload)
-    projected = to_ictus_legacy_boundary_payload(payload)
-    outcome = boundary.decide(projected)
+    outcome = boundary.decide(payload)
     return {
         "snapshot": str(path),
         "snapshot_id": payload.get("snapshot_id"),

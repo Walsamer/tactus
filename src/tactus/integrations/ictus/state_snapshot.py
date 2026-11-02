@@ -39,21 +39,21 @@ Two phases, one profile
 
 Canonical budget facts vs execution diagnostics
 -----------------------------------------------
-``recovery.semantic_attempts`` / ``recovery.max_semantic_attempts`` are the
-canonical semantic count/limit; another attempt is permitted only while
-``count < limit``. ``execution.step_retry_index`` is an execution-owned
-diagnostic and can never consume or refill the semantic allowance. The
-superseded ``attempt.number``/``retry.attempt``/``retry.budget`` facts are
-legacy, not emitted, and only translated explicitly by
-:func:`tactus.integrations.ictus.facts.translate_legacy_budget_facts`.
+Ictus owns the fact-key namespace (``crates/core/src/context.rs``), so this
+adapter emits Ictus's canonical budget keys verbatim: ``attempts.semantic`` /
+``attempts.max_semantic`` are the semantic count/limit, and another attempt is
+permitted only while ``count < limit``. ``attempts.step_retries`` is an
+execution-owned diagnostic and can never consume or refill the semantic
+allowance.
 
-The pinned Ictus ``RuleDecisionProvider``/``DefaultPolicyEvaluator`` still
-*read* the legacy ``retry.attempt``/``retry.budget`` keys (defaulting missing
-values to ``0``). :func:`to_ictus_legacy_boundary_payload` is the explicit,
-additive compatibility projection that maps the canonical semantic count/limit
-onto those legacy keys so the **actual** Ictus boundary can be conformance
-tested. It is a boundary interop envelope, never a canonical profile artifact:
-the adapter itself never emits ``retry.*``.
+There is deliberately **no** translation layer between Tactus and Ictus here.
+The pinned ``RuleDecisionProvider``/``DefaultPolicyEvaluator`` read those keys
+themselves (canonical first, the legacy ``retry.attempt``/``retry.budget`` pair
+only as a complete fallback), so one payload means one thing at both ends. The
+superseded ``attempt.number``/``retry.attempt``/``retry.budget`` facts are never
+emitted: :func:`validate_snapshot_profile` rejects them, and
+:func:`tactus.integrations.ictus.facts.translate_legacy_budget_facts` exists only
+to read a foreign legacy payload explicitly, never to write one.
 
 Deterministic profile and digest
 --------------------------------
@@ -135,9 +135,12 @@ FACT_WORK_ORDER_REVISION = "work_order.revision"
 FACT_SOURCE_REVISION = "source.revision"
 
 # -- canonical semantic budget + execution diagnostic ---------------------
-FACT_RECOVERY_SEMANTIC_ATTEMPTS = "recovery.semantic_attempts"
-FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS = "recovery.max_semantic_attempts"
-FACT_EXECUTION_STEP_RETRY_INDEX = "execution.step_retry_index"
+#: Ictus canonical semantic attempt count (``facts::ATTEMPTS_SEMANTIC``).
+FACT_ATTEMPTS_SEMANTIC = "attempts.semantic"
+#: Ictus canonical semantic attempt bound (``facts::ATTEMPTS_MAX_SEMANTIC``).
+FACT_ATTEMPTS_MAX_SEMANTIC = "attempts.max_semantic"
+#: Ictus canonical execution-owned step-retry diagnostic.
+FACT_ATTEMPTS_STEP_RETRIES = "attempts.step_retries"
 FACT_RECOVERY_ATTEMPT_ID = "recovery.attempt_id"
 FACT_RECOVERY_INTENT_ID = "recovery.intent_id"
 
@@ -195,81 +198,6 @@ def semantic_budget_from_legacy(
         semantic_attempts=history.semantic_attempts,
         max_semantic_attempts=max_semantic_attempts,
     )
-
-
-def to_ictus_legacy_boundary_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Project canonical budget facts onto the legacy Ictus ``retry.*`` keys.
-
-    The pinned Ictus ``RuleDecisionProvider`` and ``DefaultPolicyEvaluator``
-    read ``retry.attempt``/``retry.budget`` (not Tactus's canonical
-    ``recovery.semantic_attempts``/``recovery.max_semantic_attempts``) and
-    default missing values to ``0``. This compatibility translation copies the
-    canonical semantic count/limit onto the legacy keys one-to-one so the
-    *actual* pinned boundary enforces ``count < limit`` itself; Tactus does not
-    reimplement that policy.
-
-    The projection is additive: the canonical facts and the canonical
-    ``snapshot.digest`` stay untouched, and the result is a boundary interop
-    envelope rather than a canonical profile artifact.
-
-    It fails closed (:class:`StateSnapshotContractError`) for a missing,
-    boolean, negative or inconsistent canonical budget, a duplicate canonical
-    fact, or an already-present legacy ``retry.*`` fact. That is deliberate:
-    letting Ictus silently default a missing/invalid value to ``0`` is the
-    former ``retry.attempt``/``retry.budget`` mismatch this boundary exposes.
-    """
-
-    if not isinstance(payload, Mapping):
-        raise MalformedSnapshotError("state snapshot must be a mapping")
-    raw_facts = payload.get("facts")
-    if not isinstance(raw_facts, list):
-        raise MalformedSnapshotError("facts must be an array")
-
-    fact_map: dict[str, Any] = {}
-    for entry in raw_facts:
-        if not isinstance(entry, Mapping) or "key" not in entry:
-            raise MalformedSnapshotError("each fact must be an object with a key")
-        key = str(entry["key"])
-        if key in fact_map:
-            raise MalformedSnapshotError(f"duplicate fact key: {key}")
-        fact_map[key] = entry.get("value")
-
-    for legacy_key in (LEGACY_FACT_RETRY_ATTEMPT, LEGACY_FACT_RETRY_BUDGET):
-        if legacy_key in fact_map:
-            raise StateSnapshotContractError(
-                f"{legacy_key} is a superseded legacy fact; a canonical snapshot "
-                "must not carry it and the projection must not overwrite it"
-            )
-
-    for canonical_key in (
-        FACT_RECOVERY_SEMANTIC_ATTEMPTS,
-        FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS,
-    ):
-        if canonical_key not in fact_map:
-            raise StateSnapshotContractError(
-                f"{canonical_key} is required; a missing budget must never "
-                "default to zero/limited"
-            )
-
-    attempts = _require_count(
-        fact_map[FACT_RECOVERY_SEMANTIC_ATTEMPTS], FACT_RECOVERY_SEMANTIC_ATTEMPTS
-    )
-    limit = _require_count(
-        fact_map[FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS],
-        FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS,
-    )
-    if attempts > limit:
-        raise StateSnapshotContractError(
-            f"{FACT_RECOVERY_SEMANTIC_ATTEMPTS} ({attempts}) must not exceed "
-            f"{FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS} ({limit})"
-        )
-
-    projected = dict(payload)
-    projected["facts"] = list(raw_facts) + [
-        {"key": LEGACY_FACT_RETRY_ATTEMPT, "value": attempts},
-        {"key": LEGACY_FACT_RETRY_BUDGET, "value": limit},
-    ]
-    return projected
 
 
 def build_state_snapshot(
@@ -383,18 +311,18 @@ def build_state_snapshot(
     # -- canonical semantic budget + diagnostic step retry ---------------
     fact_entries.append(
         {
-            "key": FACT_RECOVERY_SEMANTIC_ATTEMPTS,
+            "key": FACT_ATTEMPTS_SEMANTIC,
             "value": semantic_budget.semantic_attempts,
         }
     )
     fact_entries.append(
         {
-            "key": FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS,
+            "key": FACT_ATTEMPTS_MAX_SEMANTIC,
             "value": semantic_budget.max_semantic_attempts,
         }
     )
     fact_entries.append(
-        {"key": FACT_EXECUTION_STEP_RETRY_INDEX, "value": resolved_step_retry.index}
+        {"key": FACT_ATTEMPTS_STEP_RETRIES, "value": resolved_step_retry.index}
     )
 
     # -- capability ------------------------------------------------------
@@ -650,9 +578,11 @@ def validate_snapshot_profile(payload: Mapping[str, Any]) -> None:
     """Validate the versioned Tactus profile of an emitted snapshot payload.
 
     Fails closed for an unsupported generic ``schema_version`` or Tactus
-    profile version, a malformed phase, a missing digest and a digest that does
-    not match the canonical body. This is the consumer-side profile guard (for
-    example a cross-repository conformance test), not decision policy.
+    profile version, a malformed phase, a missing or inconsistent canonical
+    semantic budget, a superseded legacy ``retry.*`` budget fact, a missing
+    digest and a digest that does not match the canonical body. This is the
+    consumer-side profile guard (for example a cross-repository conformance
+    test), not decision policy.
     """
 
     if not isinstance(payload, Mapping):
@@ -681,11 +611,41 @@ def validate_snapshot_profile(payload: Mapping[str, Any]) -> None:
             f"supported is {SUPPORTED_SNAPSHOT_PROFILE_VERSION}"
         )
 
+    # The superseded legacy budget keys are never part of this profile. A
+    # payload that carries them states the same budget twice, in two
+    # vocabularies Ictus may read differently; refuse it instead of letting a
+    # silent precedence rule decide which one won.
+    for legacy_key in (LEGACY_FACT_RETRY_ATTEMPT, LEGACY_FACT_RETRY_BUDGET):
+        if legacy_key in fact_map:
+            raise StateSnapshotContractError(
+                f"{legacy_key} is a superseded legacy fact; a canonical snapshot "
+                "carries attempts.semantic/attempts.max_semantic instead"
+            )
+
     phase = fact_map.get(FACT_SNAPSHOT_PHASE)
     if not isinstance(phase, str) or phase not in {member.value for member in SnapshotPhase}:
         raise MalformedSnapshotError(
             f"snapshot.phase must be one of "
             f"{[member.value for member in SnapshotPhase]}, got {phase!r}"
+        )
+
+    # The canonical budget is mandatory and internally consistent. Tactus does
+    # not reimplement ``count < limit`` (Ictus decides that); it only refuses to
+    # emit a context whose accounting contradicts itself.
+    for canonical_key in (FACT_ATTEMPTS_SEMANTIC, FACT_ATTEMPTS_MAX_SEMANTIC):
+        if canonical_key not in fact_map:
+            raise StateSnapshotContractError(
+                f"{canonical_key} is required; a missing budget must never "
+                "default to zero/limited"
+            )
+    attempts = _require_count(fact_map[FACT_ATTEMPTS_SEMANTIC], FACT_ATTEMPTS_SEMANTIC)
+    limit = _require_count(
+        fact_map[FACT_ATTEMPTS_MAX_SEMANTIC], FACT_ATTEMPTS_MAX_SEMANTIC
+    )
+    if attempts > limit:
+        raise StateSnapshotContractError(
+            f"{FACT_ATTEMPTS_SEMANTIC} ({attempts}) must not exceed "
+            f"{FACT_ATTEMPTS_MAX_SEMANTIC} ({limit})"
         )
 
     digest = fact_map.get(FACT_SNAPSHOT_DIGEST)
@@ -735,6 +695,9 @@ def _evidence_to_json(ref: EvidenceRef) -> dict[str, str]:
 __all__ = [
     "DEFAULT_DOMAIN",
     "FACT_ATTEMPT_NUMBER",
+    "FACT_ATTEMPTS_MAX_SEMANTIC",
+    "FACT_ATTEMPTS_SEMANTIC",
+    "FACT_ATTEMPTS_STEP_RETRIES",
     "FACT_AUTHORIZATION_GRANTS",
     "FACT_BACKEND_DESCRIPTORS",
     "FACT_BACKEND_ADMINISTRATIVE_ENABLEMENT",
@@ -744,7 +707,6 @@ __all__ = [
     "FACT_CAPABILITY_ID",
     "FACT_DOMAIN_DEPENDENCIES_SATISFIED",
     "FACT_DOMAIN_SCOPE_CONSTRAINTS",
-    "FACT_EXECUTION_STEP_RETRY_INDEX",
     "FACT_OBSERVATION_CATEGORY",
     "FACT_OBSERVATION_EVIDENCE",
     "FACT_OBSERVATION_EXECUTION_ID",
@@ -756,8 +718,6 @@ __all__ = [
     "FACT_PROFILE_VERSION",
     "FACT_RECOVERY_ATTEMPT_ID",
     "FACT_RECOVERY_INTENT_ID",
-    "FACT_RECOVERY_MAX_SEMANTIC_ATTEMPTS",
-    "FACT_RECOVERY_SEMANTIC_ATTEMPTS",
     "FACT_SNAPSHOT_DIGEST",
     "FACT_SNAPSHOT_PHASE",
     "FACT_SOURCE_REVISION",
@@ -783,6 +743,5 @@ __all__ = [
     "build_state_snapshot",
     "compute_snapshot_digest",
     "semantic_budget_from_legacy",
-    "to_ictus_legacy_boundary_payload",
     "validate_snapshot_profile",
 ]

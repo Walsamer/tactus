@@ -33,15 +33,15 @@
       "value": "src-rev-1"
     },
     {
-      "key": "recovery.semantic_attempts",
+      "key": "attempts.semantic",
       "value": 0
     },
     {
-      "key": "recovery.max_semantic_attempts",
+      "key": "attempts.max_semantic",
       "value": 3
     },
     {
-      "key": "execution.step_retry_index",
+      "key": "attempts.step_retries",
       "value": 0
     },
     {
@@ -144,7 +144,7 @@
     },
     {
       "key": "snapshot.digest",
-      "value": "c3b18b864d64b37586358be8b9756ed2c38f98b1b1611300c7e83f3c8020be1c"
+      "value": "6cc1f9dbc98dcdefe14fe21a08d721049f7a0a6ca7fa3bb7e75577c0de97b4d8"
     }
   ],
   "capabilities": [
