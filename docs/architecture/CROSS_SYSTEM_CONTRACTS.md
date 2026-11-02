@@ -72,8 +72,10 @@ the outcome, and no Work Order transition, intervention request or ledger row is
 written. Reading the policy verdict instead of the resolved outcome is the bug
 this contract exists to prevent — a `NO_EXECUTION` decision also carries
 `ALLOW`/`MODIFY`. A malformed payload fails closed with an exception; a
-well-formed refusal is not an exception. Approval requirements and missing
-inputs remain explicit outputs, not reasons to fall back to another backend.
+well-formed refusal is not an exception. A refusal carries its resolved outcome,
+the proposal's decision and the policy verdict — not Ictus's prose, which the
+envelope does not carry — and a no-route or invalid-context outcome is never
+reinterpreted as permission to try another backend.
 
 The envelope is version tolerant: `schema_version` 1 and 2 are accepted and an
 unknown version is refused. Version 1 is the frozen capability-bearing shape and
