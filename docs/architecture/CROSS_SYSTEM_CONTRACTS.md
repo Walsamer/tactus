@@ -105,9 +105,10 @@ Canonical digest vectors are required before a plan may be acted on.
 
 The legacy unvalidated triple (`{proposal, policy_decision, execution_intent}`)
 is **deprecated**, not removed: the same admission boundary still accepts it,
-because the conformance harness and the three `scripts/validate_*` slice
-validators read real binary output in that shape and are our only real-binary
-evidence of escalation. It stays only until a `DecisionContext` producer exists;
+because plain `ictus decide` (no `--context`) still emits that shape and the
+conformance harness's default report exercises it — CI runs that report and the
+validated-envelope report side by side. It stays only until a `DecisionContext`
+producer exists;
 Tactus builds a context in evidence code, never at runtime.
 
 Validation evidence must come from a trusted Ictus invocation or authenticated

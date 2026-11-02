@@ -15,9 +15,11 @@ normalizes it into the Tactus-side :class:`~tactus.domain.decisions.SemanticDeci
 Deprecated
 ----------
 The legacy unvalidated triple is kept only until a ``--context`` producer exists.
-``parse_decision`` is used only by that branch of the inbound boundary; it is
-our only real-binary evidence of escalation. New application admission uses the
-validated, versioned DecisionEnvelope instead.
+Plain ``ictus decide`` still emits it, and the conformance harness's default
+report still exercises it, so one branch of the inbound boundary reads it and
+``parse_decision`` is used only there. Escalation evidence no longer depends on
+this shape: the slice validators prove it from the validated ``NO_EXECUTION``
+envelope.
 
 It deliberately does **not**:
 

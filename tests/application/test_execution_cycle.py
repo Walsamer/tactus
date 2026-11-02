@@ -551,6 +551,53 @@ def test_non_authorising_outcome_changes_nothing(tmp_path, monkeypatch, outcome,
     db.close()
 
 
+def test_well_formed_refusal_is_an_answer_even_before_any_attempt(tmp_path):
+    """The guards that protect an *applied* effect must not catch a refusal.
+
+    A denied escalation or abort has nothing to apply, so the intervention-store
+    requirement and the correlated-attempt requirement do not apply to it: the
+    caller gets the typed result, not a fault.
+    """
+
+    db = SqliteExecutionAdmission(tmp_path / "ledger.sqlite")
+    work_order = WorkOrder.create(WORK_ORDER)
+    work_order.admit(
+        reason="imported", authority=TransitionAuthority.OPERATOR, at=utcnow()
+    )
+    work_order.set_readiness(OpenStatus.READY)
+    db.register_work_order(
+        WORK_ORDER,
+        revision=WorkOrderRevision(0),
+        source_revision=SourceRevision(SOURCE),
+        state=work_order.state,
+        readiness=work_order.readiness,
+        at=utcnow(),
+    )
+    cycle = ExecutionCycle(db)
+
+    for decision, policy in (("ABORT", "DENY"), ("ESCALATE", "DENY")):
+        result = cycle.apply_recovery_decision(
+            work_order,
+            _envelope(
+                decision=decision,
+                policy=policy,
+                outcome="DENIED",
+                include_intent=False,
+            ),
+            state_port=db,
+            expected_revision=WorkOrderRevision(0),
+        )
+        assert result.non_authorising is EnvelopeOutcome.DENIED
+        assert result.applied is False
+        assert result.decision is result.application is None
+
+    assert work_order.state is WorkOrderState.OPEN
+    assert db._connection.execute(
+        "SELECT COUNT(*) FROM recovery_decision_inbox"
+    ).fetchone()[0] == 0
+    db.close()
+
+
 def test_recovery_decision_v0_row_conflicts_with_v1_envelope(tmp_path):
     cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
     envelope = _decision_envelope("proposal-v0")

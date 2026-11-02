@@ -691,7 +691,22 @@ class ExecutionCycle:
             raise IntentDecisionError(
                 "Ictus recovery decision does not target this Work Order"
             )
+        # A well-formed refusal is an answer, not a fault: return it before any
+        # precondition that exists only to protect an *applied* effect, including
+        # the intervention-store and correlated-attempt requirements below.
+        # Nothing is transitioned, recorded, closed or escalated here.
+        if admission.non_authorising is not None:
+            return RecoveryApplication(
+                decision=None,
+                application=None,
+                next_intent=None,
+                work_order_revision=self._current_revision(work_order.id),
+                applied=False,
+                non_authorising=admission.non_authorising,
+                envelope_id=admission.envelope_id,
+            )
         decision = admission.decision
+        assert decision is not None  # only authorising outcomes reach application
         kind = DecisionKind.from_token(admission.proposal_decision)
 
         # Fail closed: an ESCALATE decision *is* a typed human-intervention
@@ -739,17 +754,6 @@ class ExecutionCycle:
                     "attempt; the absence of an attempt authorizes only the "
                     "INITIAL execution decision"
                 )
-        if admission.non_authorising is not None:
-            return RecoveryApplication(
-                decision=None,
-                application=None,
-                next_intent=None,
-                work_order_revision=self._current_revision(work_order.id),
-                applied=False,
-                non_authorising=admission.non_authorising,
-                envelope_id=admission.envelope_id,
-            )
-        assert decision is not None  # only authorising outcomes reach application
         if attempt is None:
             if next_intent is None:
                 raise IntentDecisionError(
