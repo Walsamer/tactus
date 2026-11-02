@@ -18,11 +18,13 @@ huge-result    produce a result.json larger than the configured limit
 undeclared     patch touches a file the result did not declare
 no-result      exit 0 without writing anything
 failed         report ``status: failed`` with a reason, exit 0
+read-home      report what the child could see of ``$HOME/.codex/auth.json``
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import subprocess
@@ -136,6 +138,19 @@ def main(argv: list[str]) -> int:
         (Path(request["workspace"]["root"]) / "src" / "example.py").write_text(
             "x = 2\n", encoding="utf-8"
         )
+        return 0
+    if mode == "read-home":
+        # A runtime that finds its session credential through $HOME: report what the
+        # child itself could see, so the test does not trust the supervisor's promise.
+        target = Path(os.environ["HOME"]) / ".codex" / "auth.json"
+        if target.is_file():
+            mode_bits = oct(target.stat().st_mode & 0o777)
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()[:16]
+            summary = f"home file readable, mode {mode_bits}, digest {digest}"
+        else:
+            summary = "home file absent"
+        _write(output_dir, status="completed", changed=["src/example.py"], summary=summary)
+        (output_dir / "patch.diff").write_text(PATCH, encoding="utf-8")
         return 0
     if mode == "no-result":
         return 0

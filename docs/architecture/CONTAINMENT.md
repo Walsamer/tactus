@@ -1,11 +1,11 @@
 # Containment (TCT-WO-022 phase 2)
 
 Status: **the boundary is implemented, enforced at spawn time, and proven with
-real child processes.** The one real-runtime canary is *not* run: it needs
-explicit operator approval and a scoped provider credential, and it ships as an
-operator command (`scripts/run-agent-canary.sh`) rather than a code path only its
-author can drive. Nothing here publishes: `publication_authority` stays `false`
-in every attempt account.
+real child processes.** The one real-runtime canary runs as an operator command
+(`scripts/run-agent-canary.sh`), and it has been run: under the shipped pin the
+pinned CLI now reaches the model call inside the boundary (measured, see "The
+three mach services" and "Measured on this host"). Nothing here publishes:
+`publication_authority` stays `false` in every attempt account.
 
 This document states exactly what the boundary enforces, what it merely records,
 and what it does **not** claim. Every enforcement claim names the test that
@@ -58,16 +58,59 @@ allowances. The shape is:
 (allow file-read* (subpath "/"))      ; reads are a deny-list — see "Not claimed"
 (deny file-read* (subpath "<denied root>")) …   ; one per configured root
 (allow file-write* (subpath "<workspace>") (subpath "<attempt dir>") …)  ; exact allowlist
-(allow <recorded allowance>) …        ; e.g. ipc-posix-shm, only if the pin records it
+(allow <recorded allowance>) …        ; e.g. ipc-posix-shm, or one named mach service,
+                                      ; only if the pin records it
 (deny network*)                       ; or (allow network-outbound (remote ip "localhost:PORT"))
                                       ; or (allow network*) for an approved canary only
 ```
 
-`(deny default)` is not decoration: it is what closes **Mach IPC**, and that is
-what closes the Keychain. Measured on this host: with `(allow default)` plus a
-file-level denial of `$HOME`, `security find-generic-password` still *answered*
-(`The specified item could not be found`); under `(deny default)` it fails at the
-XPC layer instead. A path-only denial does not close the Keychain.
+`(deny default)` is not decoration: it is what closes **Mach IPC**, and Mach IPC
+is what closes the Keychain — a path-level denial alone does not. Measured on
+this host: with `(allow default)` plus a file-level denial of `$HOME`,
+`security find-generic-password` still *answered* (`The specified item could not
+be found`); under `(deny default)` it fails at the XPC layer instead.
+
+### The three mach services the pinned runtime needs
+
+A deny-default profile is not free for a hosted runtime. Measured with
+`codex-cli 0.162.1` and the shipped pin's profile: with `ipc-posix-shm` alone the
+CLI cannot start at all — `thread/start failed: failed to load configuration:
+Failed to synchronize managed preferences (code -32600)` — because it
+synchronises its managed preferences through `cfprefsd`, which Mach IPC denial
+also closes. The canary pin therefore records exactly three named services and
+nothing else:
+
+| Allowance | Why the runtime needs it |
+|---|---|
+| `mach-lookup (global-name "com.apple.cfprefsd.daemon")` | managed-preferences sync (the `cfprefsd` daemon) |
+| `mach-lookup (global-name "com.apple.cfprefsd.agent")` | managed-preferences sync (the per-user agent) |
+| `mach-lookup (global-name "com.apple.SecurityServer")` | TLS trust evaluation via securityd; without it every HTTPS call fails `invalid peer certificate: UnknownIssuer` |
+
+The honest sentence is this: **the CLI cannot start under a deny-default profile
+without them, so the profile grants three named mach services and nothing else.**
+A blanket `(allow mach-lookup)` is exactly what must not land, and does not:
+allowances are listed in the pin file, so each one is reviewable and cannot grow
+silently.
+
+What those three services do and do not grant the child is measured, not assumed
+(see "Measured on this host"). In short: the child can now *use* the Security
+framework and its own preferences domain — it can talk to securityd, list its
+keychain search list (`/Library/Keychains/System.keychain`), and create and use a
+keychain *file of its own* inside its writable workspace. It still cannot read
+the operator's keychain stores (`~/Library/Keychains/login.keychain-db` is
+`Operation not permitted`), and the operator's preferences stay out of reach
+because the child's `HOME` is attempt-local (`defaults read com.apple.dock` is
+`Domain not found` inside the boundary and outside it for that home).
+
+**What is deliberately not proven: reading an individual keychain item.** A child
+with securityd access can *ask*; whether an item comes back depends on that item's
+ACL, and answering the authorisation prompt is something a headless sandboxed child
+cannot do. Testing it would have meant touching the operator's real secrets, and a
+machine-specific test that only passes where a particular item happens to exist is
+worse than no test: it would look like coverage and prove nothing. So the denial
+matrix proves the portable half — the store *file* stays denied
+(`read_denied_keychain_store`) — and this paragraph states the other half as
+unmeasured rather than dressed up.
 
 ## Enforced — each with its proof
 
@@ -76,6 +119,8 @@ XPC layer instead. A path-only denial does not close the Keychain.
 | Write inside the workspace succeeds | write allowlist contains workspace + attempt dir | `test_containment.py::test_self_test_proves_every_denial` |
 | Write outside is refused, and leaves nothing | write allowlist is exact | same |
 | Reads of a denied root are refused | one `deny file-read*` per configured root | same |
+| A keychain store stays unreadable whatever mach services are allowed | the `~/Library/Keychains` denial is a path denial, independent of `SecurityServer` | same (`read_denied_keychain_store`), `tests/canary/test_run_agent_canary.py::test_the_denial_matrix_covers_the_mach_allowances_and_the_keychain_store` |
+| A staged session credential exists only for the attempt | attempt-home seed written at `0600` before the spawn, removed when the child is gone | `test_runtime_supervision.py::test_a_seeded_home_file_is_readable_only_during_the_attempt` |
 | Outbound network is refused (deny egress) | `(deny network*)` | same (connect probe reports `EPERM`) |
 | Egress allowlist is exact, not approximate | `(allow network-outbound (remote ip "localhost:PORT"))` | `…::test_self_test_records_the_localhost_allowance_as_two_checks` |
 | A child cannot widen its own sandbox | nested `sandbox_apply` is refused | `test_self_test_proves_every_denial` |
@@ -84,6 +129,7 @@ XPC layer instead. A path-only denial does not close the Keychain.
 | A launcher that ignores its profile is caught | every check is a real child | `…::test_self_test_catches_a_launcher_that_does_not_apply_the_profile` |
 | The task never appears in argv | prompt written to the attempt dir, fed on stdin | `test_runtime_supervision.py::test_the_task_is_fed_on_stdin_never_on_the_command_line` |
 | Only allowlisted credential names reach the child | env allowlist, values from the supervisor | `…::test_allowlisted_credentials_reach_the_child_and_nothing_else_does`, `…::test_child_environment_is_minimal_and_attempt_local` |
+| A staged session file lives only as long as the attempt | written into the attempt's own home at `0600` before the spawn, unlinked in the supervisor's `finally` | `…::test_a_seeded_home_file_is_readable_only_during_the_attempt` |
 | Terminated means nothing of the attempt is alive | two independent checks after killpg: attempt-marker sweep, and `lsof` holders of the workspace/attempt dir | `test_containment.py::test_residual_processes_finds_a_detached_child_then_nothing`, `test_runtime_supervision.py::test_a_survivor_is_found_even_when_its_environment_is_invisible` |
 | An unavailable check never reads as "clear" | both checks unavailable ⇒ `unverifiable`, lock held | `test_runtime_supervision.py::test_an_unavailable_survivor_check_never_reads_as_clear` |
 | The launcher that was proven is the launcher that runs | policy and descriptor launchers must match by path, prefix and digest | `test_runtime_supervision.py::test_a_policy_launcher_that_differs_from_the_descriptor_is_refused` |
@@ -105,18 +151,42 @@ These are the denials the matrix observes, run as real children:
 | write inside the workspace | succeeds |
 | write to a sibling path outside it | `Operation not permitted`, nothing created |
 | read `~/.ssh/id_ed25519`, `~/.codex/auth.json`, `~/.gitconfig` | `Operation not permitted` |
+| read `~/Library/Keychains/login.keychain-db` | `Operation not permitted` — the keychain *store* stays denied at the file level even with `SecurityServer` allowed |
 | read the Ictus checkout on `/Volumes` | `Operation not permitted` |
 | `ssh-add -l` | `Error connecting to agent: Operation not permitted` |
-| `security find-generic-password` | refused at the XPC layer (Keychain closed) |
+| `security find-generic-password` | refused at the XPC layer (Keychain closed) **only** while no mach allowance is declared. With the canary's three services it reaches securityd: `security list-keychains` answers `/Library/Keychains/System.keychain`, a keychain *file* can be created in the writable workspace, an item added to it and read back. No operator item is readable without its ACL, and the operator's stores are unreadable (row above) |
+| `defaults read com.apple.dock` | `Domain not found` — the child's `HOME` is attempt-local, so it syncs its own preferences domain, not the operator's |
 | `gh auth status` | `not logged into any GitHub hosts` (no credential reachable) |
 | outbound connect, deny egress | `EPERM` |
+| start the pinned CLI under the profile with `ipc-posix-shm` only | `Failed to synchronize managed preferences (code -32600)` — never reaches the model call |
+| the same with the three named mach services, a bogus platform key | reaches the model call: `401 Unauthorized … auth error code: invalid_api_key` on `wss://api.openai.com/v1/responses` |
+| the same with the operator's session file staged | auth accepted (no 401); the attempt fails at the subscription backend (`chatgpt.com/backend-api/ps/mcp` → `HTTP 451` from this network, and `HTTP 451` uncontained too) |
 | `git push` to a remote outside the workspace | rejected; the remote's ref list is unchanged |
 | nested `sandbox-exec -p '(allow default)'` | `sandbox_apply: Operation not permitted` |
 | `kill` of the supervisor or of pid 1 | `Operation not permitted` |
 
-Cost, measured rather than estimated: **7 checks in 0.17 s cold / 0.12 s warm**
-per attempt; artifact digest **~1.0 s** for a single 246 MB binary, **~3.8 s cold
-/ 1.7 s warm** for a 14,922-file tree (a node-bundle runtime). Runtime startup
+### Reading a canary verdict
+
+Two of the rows above are the ones an operator can misread, so they are spelled
+out:
+
+* **`timeout` can mean a rejected credential.** The pinned CLI reconnects a refused
+  connection with backoff until the attempt deadline, so the supervisor's verdict
+  reads `timeout` while the cause is an authentication rejection. The deadline is
+  the real bound and is not shortened to make a report prettier; instead the canary
+  classifies the cause into `attempt.auth_rejection` (`detected`, `marker`,
+  `detail`) beside the verdict, and the 401 itself lives in `attempt.stderr_tail`
+  and in the supervisor's `output.stdout`.
+* **`HTTP 451` is the network, not the profile.** On a network that refuses the
+  subscription backend (`chatgpt.com`) the session route authenticates and then
+  ends there, in and outside the boundary alike. A *completing* canary needs a
+  network that reaches that backend, or the platform-key route, which reaches
+  `api.openai.com` instead. Reading 451 as a containment failure would send the
+  next operator widening a boundary that was never the problem.
+
+Cost, measured rather than estimated: **8 checks in 0.17–0.18 s** (two runs, this
+host) per attempt; artifact digest **~1.0 s** for a single 246 MB binary, **~3.8 s
+cold / 1.7 s warm** for a 14,922-file tree (a node-bundle runtime). Runtime startup
 added by the boundary is the launcher process only (`sandbox-exec` execs in
 place): the runtime's own startup dominates.
 
@@ -135,8 +205,19 @@ Seatbelt cannot express a host allowlist: `remote ip` accepts only `*` or
 A hosted provider therefore means either open egress for the length of one run,
 or a local allow-listing proxy in front of it. The canary uses `open`, records
 `"egress": {"mode": "open"}` in its evidence, and everything else stays denied —
-no readable credential, no SSH agent, no `gh`, workspace-only writes, no
-publication authority.
+no ambient credential is reachable inside the boundary, no SSH agent, no `gh`,
+workspace-only writes, no publication authority.
+
+That sentence used to say "no readable credential", and it was true while the
+canary took a platform key from the environment. It is no longer the whole truth,
+so it is stated exactly: **no ambient credential is reachable inside the
+boundary** — the denial of `$HOME`, `~/.codex`, `~/.ssh`, `~/Library/Keychains`
+and `/Volumes` is unchanged, so the operator's own `auth.json` stays unreadable
+there — and **one operator-designated session credential is staged into the run's
+own home, recorded in evidence, and removed at the end**. The staged copy is the
+only credential inside the boundary, it exists for the length of the attempt,
+its digest is in the evidence, and the attempt directory that remains afterwards
+is checked to be free of it.
 
 ## Failing closed
 
@@ -194,9 +275,15 @@ suite, both jobs' tests included.
   a silent weakening is not possible, because every claim above is a check that
   must pass before a spawn.
 * **Allowances are permissions too.** Codex 0.162.1 needs `(allow ipc-posix-shm)`
-  to start a thread under `(deny default)`; that is a same-user shared-memory
-  channel. Pinned runtimes record their allowances in the pin file, so an
-  allowance can be reviewed and cannot grow silently. Pi 1.3.0 needs none.
+  to start a thread under `(deny default)`, and three named mach services
+  (`com.apple.cfprefsd.daemon`, `com.apple.cfprefsd.agent`,
+  `com.apple.SecurityServer`) before it can load its configuration or evaluate
+  TLS trust at all — see "The three mach services the pinned runtime needs". They
+  are a same-user shared-memory channel, two preferences daemons and securityd:
+  enough to use the Security framework and its own preferences domain, not enough
+  to read the operator's keychain stores (measured above). Pinned runtimes record
+  their allowances in the pin file, so an allowance can be reviewed and cannot
+  grow silently. Pi 1.3.0 needs none.
 * **Survivors are found by two checks, and neither is complete.** The marker
   sweep reads `ps -E`, which on macOS does not expose the environment of every
   binary, so a leftover `/bin/sleep` or `/bin/sh` helper is invisible to it — and

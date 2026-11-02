@@ -26,7 +26,13 @@ from types import ModuleType
 
 import pytest
 
-from tactus.runtime.containment import digest_tree
+from tactus.runtime.containment import (
+    ContainmentPolicy,
+    DeniedRoot,
+    EgressPolicy,
+    Launcher,
+    digest_tree,
+)
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SCRIPT = REPOSITORY / "scripts" / "run_agent_canary.py"
@@ -38,18 +44,37 @@ SANDBOX = shutil.which("sandbox-exec")
 #: ignores it, sends no bearer and fails every attempt with ``Missing bearer``.
 _CREDENTIAL = "CODEX_API_KEY"
 
-#: A stand-in for the pinned runtime: version, model list, and (never reached in
-#: these tests) a successful JSONL turn. ``/bin/sh`` keeps it readable inside the
-#: containment profile without an interpreter on the sandbox ``PATH``.
+#: A stand-in for the pinned runtime: version, model list, a report of whether the
+#: session file was staged into its own home, and a successful JSONL turn.
+#: ``/bin/sh`` keeps it readable inside the containment profile without an
+#: interpreter on the sandbox ``PATH``.
 FAKE_RUNTIME = """\
 #!/bin/sh
 case "$1" in
   --version) echo "fake-canary 1.0.0"; exit 0 ;;
   debug) echo '{"models":[{"slug":"fake-canary-model"},{"slug":"other-model"}]}'; exit 0 ;;
 esac
+if [ -f "$HOME/.codex/auth.json" ]; then
+  echo '{"type":"staged","found":true}'
+else
+  echo '{"type":"staged","found":false}'
+fi
 echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
 exit 0
 """
+
+#: What a session credential file looks like to this command: JSON with tokens, one
+#: of them refresh material. The value is distinctive so a leak is unmistakable.
+SESSION_TOKEN = "sk-test-session-value-that-must-not-leak-0123456789"
+SESSION_FILE = {
+    "OPENAI_API_KEY": None,
+    "tokens": {
+        "access_token": "access-value-that-must-not-leak",
+        "refresh_token": SESSION_TOKEN,
+        "id_token": "id-value-that-must-not-leak",
+    },
+    "last_refresh": "2026-11-02T10:00:00Z",
+}
 
 
 def _load_command() -> ModuleType:
@@ -83,8 +108,20 @@ def _launcher(tmp_path: Path) -> Path:
     return path
 
 
-def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
-    """A complete, self-consistent pin for a throwaway runtime and its denials."""
+def _pin(
+    tmp_path: Path,
+    *,
+    artifact_sha256: str | None = None,
+    credential_file: Path | None = None,
+    env_allowlist: list[str] | None = None,
+    keychain_store: bool = False,
+) -> Path:
+    """A complete, self-consistent pin for a throwaway runtime and its denials.
+
+    The default credential route is the environment one; ``credential_file`` builds
+    the session-file route instead, and ``keychain_store`` adds a denied root shaped
+    like the operator's ``Library/Keychains`` with a store file in it.
+    """
     runtime = tmp_path / "runtime"
     (runtime / "bin").mkdir(parents=True)
     executable = runtime / "bin" / "fake-canary"
@@ -97,6 +134,15 @@ def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
     denied.mkdir()
     (denied / "credentials.txt").write_text("must stay unreadable\n", encoding="utf-8")
     (denied / "home").mkdir()
+    denied_roots = [
+        {"path": str(denied), "reason": "a credential store beside the run"},
+        {"path": str(denied / "home"), "reason": "a home-shaped directory"},
+    ]
+    if keychain_store:
+        keychains = tmp_path / "Library" / "Keychains"
+        keychains.mkdir(parents=True)
+        (keychains / "login.keychain-db").write_text("a store\n", encoding="utf-8")
+        denied_roots.append({"path": str(keychains), "reason": "the keychain stores"})
 
     launcher = _launcher(tmp_path)
     pin = {
@@ -144,10 +190,7 @@ def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
             # Denials are self-contained: the operator's real home is denied by
             # the shipped pin, but a test that included it would fail wherever
             # pytest's temporary directory happens to live inside it.
-            "denied_roots": [
-                {"path": str(denied), "reason": "a credential store beside the run"},
-                {"path": str(denied / "home"), "reason": "a home-shaped directory"},
-            ],
+            "denied_roots": denied_roots,
         },
         "limits": {
             "timeout_seconds": 120.0,
@@ -158,6 +201,19 @@ def _pin(tmp_path: Path, *, artifact_sha256: str | None = None) -> Path:
             "termination_grace_seconds": 5.0,
         },
     }
+    if credential_file is not None:
+        # The session-file route: no credential variable reaches the child at all,
+        # and the file is staged into the attempt's own home.
+        pin.pop("credential_env")
+        pin["env_allowlist"] = []
+        pin["credential_file"] = {
+            "kind": "codex-session",
+            "path": str(credential_file),
+            "home_path": ".codex/auth.json",
+            "mode": "0600",
+        }
+    if env_allowlist is not None:
+        pin["env_allowlist"] = list(env_allowlist)
     path = tmp_path / "pin.json"
     path.write_text(json.dumps(pin, indent=2), encoding="utf-8")
     return path
@@ -268,18 +324,153 @@ def test_the_missing_credential_message_follows_the_pin(
     assert not (tmp_path / "stage").exists()
 
 
-def test_the_shipped_pin_names_the_credential_the_runtime_reads() -> None:
-    """Regression: the pin once named ``OPENAI_API_KEY``, which this CLI ignores.
+def _session_file(tmp_path: Path, payload: object | None = None) -> Path:
+    path = tmp_path / "auth.json"
+    path.write_text(json.dumps(SESSION_FILE if payload is None else payload), encoding="utf-8")
+    return path
 
-    The pinned Codex CLI authenticates ``codex exec`` from ``CODEX_API_KEY`` only:
-    with the old name it sent no bearer at all (``Missing bearer or basic
-    authentication in header``) and every attempt failed at the model call. The
-    name is part of the pin's measured statement about one binary, so pinning a
-    different runtime means measuring this again, not editing a string.
+
+def test_a_pin_with_both_credential_routes_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two routes are a configuration failure, not a precedence rule."""
+    pin = _pin(tmp_path, credential_file=_session_file(tmp_path))
+    document = json.loads(pin.read_text(encoding="utf-8"))
+    document["credential_env"] = _CREDENTIAL
+    pin.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+    code = command.main(
+        ["--dry-run", "--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    captured = capsys.readouterr()
+    assert code == command.EXIT_REFUSED
+    assert "exactly one route" in captured.err
+    assert not (tmp_path / "stage").exists()
+
+
+def test_the_file_route_refuses_a_credential_variable_in_the_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pin = _pin(
+        tmp_path,
+        credential_file=_session_file(tmp_path),
+        env_allowlist=[_CREDENTIAL],
+    )
+
+    code = command.main(
+        ["--dry-run", "--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    captured = capsys.readouterr()
+    assert code == command.EXIT_REFUSED
+    assert "env_allowlist must be empty" in captured.err
+    assert not (tmp_path / "stage").exists()
+
+
+def test_a_missing_session_file_is_refused_before_anything_is_created(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    absent = tmp_path / "not-there" / "auth.json"
+    pin = _pin(tmp_path, credential_file=absent)
+
+    code = command.main(
+        ["--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    captured = capsys.readouterr()
+    assert code == command.EXIT_REFUSED
+    assert str(absent) in captured.err
+    assert "missing or unreadable" in captured.err
+    # Both routes are named, so the operator knows what to do.
+    assert "codex login" in captured.err and "credential_env" in captured.err
+    assert not (tmp_path / "stage").exists()
+    assert not (tmp_path / "workspaces").exists()
+    assert not (tmp_path / "evidence.json").exists()
+
+
+def test_a_session_file_without_tokens_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = _session_file(tmp_path, {"tokens": {}, "last_refresh": "2026-11-02T10:00:00Z"})
+    pin = _pin(tmp_path, credential_file=source)
+
+    code = command.main(
+        ["--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    captured = capsys.readouterr()
+    assert code == command.EXIT_REFUSED
+    assert "carries no tokens" in captured.err and str(source) in captured.err
+    assert not (tmp_path / "stage").exists()
+
+
+def test_the_shipped_pin_takes_the_operator_session_file() -> None:
+    """The shipped route, and the alternative, are both measured statements.
+
+    The session file is what the operator uses (`codex login` writes it), so the
+    pin stages it instead of asking for a platform key; the environment route
+    stays documented as the alternative for someone who has a scoped API key, and
+    with a file route no credential variable may reach the child at all.
     """
     pin = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
-    assert pin["credential_env"] == "CODEX_API_KEY"
-    assert pin["env_allowlist"] == [pin["credential_env"]]
+    assert "credential_env" not in pin
+    assert pin["env_allowlist"] == []
+    assert pin["credential_file"] == {
+        "kind": "codex-session",
+        "path": "~/.codex/auth.json",
+        "home_path": ".codex/auth.json",
+        "mode": "0600",
+    }
+    # The name the CLI actually reads is documented, so the alternative stays correct.
+    source = (REPOSITORY / "scripts" / "run_agent_canary.py").read_text(encoding="utf-8")
+    assert "CODEX_API_KEY" in source
+    assert "OPENAI_API_KEY" in source
+
+
+def test_the_shipped_pin_records_the_mach_services_the_runtime_needs(
+    tmp_path: Path,
+) -> None:
+    """Exactly the three named mach services, and no blanket mach grant.
+
+    Measured: under the shipped allowances the pinned CLI reaches the model call;
+    with `ipc-posix-shm` alone it fails to load its configuration. The pin is the
+    record of that measurement, so it is asserted there rather than inferred.
+    """
+    shipped = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
+    assert shipped["containment"]["allowances"] == [
+        "ipc-posix-shm",
+        'mach-lookup (global-name "com.apple.cfprefsd.daemon")',
+        'mach-lookup (global-name "com.apple.cfprefsd.agent")',
+        'mach-lookup (global-name "com.apple.SecurityServer")',
+    ]
+
+    policy = ContainmentPolicy(
+        launcher=Launcher.for_path(_launcher(tmp_path)),
+        denied_roots=(DeniedRoot(path=tmp_path / "denied", reason="test"),),
+        egress=EgressPolicy(mode="open"),
+        allowances=tuple(shipped["containment"]["allowances"]),
+    )
+    workspace = tmp_path / "ws"
+    attempt = tmp_path / "attempt"
+    workspace.mkdir()
+    attempt.mkdir()
+    text = policy.profile_text(workspace=workspace, attempt_dir=attempt)
+    for name in (
+        "com.apple.cfprefsd.daemon",
+        "com.apple.cfprefsd.agent",
+        "com.apple.SecurityServer",
+    ):
+        assert f'(allow mach-lookup (global-name "{name}"))' in text
+    # The blanket grant is exactly what must not land.
+    assert "(allow mach-lookup)" not in text
+    assert "(allow mach*" not in text
+
+
+def test_the_shipped_pin_denies_the_operator_keychain_and_codex_home() -> None:
+    pin = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
+    denied = {root["path"] for root in pin["containment"]["denied_roots"]}
+    assert {"~", "~/.ssh", "~/.codex", "~/Library/Keychains"} <= denied
 
 
 # -- staging ---------------------------------------------------------------
@@ -418,6 +609,7 @@ def test_dry_run_skips_the_model_call_and_records_the_matrix(
     assert evidence["patch"] is None
     assert evidence["containment_checks"] is None
     assert evidence["credentials"] == {
+        "route": "env",
         "variable": _CREDENTIAL,
         "present": False,
         "used": False,
@@ -426,6 +618,126 @@ def test_dry_run_skips_the_model_call_and_records_the_matrix(
     }
     assert evidence["pin"]["egress"]["mode"] == "open"
     assert evidence["staging"]["artifacts"][0]["sha256"] == evidence["pin"]["artifacts"][0]["sha256"]
+
+
+@pytest.mark.seatbelt
+def test_the_denial_matrix_covers_the_keychain_store_with_securityd_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The matrix holds with securityd allowed, and probes the keychain store.
+
+    The allowances are a permission of their own; the store file is what still
+    closes the operator's keychain, so the matrix proves that file read is refused
+    even in a profile that may talk to `securityd`.
+    """
+    monkeypatch.delenv(_CREDENTIAL, raising=False)
+    pin = _pin(tmp_path, keychain_store=True)
+    document = json.loads(pin.read_text(encoding="utf-8"))
+    document["containment"]["allowances"] = [
+        "ipc-posix-shm",
+        'mach-lookup (global-name "com.apple.SecurityServer")',
+    ]
+    pin.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    evidence_path = tmp_path / "evidence.json"
+
+    code = command.main(
+        ["--dry-run", "--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    assert code == 0
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    checks = {
+        check["name"]: check for check in evidence["containment"]["denial_matrix"]["checks"]
+    }
+    store = checks["read_denied_keychain_store"]
+    assert store["ok"] is True and store["required"] is True
+    assert str(tmp_path / "Library" / "Keychains" / "login.keychain-db") in store["detail"]
+    assert evidence["pin"]["allowances"] == document["containment"]["allowances"]
+    assert checks["read_denied_root"]["ok"] is True
+
+
+@pytest.mark.seatbelt
+def test_a_real_run_stages_the_session_file_into_the_attempt_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The file route end to end, without a model call.
+
+    The throwaway runtime reports what it could see in its own ``$HOME``, so the
+    staging is observed from inside the boundary. The attempt produces no patch, so
+    the canary's verdict fails — that is not what this test is about; the credential
+    account and its removal are.
+    """
+    monkeypatch.delenv(_CREDENTIAL, raising=False)
+    source = _session_file(tmp_path)
+    pin = _pin(tmp_path, credential_file=source)
+    evidence_path = tmp_path / "evidence.json"
+
+    command.main(["--approve", "--operator", "tester", *_arguments(tmp_path, pin)])
+
+    captured = capsys.readouterr()
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    credentials = evidence["credentials"]
+    assert credentials["route"] == "file"
+    assert credentials["kind"] == "codex-session"
+    assert credentials["source"] == str(source)
+    assert credentials["staged"] is True
+    assert credentials["staged_mode"] == "0600"
+    assert credentials["staged_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert credentials["carries_refresh_material"] is True
+    assert credentials["removed"] is True
+    assert credentials["in_argv"] is False and credentials["in_evidence"] is False
+
+    # The staged copy is gone; the attempt directory itself is retained evidence.
+    staged = Path(credentials["staged_path"])
+    assert staged.is_relative_to(Path(evidence["attempt"]["attempt_dir"]))
+    assert not staged.exists()
+
+    # The cause of the failure is classified beside the verdict, and a run with no
+    # rejected credential says so rather than guessing.
+    rejection = evidence["attempt"]["auth_rejection"]
+    assert rejection["detected"] is False
+    assert rejection["verdict_unchanged"] is True
+
+    # The child read it: its own report says the file was there.
+    supervisor = json.loads(
+        Path(evidence["attempt"]["supervisor_evidence"]).read_text(encoding="utf-8")
+    )
+    assert '"found":true' in supervisor["output"]["stdout"].replace(" ", "")
+
+    # No credential content anywhere it could be read back: evidence or stdout.
+    for value in SESSION_FILE["tokens"].values():
+        assert value not in evidence_path.read_text(encoding="utf-8")
+        assert value not in captured.out and value not in captured.err
+        for path in Path(evidence["attempt"]["attempt_dir"]).rglob("*"):
+            if path.is_file():
+                assert value.encode() not in path.read_bytes(), path
+
+
+def test_an_auth_rejection_is_named_beside_the_verdict_not_instead_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected credential is classified; the verdict it produced is untouched.
+
+    The pinned CLI reconnects a refused connection until the attempt deadline, so the
+    supervisor reports `timeout`. Shortening the deadline to make that read nicer
+    would trade a real bound for a prettier report; naming the cause beside it costs
+    nothing.
+    """
+    stderr = (
+        "Reading additional input from stdin...\n"
+        '2026-11-02T10:46:27.835989Z ERROR codex_api::endpoint::responses_websocket: '
+        "failed to connect to websocket: HTTP error: 401 Unauthorized, url: "
+        "wss://api.openai.com/v1/responses\n"
+    )
+    clean = command.classify_auth_rejection('{"type":"turn.started"}', "")
+    rejected = command.classify_auth_rejection("", stderr)
+
+    assert clean["detected"] is False
+    assert rejected["detected"] is True
+    assert rejected["marker"] == "401 Unauthorized"
+    assert "401 Unauthorized" in rejected["detail"]
+    # Classification never rewrites the verdict, in either direction.
+    assert rejected["verdict_unchanged"] is True and clean["verdict_unchanged"] is True
 
 
 def test_the_survivor_sweep_accepts_a_workspace_root(tmp_path):
