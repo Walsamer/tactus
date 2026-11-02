@@ -27,8 +27,6 @@ pinned Ictus Dagster bridge).
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -79,6 +77,7 @@ from tactus.integrations.ictus import (
     parse_decision,
     parse_observation,
 )
+from tactus.integrations.ictus.digests import canonical_digest
 
 
 class ExecutionCycleError(ValueError):
@@ -168,15 +167,6 @@ class ValidatedExecutionIntent:
     @property
     def as_dict(self) -> dict[str, Any]:
         return copy.deepcopy(dict(self.payload))
-
-
-def canonical_digest(payload: Mapping[str, Any]) -> str:
-    """Return the stable digest used by the Ictus durable submission boundary."""
-
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def parse_execution_decision(
