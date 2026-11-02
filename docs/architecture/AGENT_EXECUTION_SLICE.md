@@ -58,7 +58,7 @@ checked WorkOrder                 (tactus.domain / persistence)
 
 ## What the pinned Ictus revision already provides
 
-At the pinned revision (`c140af3`, Ictus PR #21) the capability route exists:
+At the pinned revision (`67877fb`) the capability route exists:
 
 | Element | Value |
 |---|---|
