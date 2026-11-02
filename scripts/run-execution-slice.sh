@@ -2,8 +2,10 @@
 # Run the bounded real Tactus/Ictus/Dagster execution-slice validation.
 #
 # Requires TACTUS_ICTUS_ROOT to point at the pinned Ictus checkout with its
-# existing venv and prebuilt target/debug/ictus binary. Override the interpreter
-# with TACTUS_ICTUS_PYTHON if the venv lives elsewhere.
+# existing venv and an `ictus` binary in the disposable conformance target
+# directory (`TACTUS_ICTUS_TARGET_DIR`, else a commit-keyed temp directory), which
+# the harness builds on demand and reuses. Override the interpreter with
+# TACTUS_ICTUS_PYTHON if the venv lives elsewhere.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
