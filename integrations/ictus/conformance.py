@@ -39,8 +39,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from tactus.integrations.ictus import (
+    DigestNumberDomainError,
     is_decision_envelope,
     is_legacy_decision_triple,
+    parse_digestable_document,
     parse_envelope,
 )
 
@@ -458,10 +460,17 @@ def run_decide(
             + proc.stderr.strip()[:500]
         )
     try:
-        raw = json.loads(proc.stdout)
+        raw = parse_digestable_document(proc.stdout)
     except json.JSONDecodeError as error:
         raise IctusBoundaryUnavailable(
             f"ictus {' '.join(args)} did not emit a JSON envelope: {error}"
+        ) from error
+    except DigestNumberDomainError as error:
+        # A number outside the identity-digest domain is a refusal, not a
+        # digest of the nearest representable value.
+        raise IctusBoundaryUnavailable(
+            f"ictus {' '.join(args)} emitted a number outside the "
+            f"identity-digest domain: {error}"
         ) from error
     if not isinstance(raw, Mapping):
         raise IctusBoundaryUnavailable("ictus decide emitted a non-object envelope")

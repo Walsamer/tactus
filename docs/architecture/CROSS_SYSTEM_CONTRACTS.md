@@ -97,6 +97,16 @@ The decision ledger records a versioned digest: a new row is `sha256:v1:`
 prefixed, an existing bare 64-hex row reads as `sha256:v0`, and comparing two
 different versions is an immutable-record conflict rather than a replay.
 
+The canonical form is Ictus's identity-digest protocol v1 (`docs/IDENTITY_DIGEST.md`,
+`contracts/digest-vectors.json` `schema_version` 1), including its number domain:
+an integer outside −2^63…2^64−1, a non-finite value, and a document literal that
+only rounds to its double are refused with a typed error naming the rule and the
+JSON path, never hashed as the nearest representable value. The rule is enforced
+wherever a digest is computed and at the text ingress that parses Ictus output, so
+a document Ictus would refuse cannot be digested here either. The published
+vectors are mirrored in `tests/integrations/ictus/test_digest_vectors.py` until a
+pin advance brings the artefact into the pinned revision.
+
 DECOMPOSE is refused with a typed reason, and no child Work Order is created:
 the bounded child plan is not carried in the envelope, and
 `validation.proposal_digest` cannot be re-verified because Ictus currently
