@@ -67,7 +67,8 @@
       "ipc-posix-shm",
       "mach-lookup (global-name \"com.apple.cfprefsd.daemon\")",
       "mach-lookup (global-name \"com.apple.cfprefsd.agent\")",
-      "mach-lookup (global-name \"com.apple.SecurityServer\")"
+      "mach-lookup (global-name \"com.apple.SecurityServer\")",
+      "mach-lookup (global-name \"com.apple.trustd.agent\")"
     ],
     "denied_roots": [
       {

@@ -433,11 +433,13 @@ def test_the_shipped_pin_takes_the_operator_session_file() -> None:
 def test_the_shipped_pin_records_the_mach_services_the_runtime_needs(
     tmp_path: Path,
 ) -> None:
-    """Exactly the three named mach services, and no blanket mach grant.
+    """Exactly the four named mach services, and no blanket mach grant.
 
-    Measured: under the shipped allowances the pinned CLI reaches the model call;
-    with `ipc-posix-shm` alone it fails to load its configuration. The pin is the
-    record of that measurement, so it is asserted there rather than inferred.
+    Measured: with `ipc-posix-shm` alone the CLI fails to load its configuration;
+    without `trustd.agent` every HTTPS request fails at the transport, so routing
+    discovery never completes and the attempt dies before the model call. The pin
+    is the record of those measurements, so it is asserted there rather than
+    inferred.
     """
     shipped = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
     assert shipped["containment"]["allowances"] == [
@@ -445,6 +447,7 @@ def test_the_shipped_pin_records_the_mach_services_the_runtime_needs(
         'mach-lookup (global-name "com.apple.cfprefsd.daemon")',
         'mach-lookup (global-name "com.apple.cfprefsd.agent")',
         'mach-lookup (global-name "com.apple.SecurityServer")',
+        'mach-lookup (global-name "com.apple.trustd.agent")',
     ]
 
     policy = ContainmentPolicy(
@@ -462,6 +465,7 @@ def test_the_shipped_pin_records_the_mach_services_the_runtime_needs(
         "com.apple.cfprefsd.daemon",
         "com.apple.cfprefsd.agent",
         "com.apple.SecurityServer",
+        "com.apple.trustd.agent",
     ):
         assert f'(allow mach-lookup (global-name "{name}"))' in text
     # The blanket grant is exactly what must not land.

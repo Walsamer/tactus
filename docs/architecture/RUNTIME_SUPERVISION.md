@@ -260,19 +260,19 @@ What is still open, and why no real agent is started:
    `result_contract`, so a pin that names a launcher gets the boundary
    (`integrations/dagster/agent_attempt.py`). The only real-runtime pin is the
    canary's own (`config/agent-runtime-canary.json`), run by hand.
-2. **The canary authenticates and has not yet produced an edit.** Open egress
-   for one approved run plus the operator's session file get the pinned CLI
-   inside the boundary, and the attempt then ends before the model call at
-   `workspace routing discovery failed` against `chatgpt.com/backend-api/ps/mcp`
-   (exit 1, no 401, empty patch). The same staged home and argv outside the
-   boundary complete the edit, so the staged credential alone is not the cause
-   and the difference lies inside the boundary — which denial does it is unknown,
-   and finding out needs a controlled allowance experiment, which is an operator
-   decision. That path's unauthenticated `HTTP 451`
-   (`{"message":"no_biscuit_no_service"}`) is answered the same inside and
-   outside the boundary, so it explains nothing about this failure. The
-   platform-key route is the one that gets further, and it is rejected only when
-   the key is a placeholder.
+2. **The canary completes one edit, and only as an operator command.** Open
+   egress for one approved run plus the operator's session file plus four
+   recorded mach allowances (the fourth is `com.apple.trustd.agent`, TLS trust
+   evaluation) get the pinned CLI through routing discovery, through the model
+   call, and to a patch: the attempt changed exactly the two intended files and
+   left a patch that applies to a pristine copy. The failure that preceded it was
+   named by the kernel — `mach-lookup com.apple.trustd.agent`, denied in every
+   failing run and in none that passed — so every HTTPS request had failed at the
+   transport; `configd` was tried first, changed nothing and was removed again.
+   The 451 on `chatgpt.com/backend-api/ps/mcp` is answered identically inside and
+   outside the boundary and explains nothing about it, and the earlier
+   `401 invalid_api_key` on `wss://api.openai.com` was a WebSocket auth rejection
+   that never exercised the trust check.
 3. **The durable half waits on Ictus B4** (see
    [`AGENT_EXECUTION_SLICE.md`](AGENT_EXECUTION_SLICE.md)); it is proven only in a
    throwaway clone.
