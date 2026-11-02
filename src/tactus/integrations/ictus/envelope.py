@@ -78,9 +78,11 @@ _VERDICTS = frozenset({"ALLOW", "DENY", "REQUIRE_APPROVAL", "MODIFY"})
 _ROUTE_FIELDS = frozenset(
     {"exclude_backend", "preferred_backend", "required_provider", "required_runtime"}
 )
-_ENVELOPE_MARKERS = frozenset(
-    {"schema_version", "envelope_id", "snapshot", "policy", "validation", "outcome", "expiry"}
-)
+#: Fields only a validated envelope carries. ``schema_version`` is deliberately
+#: absent: the legacy triple carries a top-level ``schema_version`` too, so
+#: treating the shared key as a marker would classify every real ``ictus decide``
+#: payload as both shapes and refuse it.
+_ENVELOPE_MARKERS = frozenset({"envelope_id", "outcome", "validation", "expiry"})
 _LEGACY_MARKERS = frozenset({"policy_decision", "execution_intent"})
 
 
@@ -163,7 +165,7 @@ class DecisionAdmission:
 
 
 def is_decision_envelope(payload: Any) -> bool:
-    """Recognize envelope-only markers, including an incomplete envelope."""
+    """Recognize the fields only an envelope carries, even an incomplete one."""
 
     return isinstance(payload, Mapping) and bool(_ENVELOPE_MARKERS.intersection(payload))
 

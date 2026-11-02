@@ -279,6 +279,17 @@ def test_legacy_uses_existing_retry_alias_and_refuses_missing_or_contradictory_i
     assert parse_decision_payload(_legacy(token="ESCALATE")).outcome is EnvelopeOutcome.NO_EXECUTION
 
 
+def test_real_binary_legacy_triple_is_not_mistaken_for_an_envelope():
+    # ``ictus decide`` emits a top-level ``schema_version`` beside the triple.
+    # Classifying that shared key as an envelope marker would refuse every real
+    # payload as ambiguous, and the deprecated path has to keep working.
+    payload = {"schema_version": 1, **_legacy(token="ESCALATE")}
+    assert not is_decision_envelope(payload)
+    admission = parse_decision_payload(payload)
+    assert admission.source is DecisionSource.LEGACY_TRIPLE
+    assert admission.outcome is EnvelopeOutcome.NO_EXECUTION
+
+
 def test_proposal_binding_fails_closed_even_for_a_well_formed_proposal():
     proposal = _legacy(token="ESCALATE")["proposal"]
     with pytest.raises(ProposalBindingUnverifiedError, match=r"validation.proposal_digest.*contracts/digest-vectors.json"):
