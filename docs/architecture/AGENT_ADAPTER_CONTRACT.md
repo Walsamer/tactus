@@ -5,8 +5,10 @@ it is enforced and proven with real child processes** (see
 [`CONTAINMENT.md`](CONTAINMENT.md)). No real coding agent is launched on this
 route: the only pinned runtime here is the deterministic fake agent. The one
 real-runtime canary is an operator command and has been run — the pinned CLI
-reaches the model call inside the boundary, with one operator-designated session
-credential staged into the run's own home and removed when the attempt ends.
+starts inside the boundary and authenticates with one operator-designated session
+credential staged into the run's own home and removed when the attempt ends; it
+then ends before the model call, and "Remaining gates" says what that leaves
+open.
 
 The adapter now has a **caller**: the Tactus-owned Dagster code location
 (`integrations/dagster/agent_location.py`) executes exactly one attempt per
@@ -148,9 +150,15 @@ Neither suite calls a model.
 ## Remaining gates (explicit, not implied)
 
 1. **The real-runtime canary's containment is measured; its edit is not.** The
-   operator's run reaches the model call inside the boundary and ends there: this
-   network answers the subscription backend with `HTTP 451` (`chatgpt.com`, in and
-   outside the boundary alike), and the platform-key route returns
+   operator's run authenticates inside the boundary and ends before the model
+   call at `workspace routing discovery failed`, against
+   `chatgpt.com/backend-api/ps/mcp`; the same staged home and argv outside the
+   boundary complete the edit, so the staged credential alone is not the cause
+   and the difference lies inside the boundary — *which* denial it is remains
+   unknown. That path answers `HTTP 451` (`{"message":"no_biscuit_no_service"}`)
+   with its siblings answering `401`/`403`, identically inside and outside the
+   boundary, so the 451 is neither a network nor a boundary failure and does not
+   explain the routing failure. The platform-key route returns
    `401 Unauthorized` for a placeholder key. Until a run completes one edit, no
    patch, push refusal and token account have been observed for a real runtime.
 2. **The egress posture is the canary's, not the default.** Standing posture is

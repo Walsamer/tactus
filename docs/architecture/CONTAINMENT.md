@@ -3,8 +3,9 @@
 Status: **the boundary is implemented, enforced at spawn time, and proven with
 real child processes.** The one real-runtime canary runs as an operator command
 (`scripts/run-agent-canary.sh`), and it has been run: under the shipped pin the
-pinned CLI now reaches the model call inside the boundary (measured, see "The
-three mach services" and "Measured on this host"). Nothing here publishes:
+pinned CLI starts inside the boundary and authenticates with the staged session
+credential, and then ends before the model call (measured; see "Reading a canary
+verdict" for what that does and does not mean). Nothing here publishes:
 `publication_authority` stays `false` in every attempt account.
 
 This document states exactly what the boundary enforces, what it merely records,
@@ -144,6 +145,13 @@ unmeasured rather than dressed up.
 
 ## Measured on this host (macOS 27.0, build 26A428, arm64)
 
+Re-measured on macOS 27.2 (build 26B123) after that update replaced
+`/usr/bin/sandbox-exec`: the launcher digest moved and was re-recorded, the
+denial matrix still holds 8/8, and the rows about the subscription backend and
+about the staged session credential were measured again (one contained run, one
+run of the same staged home and argv outside the boundary). The platform-key row
+is the 27.0 observation.
+
 These are the denials the matrix observes, run as real children:
 
 | Probe | Observed |
@@ -160,15 +168,16 @@ These are the denials the matrix observes, run as real children:
 | outbound connect, deny egress | `EPERM` |
 | start the pinned CLI under the profile with `ipc-posix-shm` only | `Failed to synchronize managed preferences (code -32600)` — never reaches the model call |
 | the same with the three named mach services, a bogus platform key | reaches the model call: `401 Unauthorized … auth error code: invalid_api_key` on `wss://api.openai.com/v1/responses` |
-| the same with the operator's session file staged | auth accepted (no 401); the attempt fails at the subscription backend (`chatgpt.com/backend-api/ps/mcp` → `HTTP 451` from this network, and `HTTP 451` uncontained too) |
+| the same with the operator's session file staged | auth accepted (no 401); the contained attempt ends before the model call: `workspace routing discovery failed` against `chatgpt.com/backend-api/ps/mcp`, retried 5/5, then `turn.failed` |
+| the same staged home and argv (`HOME` seeded with `.codex/auth.json` alone, no `config.toml`) with **no** boundary | the edit completes: exit 0, 11.5 s, exactly `src/calc.py` and `tests/test_calc.py`, no 401 and no `ps/mcp` request at all |
+| `curl` of that endpoint, in the attempt's own profile and uncontained | `451`, `{"message":"no_biscuit_no_service"}`, both ways; sibling paths `/backend-api/me` `401`, `/models` and `/conversation/init` `403` |
 | `git push` to a remote outside the workspace | rejected; the remote's ref list is unchanged |
 | nested `sandbox-exec -p '(allow default)'` | `sandbox_apply: Operation not permitted` |
 | `kill` of the supervisor or of pid 1 | `Operation not permitted` |
 
 ### Reading a canary verdict
 
-Two of the rows above are the ones an operator can misread, so they are spelled
-out:
+The rows above that an operator can misread are spelled out:
 
 * **`timeout` can mean a rejected credential.** The pinned CLI reconnects a refused
   connection with backoff until the attempt deadline, so the supervisor's verdict
@@ -177,12 +186,35 @@ out:
   classifies the cause into `attempt.auth_rejection` (`detected`, `marker`,
   `detail`) beside the verdict, and the 401 itself lives in `attempt.stderr_tail`
   and in the supervisor's `output.stdout`.
-* **`HTTP 451` is the network, not the profile.** On a network that refuses the
-  subscription backend (`chatgpt.com`) the session route authenticates and then
-  ends there, in and outside the boundary alike. A *completing* canary needs a
-  network that reaches that backend, or the platform-key route, which reaches
-  `api.openai.com` instead. Reading 451 as a containment failure would send the
-  next operator widening a boundary that was never the problem.
+* **The `HTTP 451` is one endpoint refusing, and it does not explain the canary.**
+  `chatgpt.com/backend-api/ps/mcp` answers `451` with
+  `{"message":"no_biscuit_no_service"}` from an OpenAI edge proxy
+  (`x-openai-proxy-wasm: v0.1`), while the same host at the same moment answers
+  `/backend-api/me` `401` and `/models`, `/conversation/init` `403` — with no
+  proxy configured, with a browser user agent, over IPv6, and identically inside
+  the attempt's own profile and outside it. The network is reachable and the
+  boundary does not block that host; the refusal belongs to that one path, and
+  **why** it refuses is unknown. It is *not* evidence that the endpoint is broken
+  or that the pinned CLI is out of step: the authenticated CLI run outside the
+  boundary never requests that path at all and completes the edit.
+
+The real question is the failure the contained run actually reports, and it is
+open:
+
+* **The contained attempt ends before the model call, at `workspace routing
+  discovery failed`**, retried five times against
+  `chatgpt.com/backend-api/ps/mcp`, then `turn.failed` (measured 2026-11-02: exit
+  1 after 19 s, `attempt.auth_rejection.detected` `false`, no 401 anywhere, patch
+  empty). The authenticated CLI outside the boundary, with the operator's own
+  login, completes the same task; and **with the same staged home and argv** —
+  `HOME` seeded with `.codex/auth.json` alone, no `config.toml`, the same fixture
+  and the same supervisor `containment=None` — it completes it too (exit 0,
+  11.5 s, exactly the two intended files, no `ps/mcp` request). So the staged
+  credential alone is not the cause: **the difference lies inside the
+  boundary**, and which denial produces it is not identified. No allowance was
+  added to find out, because the recorded allowances are a measured list and
+  changing them is an operator decision, not a canary one; the next step is that
+  controlled experiment, and its result belongs in the table above.
 
 Cost, measured rather than estimated: **8 checks in 0.17–0.18 s** (two runs, this
 host) per attempt; artifact digest **~1.0 s** for a single 246 MB binary, **~3.8 s
@@ -234,11 +266,40 @@ is checked to be free of it.
 | A survivor holds the workspace or attempt dir | `workspace-holder` recorded, termination unconfirmed, lock held |
 | Containment policy and descriptor name different launchers | refused before a child exists |
 | Launcher declared without a digest | refused: a path-only pin can be swapped in place |
+| Launcher pinned by digest without `recorded_on` | refused at pin load: a digest that names no host cannot explain its next mismatch |
 | State directory inside the workspace while contained | refused before the profile is rendered |
 
-Re-recording a pin (a new macOS build changes `/usr/bin/sandbox-exec`) is an
-operator change reviewed like any other: the launcher digest and the host build
-live in the pin file, and a mismatch is a refusal, never a warning.
+### An OS update moves the launcher pin
+
+A macOS update replaces `/usr/bin/sandbox-exec`, and the very next canary run
+stops before it stages anything. The pin records the digest **with the host it
+belongs to** — `launcher.sha256` beside `launcher.recorded_on`, e.g.
+`"macOS 27.2 (26B123)"`, both pin parsers refuse a digest that does not name its
+host — so the refusal names both sides instead of two bare digests:
+
+```text
+tactus.runtime.containment.ContainmentUnavailable: containment launcher digest mismatch:
+  pinned <digest> recorded on macOS 27.2 (26B123), observed <digest>
+  (/usr/bin/sandbox-exec); this host is macOS 27.2 (26B123); re-record the launcher
+  pin for this host only after confirming the Apple signature chain and the new OS build
+```
+
+That refusal is the pin working. Re-recording it is a deliberate operator act,
+reviewed like any other: confirm the new binary's Apple signature chain
+(`codesign -dvvv /usr/bin/sandbox-exec` → `Identifier=com.apple.sandbox-exec`,
+`Authority=macOS Software Signing` → `Apple Code Signing Certification Authority`
+→ `Apple Root CA`), record `sw_vers` before and after in the commit that moves
+the digest, move `recorded_on` with it, and change nothing else in the pin.
+**Do not read the file's mtime as evidence that nothing changed**: Apple's updater
+stamps binaries with the OS build's timestamp, so a replaced `sandbox-exec` can
+carry an mtime from before the update — measured here, 27.0 (26A428) → 27.2
+(26B123) swapped the binary under an `Oct 23 01:10` mtime.
+
+Never auto-accept a new digest and never let a tool "fix" it by itself: a pin
+that rewrites itself on mismatch is a rubber stamp, not a pin. There is
+deliberately no list of host/digest pairs to fall back on — such a list accepts
+whatever a host presents, which is the same silence with more bookkeeping. One
+digest, one named host, and a mismatch is a refusal, never a warning.
 
 ## Where this is verified
 

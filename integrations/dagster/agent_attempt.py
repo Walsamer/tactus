@@ -389,7 +389,7 @@ def _containment(config: Mapping[str, Any], path: Path) -> ContainmentPolicy | N
     launcher_raw = raw.get("launcher")
     if not isinstance(launcher_raw, dict):
         raise AgentRuntimePinError(f"runtime pin containment.launcher is required ({path})")
-    launcher_unknown = set(launcher_raw) - {"path", "argv_prefix", "sha256"}
+    launcher_unknown = set(launcher_raw) - {"path", "argv_prefix", "sha256", "recorded_on"}
     if launcher_unknown:
         raise AgentRuntimePinError(
             "runtime pin containment.launcher has unknown keys: "
@@ -401,9 +401,15 @@ def _containment(config: Mapping[str, Any], path: Path) -> ContainmentPolicy | N
             path=Path(_required_str(launcher_raw, "path", path)),
             argv_prefix=_str_tuple(launcher_raw, "argv_prefix", path),
             sha256=str(launcher_raw.get("sha256", "")),
+            recorded_on=str(launcher_raw.get("recorded_on", "")),
         )
     except (TypeError, ValueError) as exc:
         raise AgentRuntimePinError(f"runtime pin launcher is invalid ({path}): {exc}") from exc
+    if launcher.sha256 and not launcher.recorded_on:
+        raise AgentRuntimePinError(
+            "runtime pin launcher is pinned by digest but does not record the host it "
+            f"was recorded on; add `recorded_on` ({path})"
+        )
 
     roots_raw = raw.get("denied_roots", [])
     if not isinstance(roots_raw, list):

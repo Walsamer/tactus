@@ -46,7 +46,7 @@ quota): stage, workspace, denial matrix, evidence.
 
 What a failing run looks like, and what it means
 ------------------------------------------------
-Two failures are *not* boundary failures, and the evidence says which one happened:
+The evidence says which failure happened, and none of them is guessed:
 
 * a **rejected credential**. The pinned CLI reconnects a refused connection until
   the attempt deadline, so the verdict can read ``timeout`` while the cause is an
@@ -54,13 +54,22 @@ Two failures are *not* boundary failures, and the evidence says which one happen
   supervisor's captured stdout, and ``attempt.auth_rejection`` names it beside the
   verdict. The deadline is the real bound and is never shortened to make a verdict
   prettier;
-* a **network that does not reach the credential's endpoint**. The session route
-  talks to the subscription backend (``chatgpt.com``); where that host answers
-  ``HTTP 451`` the attempt authenticates and then ends there — measured identically
-  outside the boundary, so it is a fact about the network, not about the profile.
+* an **attempt that ends before the model call**, at ``workspace routing discovery
+  failed`` against ``chatgpt.com/backend-api/ps/mcp``. Measured 2026-11-02: the
+  same staged home (``HOME`` seeded with ``.codex/auth.json`` alone, no
+  ``config.toml``) and the same argv, run *outside* the boundary, complete the
+  edit — exit 0, no 401, no ``ps/mcp`` request at all — while the contained run
+  fails there. The staged credential alone is therefore not the cause; the
+  difference lies inside the boundary, and *which* denial does it is unknown
+  (``CONTAINMENT.md`` "Reading a canary verdict"). The unauthenticated ``HTTP
+  451`` that path returns, with ``{"message":"no_biscuit_no_service"}`` while its
+  sibling paths answer ``401``/``403``, is answered identically inside and
+  outside the boundary, so it neither proves a broken endpoint nor explains the
+  failure.
 
 The environment route (``credential_env``) reaches ``api.openai.com`` instead, which
-is why a dummy platform key fails at the model call with ``401 … invalid_api_key``.
+is the route that gets further: a dummy platform key fails at the model call with
+``401 … invalid_api_key``.
 
 The pinned runtime's argv
 -------------------------
@@ -210,7 +219,7 @@ _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ARTIFACT_KEYS = frozenset(
     {"path", "sha256", "kind", "role", "digest_order", "file_count", "entrypoint"}
 )
-_LAUNCHER_KEYS = frozenset({"path", "argv_prefix", "sha256"})
+_LAUNCHER_KEYS = frozenset({"path", "argv_prefix", "sha256", "recorded_on"})
 _MODEL_KEYS = frozenset({"slug", "allowed", "probe_argv", "probe_timeout_seconds"})
 _CONTAINMENT_KEYS = frozenset({"egress", "allowances", "denied_roots"})
 _EGRESS_KEYS = frozenset({"mode", "port"})
@@ -496,13 +505,21 @@ def _launcher(config: Mapping[str, Any], what: str) -> Launcher:
         raise CanaryError(f"{what} launcher must be an object")
     _refuse_unknown(raw, _LAUNCHER_KEYS, f"{what} launcher")
     try:
-        return Launcher(
+        launcher = Launcher(
             path=Path(_required_str(raw, "path", f"{what} launcher")),
             argv_prefix=_str_tuple(raw, "argv_prefix", f"{what} launcher"),
             sha256=str(raw.get("sha256", "")),
+            recorded_on=str(raw.get("recorded_on", "")),
         )
     except ContainmentError as exc:
         raise CanaryError(f"{what} launcher is invalid: {exc}") from exc
+    if launcher.sha256 and not launcher.recorded_on:
+        raise CanaryError(
+            f"{what} launcher is pinned by digest but does not record the host it was "
+            "recorded on; add `recorded_on` (e.g. `macOS 27.2 (26B123)`) so a mismatch "
+            "names both sides instead of two bare digests"
+        )
+    return launcher
 
 
 def _containment(
