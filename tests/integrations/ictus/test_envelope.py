@@ -279,6 +279,20 @@ def test_legacy_uses_existing_retry_alias_and_refuses_missing_or_contradictory_i
     assert parse_decision_payload(_legacy(token="ESCALATE")).outcome is EnvelopeOutcome.NO_EXECUTION
 
 
+def test_legacy_triple_refuses_a_policy_decision_for_another_proposal():
+    # The deprecated triple has no other binding than ``proposal_id``; the old
+    # intent path checked it and the envelope path keeps that check here.
+    payload = _legacy()
+    payload["policy_decision"]["proposal_id"] = "proposal-other"
+    with pytest.raises(MalformedEnvelopeError, match="does not belong"):
+        parse_decision_payload(payload)
+
+    payload = _legacy()
+    del payload["policy_decision"]["proposal_id"]
+    with pytest.raises(MalformedEnvelopeError, match="proposal_id"):
+        parse_decision_payload(payload)
+
+
 def test_real_binary_legacy_triple_is_not_mistaken_for_an_envelope():
     # ``ictus decide`` emits a top-level ``schema_version`` beside the triple.
     # Classifying that shared key as an envelope marker would refuse every real

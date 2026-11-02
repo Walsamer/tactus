@@ -331,6 +331,13 @@ def _parse_legacy_triple(payload: Mapping[str, Any]) -> DecisionAdmission:
     decision = parse_decision(proposal)
     policy = _object(payload, "policy_decision")
     verdict = _verdict(policy, "decision")
+    # ``policy-decision.schema.json`` requires ``proposal_id``, and it is the only
+    # provenance the deprecated triple can bind: a policy decision about another
+    # proposal must never authorize this one.
+    if _required_str(policy, "proposal_id") != decision.decision_id:
+        raise MalformedEnvelopeError(
+            "policy decision does not belong to the supplied proposal"
+        )
     subject = _subject(proposal, "subject")
     raw_intent = payload.get("execution_intent")
     if raw_intent is not None and not isinstance(raw_intent, Mapping):
