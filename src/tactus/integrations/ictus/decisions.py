@@ -12,6 +12,15 @@ opposite direction: Ictus produces a validated semantic decision, Tactus
 validates the decision-relevant part of the wire payload fail-closed and
 normalizes it into the Tactus-side :class:`~tactus.domain.decisions.SemanticDecision`.
 
+Deprecated
+----------
+The legacy unvalidated triple is kept only until a ``--context`` producer exists.
+Plain ``ictus decide`` still emits it, and the conformance harness's default
+report still exercises it, so one branch of the inbound boundary reads it and
+``parse_decision`` is used only there. Escalation evidence no longer depends on
+this shape: the slice validators prove it from the validated ``NO_EXECUTION``
+envelope.
+
 It deliberately does **not**:
 
 * re-validate Ictus-owned proposal metadata (``provider``/``subject``/

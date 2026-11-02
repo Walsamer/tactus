@@ -2,8 +2,8 @@
 """Validate the four execution-failure scenarios against real boundaries.
 
 This is the ``TCT-WO-005`` evidence harness. It complements
-``scripts/validate_execution_slice.py`` (the success/restart slice), which is
-left unchanged, and it exercises **real** components:
+``scripts/validate_execution_slice.py`` (the success/restart slice), and it
+exercises **real** components:
 
 * a real pinned-Ictus ``ictus decide`` binary (INITIAL and RECOVERY snapshots),
 * the real pinned Ictus Dagster bridge (``ictus_dagster.submission``: durable
@@ -76,8 +76,12 @@ FORBIDDEN_INTENT_KEYS = frozenset(
     }
 )
 
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+for _import_root in (SRC_ROOT, REPO_ROOT):
+    if str(_import_root) not in sys.path:
+        sys.path.insert(0, str(_import_root))
+
+from integrations.ictus.conformance import load_boundary, to_canonical_utc  # noqa: E402
+from validate_execution_slice import _decide  # noqa: E402
 
 from tactus.application import (  # noqa: E402
     ExecutionCycle,
@@ -152,12 +156,14 @@ def _terminate(process: subprocess.Popen[Any]) -> None:
 def _fact(snapshot: Mapping[str, Any], key: str) -> str:
     for fact in snapshot.get("facts") or []:
         if fact.get("key") == key:
-            return str(fact.get("value") or "")
+            value = fact.get("value")
+            # ``value or ""`` would turn a legitimate 0 into an empty string.
+            return "" if value is None else str(value)
     raise ValidationError(f"snapshot is missing required fact {key!r}")
 
 
 def _verify_ictus(ictus_root: Path) -> tuple[dict[str, Any], Path]:
-    binary = ictus_root / "target" / "debug" / "ictus"
+    binary = load_boundary(ictus_root).binary
     if not binary.is_file():
         raise ValidationError(f"pinned Ictus binary is missing: {binary}")
     commit = subprocess.check_output(
@@ -178,27 +184,6 @@ def _verify_ictus(ictus_root: Path) -> tuple[dict[str, Any], Path]:
         },
         binary,
     )
-
-
-def _decide(binary: Path, snapshot: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Invoke the real pinned Ictus CLI with a versioned snapshot on stdin."""
-    payload = dict(snapshot)
-    completed = subprocess.run(
-        [str(binary), "decide", "--approve"],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-    )
-    if completed.returncode not in {0, 3}:
-        raise ValidationError(
-            f"Ictus decide failed: exit={completed.returncode} "
-            f"stderr={completed.stderr.strip()}"
-        )
-    try:
-        envelope = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:  # pragma: no cover - contract failure
-        raise ValidationError(f"Ictus decide returned invalid JSON: {exc}") from exc
-    return payload, envelope
 
 
 def _write_environment(
@@ -384,7 +369,7 @@ def _initial_snapshot(
         semantic_budget=SemanticBudget(0, 3),
         step_retry=StepRetryDiagnostic(0),
         snapshot_id=snapshot_id,
-        timestamp=_now(),
+        timestamp=datetime.fromisoformat(to_canonical_utc(_now())),
         capability_id=capability,
         dependencies_satisfied=True,
         source_revision=source_revision.value,
@@ -566,9 +551,11 @@ def _admit(
         source_revision=source_revision,
     )
     _, envelope = _decide(binary, snapshot)
-    if envelope["policy_decision"]["decision"] != "ALLOW":
+    if envelope["outcome"] != "EXECUTABLE":
+        raise ValidationError("Ictus INITIAL outcome was not EXECUTABLE")
+    if envelope["policy"]["verdict"] != "ALLOW":
         raise ValidationError("Ictus INITIAL decision was not ALLOW")
-    authorized = envelope.get("execution_intent")
+    authorized = envelope.get("intent")
     if not isinstance(authorized, Mapping):
         raise ValidationError("Ictus INITIAL decision carried no ExecutionIntent")
 
@@ -909,19 +896,21 @@ def scenario_terminal(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         semantic_budget=SemanticBudget(1, 3),
         step_retry=StepRetryDiagnostic(1),
         snapshot_id="snapshot-terminal-recovery",
-        timestamp=_now(),
+        timestamp=datetime.fromisoformat(to_canonical_utc(_now())),
         capability_id=CAPABILITY,
         source_revision=admitted["source_revision"].value,
         work_order_revision=1,
     )
-    _, envelope = _decide(binary, snapshot)
+    _, envelope = _decide(binary, snapshot, failed_snapshot=admitted["snapshot"])
+    if envelope["outcome"] != "EXECUTABLE":
+        raise ValidationError("Ictus recovery outcome was not EXECUTABLE")
     if envelope["proposal"]["decision"] != "REEXECUTE":
         raise ValidationError(
             f"expected REEXECUTE within budget, got {envelope['proposal']['decision']}"
         )
-    if envelope["policy_decision"]["decision"] != "ALLOW":
+    if envelope["policy"]["verdict"] != "ALLOW":
         raise ValidationError("recovery decision was not ALLOW")
-    next_intent = envelope.get("execution_intent")
+    next_intent = envelope.get("intent")
     if not isinstance(next_intent, Mapping):
         raise ValidationError("REEXECUTE ALLOW carried no ExecutionIntent")
 
@@ -980,6 +969,8 @@ def scenario_terminal(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         "dagster_step_events": step_events,
         "terminal_observation": observed,
         "recovery_snapshot_phase": _fact(snapshot, "snapshot.phase"),
+        "recovery_outcome": envelope["outcome"],
+        "recovery_policy_verdict": envelope["policy"]["verdict"],
         "recovery_proposal_decision": envelope["proposal"]["decision"],
         "recovery_decision_applied": recovery.applied,
         "recovery_replay_applied": replay.applied,
@@ -1113,19 +1104,21 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         semantic_budget=SemanticBudget(3, 3),
         step_retry=StepRetryDiagnostic(0),
         snapshot_id="snapshot-escalation-recovery",
-        timestamp=_now(),
+        timestamp=datetime.fromisoformat(to_canonical_utc(_now())),
         capability_id=CAPABILITY,
         source_revision=admitted["source_revision"].value,
         work_order_revision=1,
     )
-    _, envelope = _decide(binary, snapshot)
+    _, envelope = _decide(binary, snapshot, failed_snapshot=admitted["snapshot"])
+    if envelope["schema_version"] != 2 or envelope["outcome"] != "NO_EXECUTION":
+        raise ValidationError("ESCALATE requires a v2 NO_EXECUTION envelope")
     if envelope["proposal"]["decision"] != "ESCALATE":
         raise ValidationError(
             f"expected ESCALATE at 3/3, got {envelope['proposal']['decision']}"
         )
-    if envelope["policy_decision"]["decision"] != "ALLOW":
+    if envelope["policy"]["verdict"] not in {"ALLOW", "MODIFY"}:
         raise ValidationError("ESCALATE was not policy-allowed")
-    if envelope.get("execution_intent") is not None:
+    if "intent" in envelope:
         raise ValidationError("an ESCALATE decision carried an ExecutionIntent")
 
     revision = db.work_order_snapshot(admitted["work_order_id"])[0]
@@ -1248,6 +1241,9 @@ def scenario_escalation(env: dict[str, Any], *, binary: Path) -> dict[str, Any]:
         "terminal_observation": observed,
         "terminal_observation_category": observed["category"],
         "recovery_proposal_decision": envelope["proposal"]["decision"],
+        "envelope_schema_version": envelope["schema_version"],
+        "recovery_outcome": envelope["outcome"],
+        "recovery_policy_verdict": envelope["policy"]["verdict"],
         "execution_intent_present": False,
         "intervention_created": True,
         "work_order_state_after_restart": state_after_restart[1].value,
@@ -1316,7 +1312,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "requires": [
                 "pinned Ictus checkout (TACTUS_ICTUS_ROOT)",
                 "its virtualenv with dagster + ictus_dagster",
-                "prebuilt target/debug/ictus binary",
+                "pinned ictus binary in the disposable conformance target",
                 "Tactus's own src/ on PYTHONPATH",
             ],
             "absent": ["pi", "stax", "metaxy", "openshell", "kubernetes"],
@@ -1364,6 +1360,20 @@ def main(argv: list[str] | None = None) -> int:
         f"{name}={data['result']}" for name, data in evidence["scenarios"].items()
     )
     print(f"execution-failure scenarios passed: {summary} evidence={path}")
+    for name, data in evidence["scenarios"].items():
+        if "recovery_outcome" in data:
+            print(
+                f"recovery evidence: {name} outcome={data['recovery_outcome']} "
+                f"verdict={data['recovery_policy_verdict']} "
+                f"proposal={data['recovery_proposal_decision']}"
+            )
+        if name == "escalation":
+            print(
+                f"escalation evidence: v{data['envelope_schema_version']} "
+                f"has_intent={data['execution_intent_present']} "
+                f"blocked_after_restart={data['work_order_blocked_after_restart']} "
+                f"replay_applied={data['replay_applied_after_restart']}"
+            )
     return 0
 
 

@@ -80,6 +80,12 @@ jobs:
             --target-dir "$TACTUS_ICTUS_TARGET_DIR" \
             tests/integrations/ictus/data/initial_snapshot.v2.json \
             tests/integrations/ictus/data/recovery_snapshot.v2.json
+      - name: real-boundary context conformance report
+        run: |
+          uv run --frozen python integrations/ictus/conformance.py --context \
+            --target-dir "$TACTUS_ICTUS_TARGET_DIR" \
+            tests/integrations/ictus/data/initial_snapshot.v2.json \
+            tests/integrations/ictus/data/recovery_snapshot.v2.json
       - name: verifier
         run: ./scripts/verify-goal.sh
 

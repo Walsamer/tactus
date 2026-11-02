@@ -12,7 +12,9 @@
 # undone until those gates are closed.
 #
 # Requires TACTUS_ICTUS_ROOT to point at the pinned Ictus checkout with its
-# existing venv (dagster + ictus_dagster) and a prebuilt target/debug/ictus. The
+# existing venv (dagster + ictus_dagster) and an `ictus` binary in the disposable
+# conformance target directory (`TACTUS_ICTUS_TARGET_DIR`, else a commit-keyed
+# temp directory), which the harness builds on demand and reuses. The
 # checkout must be clean at the pin; --allow-dirty-ictus exists only for
 # throwaway B4 experiments and marks the evidence accordingly.
 set -euo pipefail

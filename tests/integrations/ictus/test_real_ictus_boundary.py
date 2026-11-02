@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,7 @@ from tactus.integrations.ictus import (
 from tactus.integrations.ictus.facts import (
     LEGACY_FACT_RETRY_ATTEMPT,
     LEGACY_FACT_RETRY_BUDGET,
+    to_rfc3339,
 )
 
 import profile_fixtures as pf
@@ -218,6 +220,97 @@ def test_shared_golden_fixtures_run_through_real_boundary(
     assert outcome.proposal_decision == decision
 
 
+# -- validated context path ------------------------------------------------
+
+
+def test_initial_fixture_context_is_executable(
+    ictus_boundary: conformance.IctusBoundary,
+) -> None:
+    snapshot = json.loads((pf.DATA_DIR / "initial_snapshot.v2.json").read_text())
+    context = conformance.build_decision_context(snapshot)
+    outcome = ictus_boundary.decide_context(context)
+
+    # Fixture envelopes use 2026-10-01 fact time. A wall-clock expiry rule would
+    # refuse them; admission deliberately compares expiry to validation fact time.
+    assert outcome.shape == "envelope"
+    assert outcome.outcome == "EXECUTABLE"
+    assert outcome.verdict == "ALLOW"
+    assert outcome.has_intent and outcome.executable
+    assert outcome.subject_id == snapshot["subject"]["id"]
+    assert outcome.subject_type == snapshot["subject"]["type"]
+    assert outcome.reason == ""  # No proposal.reason in a validated envelope.
+    assert outcome.returncode == 0
+
+
+def test_exhausted_recovery_context_is_validated_escalation(
+    ictus_boundary: conformance.IctusBoundary,
+) -> None:
+    initial = json.loads((pf.DATA_DIR / "initial_snapshot.v2.json").read_text())
+    snapshot = _with_budget(
+        json.loads((pf.DATA_DIR / "recovery_snapshot.v2.json").read_text()), 3, 3
+    )
+    context = conformance.build_decision_context(
+        snapshot,
+        recovery={
+            "failed_snapshot": {
+                "snapshot_id": initial["snapshot_id"],
+                "revision": _facts(initial)["work_order.revision"],
+                "digest": _facts(initial)[FACT_SNAPSHOT_DIGEST],
+            }
+        },
+    )
+    outcome = ictus_boundary.decide_context(context)
+
+    assert outcome.shape == "envelope"
+    assert outcome.raw["schema_version"] == 2
+    assert outcome.outcome == "NO_EXECUTION"
+    assert outcome.verdict in {"ALLOW", "MODIFY"}
+    assert outcome.proposal_decision == "ESCALATE"
+    assert outcome.has_intent is False
+    assert outcome.executable is False
+    assert outcome.returncode == 3
+
+
+def test_context_clock_preserves_snapshot_digest_vectors() -> None:
+    instant = datetime(2026, 10, 1, 0, 0, 0, 123456, tzinfo=timezone.utc)
+    assert to_rfc3339(instant) == "2026-10-01T00:00:00.123456Z"
+    assert conformance.to_canonical_utc(instant) == "2026-10-01T00:00:00Z"
+    assert conformance.to_canonical_utc(instant.isoformat()) == "2026-10-01T00:00:00Z"
+
+    for name, pinned_digest in (
+        (
+            "initial_snapshot.v2.json",
+            "6cc1f9dbc98dcdefe14fe21a08d721049f7a0a6ca7fa3bb7e75577c0de97b4d8",
+        ),
+        (
+            "recovery_snapshot.v2.json",
+            "2395b5f9cece71ec559ad0b7317817006e83a0a838d56c285e5db57b91648c36",
+        ),
+    ):
+        snapshot = json.loads((pf.DATA_DIR / name).read_text())
+        before = json.dumps(snapshot, sort_keys=True)
+        facts = _facts(snapshot)
+        recovery = None if facts[FACT_SNAPSHOT_PHASE] == "INITIAL" else {
+            "failed_snapshot": {
+                "snapshot_id": "snap-initial-0001", "revision": 2,
+                "digest": "6cc1f9dbc98dcdefe14fe21a08d721049f7a0a6ca7fa3bb7e75577c0de97b4d8",
+            }
+        }
+        context = conformance.build_decision_context(snapshot, recovery=recovery)
+        assert context["snapshot"] == snapshot
+        assert json.dumps(snapshot, sort_keys=True) == before
+        assert facts[FACT_SNAPSHOT_DIGEST] == pinned_digest
+        # state_snapshot.compute_snapshot_digest documents hashing the body
+        # without its digest fact; these golden bodies are the pinned vectors.
+        body = {
+            **snapshot,
+            "facts": [
+                fact for fact in snapshot["facts"] if fact["key"] != FACT_SNAPSHOT_DIGEST
+            ],
+        }
+        assert compute_snapshot_digest(body) == pinned_digest
+
+
 # -- recovery fixture and binding -----------------------------------------
 
 
@@ -241,7 +334,8 @@ def test_recovery_fixture_binds_subject_intent_and_attempt(
     assert outcome.policy_decision_kind == "ALLOW"
     assert outcome.executable
     assert outcome.subject_id == "WO-1"
-    # Ictus 86816d6 (GH-5) reports the re-executable verdict without the (n/m)
+    # Rationale assertions deliberately use legacy decide: envelopes carry no
+    # proposal.reason. Ictus 86816d6 (GH-5) reports the verdict without the (n/m)
     # counters; the canonical projection still yields REEXECUTE.
     assert "re-executable WorkerTimeout within the semantic attempt budget" in outcome.reason
 

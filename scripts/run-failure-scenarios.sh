@@ -2,7 +2,9 @@
 # Run the bounded execution-failure scenarios (TCT-WO-005).
 #
 # Requires TACTUS_ICTUS_ROOT to point at the pinned Ictus checkout with its
-# existing venv (dagster + ictus_dagster) and prebuilt target/debug/ictus.
+# existing venv (dagster + ictus_dagster) and an `ictus` binary in the disposable
+# conformance target directory (`TACTUS_ICTUS_TARGET_DIR`, else a commit-keyed
+# temp directory), which the harness builds on demand and reuses.
 # Override the interpreter with TACTUS_ICTUS_PYTHON if the venv lives elsewhere.
 #
 # The scenarios use a Tactus-owned capability code location; the production

@@ -32,8 +32,16 @@ from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+for _import_root in (SRC_ROOT, REPO_ROOT):
+    if str(_import_root) not in sys.path:
+        sys.path.insert(0, str(_import_root))
+
+from integrations.ictus.conformance import (  # noqa: E402
+    build_decision_context,
+    load_boundary,
+    run_decide,
+    to_canonical_utc,
+)
 
 from tactus.application import (  # noqa: E402
     ExecutionCycle,
@@ -141,33 +149,33 @@ def _fact(snapshot: Mapping[str, Any], key: str) -> str:
 
     for fact in snapshot.get("facts") or []:
         if fact.get("key") == key:
-            return str(fact.get("value") or "")
+            value = fact.get("value")
+            return "" if value is None else str(value)
     raise ValidationError(f"snapshot is missing required fact {key!r}")
 
 
 def _decide(
     binary: Path,
     snapshot: dict[str, Any],
+    *,
+    failed_snapshot: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Invoke the real pinned Ictus CLI with a versioned snapshot on stdin."""
+    """Invoke the real pinned Ictus context path, without blanket approval."""
 
-    payload = dict(snapshot)
-    completed = subprocess.run(
-        [str(binary), "decide", "--approve"],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-    )
-    if completed.returncode not in {0, 3}:
-        raise ValidationError(
-            "Ictus decide failed: "
-            f"exit={completed.returncode} stderr={completed.stderr.strip()}"
-        )
-    try:
-        envelope = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise ValidationError(f"Ictus decide returned invalid JSON: {exc}") from exc
-    return payload, envelope
+    recovery = None
+    if failed_snapshot is not None:
+        recovery = {
+            "failed_snapshot": {
+                "snapshot_id": failed_snapshot["snapshot_id"],
+                "revision": int(_fact(failed_snapshot, "work_order.revision")),
+                "digest": _fact(failed_snapshot, "snapshot.digest"),
+            }
+        }
+    payload = build_decision_context(snapshot, recovery=recovery)
+    outcome = run_decide(binary, payload, args=("decide", "--context"))
+    if outcome.shape != "envelope":
+        raise ValidationError("Ictus context path did not return a validated envelope")
+    return payload, dict(outcome.raw)
 
 
 def _write_dagster_home(work_root: Path, ictus_root: Path) -> tuple[Path, Path]:
@@ -297,7 +305,7 @@ def _bootstrap_snapshot(
         semantic_budget=semantic_budget,
         step_retry=step_retry,
         snapshot_id=snapshot_id,
-        timestamp=now,
+        timestamp=datetime.fromisoformat(to_canonical_utc(now)),
         capability_id=CAPABILITY,
         dependencies_satisfied=True,
         source_revision=SOURCE_REVISION,
@@ -315,7 +323,7 @@ def _recovery_probe_snapshot(
 ) -> dict[str, Any]:
     """Genuine RECOVERY snapshot: real observation, correlated attempt, phase."""
 
-    now = _now()
+    now = datetime.fromisoformat(to_canonical_utc(_now()))
     observation = parse_observation(
         {
             "schema_version": 1,
@@ -510,7 +518,7 @@ def _counts(db: SqliteExecutionAdmission) -> dict[str, int]:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     ictus_root = Path(args.ictus_root).expanduser().resolve()
-    binary = ictus_root / "target" / "debug" / "ictus"
+    binary = load_boundary(ictus_root).binary
     pin = _verify_ictus_pin(ictus_root, binary)
 
     base_tmp = Path("/tmp") if Path("/tmp").is_dir() else None
@@ -554,9 +562,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             snapshot_id="snapshot-entry",
         )
         bootstrap_payload, bootstrap_decision = _decide(binary, bootstrap)
-        if bootstrap_decision["policy_decision"]["decision"] != "ALLOW":
+        if bootstrap_decision["outcome"] != "EXECUTABLE":
+            raise ValidationError("Ictus entry outcome was not EXECUTABLE")
+        if bootstrap_decision["policy"]["verdict"] != "ALLOW":
             raise ValidationError("Ictus entry decision was not ALLOW")
-        if bootstrap_decision.get("execution_intent") is None:
+        if bootstrap_decision.get("intent") is None:
             raise ValidationError("Ictus entry decision carried no ExecutionIntent")
 
         # 2. Apply the real recovery decision, persist the projection, then
@@ -598,7 +608,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         if (
             accepted.intent.intent_id.value
-            != bootstrap_decision["execution_intent"]["intent_id"]
+            != bootstrap_decision["intent"]["intent_id"]
         ):
             raise ValidationError("durable intent identity diverged from the Ictus intent")
         accepted_db_revision = db.work_order_snapshot(WORK_ORDER_ID)[0]
@@ -703,7 +713,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 step_retry=step_retry,
                 snapshot_id=f"snapshot-{label}",
             )
-            _, envelope = _decide(binary, snapshot)
+            _, envelope = _decide(binary, snapshot, failed_snapshot=bootstrap)
+            expected_outcome = (
+                "EXECUTABLE" if label.startswith("within_budget") else "NO_EXECUTION"
+            )
+            if (
+                envelope["outcome"] != expected_outcome
+                or envelope["policy"]["verdict"] != "ALLOW"
+            ):
+                raise ValidationError(f"unexpected recovery envelope: {envelope}")
             boundary_checks.append(
                 {
                     "label": label,
@@ -711,8 +729,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "max_semantic_attempts": budget.max_semantic_attempts,
                     "step_retry_index": step_retry.index,
                     "proposal_decision": envelope["proposal"]["decision"],
-                    "policy_decision": envelope["policy_decision"]["decision"],
-                    "execution_intent_present": envelope.get("execution_intent")
+                    "outcome": envelope["outcome"],
+                    "policy_verdict": envelope["policy"]["verdict"],
+                    "execution_intent_present": envelope.get("intent")
                     is not None,
                 }
             )
@@ -754,7 +773,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             },
             "decision": {
                 "snapshot": bootstrap,
-                "legacy_boundary_payload": bootstrap_payload,
+                "context": bootstrap_payload,
                 "envelope": bootstrap_decision,
             },
             "admission": {
@@ -844,6 +863,12 @@ def main(argv: list[str] | None = None) -> int:
         f"attempt={evidence['admission']['attempt_id']} "
         f"evidence={evidence_path}"
     )
+    for check in evidence["semantic_boundary_checks"]:
+        print(
+            f"recovery evidence: {check['label']} outcome={check['outcome']} "
+            f"verdict={check['policy_verdict']} proposal={check['proposal_decision']} "
+            f"has_intent={check['execution_intent_present']}"
+        )
     return 0
 
 
