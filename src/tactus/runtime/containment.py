@@ -606,6 +606,23 @@ def _denied_read_target(policy: ContainmentPolicy) -> Path | None:
     return None
 
 
+def _keychain_store_target(policy: ContainmentPolicy) -> Path | None:
+    """A keychain *store* file inside a denied root, when the pin denies one.
+
+    Mach access to securityd is a permission of its own (a hosted runtime needs it
+    for TLS trust evaluation), and it does not make the operator's keychain files
+    readable. That is the half of the keychain boundary the file system still
+    carries, so it is the half this can check.
+    """
+    for root in policy.denied_roots:
+        if root.path.parts[-2:] != ("Library", "Keychains") or not root.path.is_dir():
+            continue
+        for child in sorted(root.path.iterdir()):
+            if child.is_file() and child.name.endswith((".keychain-db", ".keychain")):
+                return child
+    return None
+
+
 def run_self_test(
     policy: ContainmentPolicy,
     *,
@@ -719,6 +736,36 @@ def run_self_test(
                 name="read_denied_root",
                 ok=denied,
                 detail=f"read of {target} refused" if denied else output.strip()[:200],
+                exit_code=code,
+            )
+        )
+
+    # 3b. A keychain store must stay unreadable through the file system, whatever
+    #     Mach services the runtime is allowed: securityd access does not open it.
+    store = _keychain_store_target(policy)
+    if store is None:
+        checks.append(
+            SelfTestCheck(
+                name="read_denied_keychain_store",
+                ok=True,
+                required=False,
+                detail=(
+                    "the pin denies no keychain store (or this host has none); skipped"
+                ),
+            )
+        )
+    else:
+        code, output = launch(["/bin/cat", str(store)])
+        denied = code != 0 and FILE_READ_DENIED_MESSAGE in output
+        checks.append(
+            SelfTestCheck(
+                name="read_denied_keychain_store",
+                ok=denied,
+                detail=(
+                    f"read of {store} refused"
+                    if denied
+                    else output.strip()[:200]
+                ),
                 exit_code=code,
             )
         )

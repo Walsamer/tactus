@@ -11,11 +11,17 @@ The operator runs it; the quota belongs to their credential.
 What it does, in order
 ----------------------
 1. Refuses without ``--approve`` (a human decision) and without ``--operator``.
-2. Requires the credential the pin names (``credential_env``, ``CODEX_API_KEY``
-   for the shipped runtime: the pinned Codex CLI authenticates ``codex exec``
-   from it and ignores the older ``OPENAI_API_KEY``) in the environment for a
-   real run; the value is handed to the child through the supervisor's credential
-   channel only. It is never in argv, never in the evidence file, never on stdout.
+2. Requires exactly one credential for a real run, as the pin names it: either an
+   environment variable (``credential_env``, e.g. ``CODEX_API_KEY`` for a platform
+   key — the pinned Codex CLI reads it for ``codex exec`` and ignores
+   ``OPENAI_API_KEY``) or the operator's session file (``credential_file``, e.g.
+   ``~/.codex/auth.json`` as ``codex login`` writes it, which the CLI reads from
+   ``$HOME/.codex/auth.json``). A pin naming both is a configuration failure, not a
+   precedence rule. The environment value reaches the child through the
+   supervisor's credential channel; the file is copied into the attempt's *own*
+   home at ``0600`` and removed when the attempt ends. Neither is in argv, in the
+   evidence file or on stdout: the evidence records the route, the source path, the
+   copy's digest, whether it carries refresh material, and that it was removed.
 3. Stages the pinned runtime from ``config/agent-runtime-canary.json`` into a
    Tactus-owned root outside ``$HOME`` (the profile denies ``$HOME``, so the copy
    is what makes the runtime readable) and re-verifies the pinned digest of every
@@ -37,6 +43,24 @@ What it does, in order
 
 ``--dry-run`` does everything except the model call (a rehearsal that spends no
 quota): stage, workspace, denial matrix, evidence.
+
+What a failing run looks like, and what it means
+------------------------------------------------
+Two failures are *not* boundary failures, and the evidence says which one happened:
+
+* a **rejected credential**. The pinned CLI reconnects a refused connection until
+  the attempt deadline, so the verdict can read ``timeout`` while the cause is an
+  authentication rejection. The 401 is in ``attempt.stderr_tail`` and in the
+  supervisor's captured stdout, and ``attempt.auth_rejection`` names it beside the
+  verdict. The deadline is the real bound and is never shortened to make a verdict
+  prettier;
+* a **network that does not reach the credential's endpoint**. The session route
+  talks to the subscription backend (``chatgpt.com``); where that host answers
+  ``HTTP 451`` the attempt authenticates and then ends there — measured identically
+  outside the boundary, so it is a fact about the network, not about the profile.
+
+The environment route (``credential_env``) reaches ``api.openai.com`` instead, which
+is why a dummy platform key fails at the model call with ``401 … invalid_api_key``.
 
 The pinned runtime's argv
 -------------------------
@@ -70,7 +94,7 @@ import sys
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +121,7 @@ from tactus.runtime.descriptor import (  # noqa: E402
     preflight,
 )
 from tactus.runtime.supervision import (  # noqa: E402
+    ATTEMPT_HOME_DIR,
     RuntimeLimits,
     RuntimeRequest,
     RuntimeSupervisionError,
@@ -190,6 +215,7 @@ _MODEL_KEYS = frozenset({"slug", "allowed", "probe_argv", "probe_timeout_seconds
 _CONTAINMENT_KEYS = frozenset({"egress", "allowances", "denied_roots"})
 _EGRESS_KEYS = frozenset({"mode", "port"})
 _DENIED_ROOT_KEYS = frozenset({"path", "reason", "snapshot", "snapshot_depth"})
+_CREDENTIAL_FILE_KEYS = frozenset({"kind", "path", "home_path", "mode"})
 _LIMIT_KEYS = frozenset(
     {
         "timeout_seconds",
@@ -217,7 +243,6 @@ _REQUIRED_PIN_KEYS = frozenset(
         "expected_version_token",
         "model",
         "env_allowlist",
-        "credential_env",
         "stdin_from",
         "allowed_scope",
         "containment",
@@ -225,7 +250,11 @@ _REQUIRED_PIN_KEYS = frozenset(
     }
 )
 
-_OPTIONAL_PIN_KEYS = frozenset({"purpose"})
+_OPTIONAL_PIN_KEYS = frozenset({"purpose", "credential_env", "credential_file"})
+
+#: The only mode a staged credential file may have. It is fixed rather than
+#: configurable: the one thing staged this way is credential material.
+CREDENTIAL_FILE_MODE = "0600"
 
 #: Defaults for a denied-root snapshot. A root declares its own depth when the
 #: default asks the wrong question (``$HOME`` is diffed at its top level only).
@@ -249,6 +278,30 @@ class CanaryError(RuntimeError):
 
 
 # -- the pin ---------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialFile:
+    """The operator's session credential, staged into the attempt's own home.
+
+    A subscription login is a *file*, not a variable: the pinned runtime reads
+    ``$HOME/.codex/auth.json``. The canary copies it — never links it, and never
+    the ambient one the profile denies — into the attempt directory, so the file
+    the child reads exists only for the length of the attempt.
+    """
+
+    source: Path
+    kind: str
+    home_path: str
+    mode: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "source": str(self.source),
+            "home_path": self.home_path,
+            "mode": self.mode,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +333,7 @@ class CanaryPin:
     snapshot_depths: Mapping[str, int]
     env_allowlist: tuple[str, ...]
     credential_env: str
+    credential_file: CredentialFile | None
     stdin_from: str
     allowed_scope: tuple[str, ...]
     limits: RuntimeLimits
@@ -354,7 +408,10 @@ class CanaryPin:
                 for root in self.denied_roots
             ],
             "env_allowlist": list(self.env_allowlist),
-            "credential_env": self.credential_env,
+            "credential_env": self.credential_env or None,
+            "credential_file": (
+                None if self.credential_file is None else self.credential_file.as_dict()
+            ),
             "stdin_from": self.stdin_from,
             "allowed_scope": list(self.allowed_scope),
             "limits": self.limits.as_dict(),
@@ -395,9 +452,11 @@ def _required_str(config: Mapping[str, Any], name: str, what: str) -> str:
     return value
 
 
-def _str_tuple(config: Mapping[str, Any], name: str, what: str) -> tuple[str, ...]:
+def _str_tuple(
+    config: Mapping[str, Any], name: str, what: str, *, allow_empty: bool = False
+) -> tuple[str, ...]:
     value = config.get(name)
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, list) or (not value and not allow_empty):
         raise CanaryError(f"{what} {name} must be a non-empty list of strings")
     for item in value:
         if not isinstance(item, str) or not item.strip():
@@ -496,6 +555,41 @@ def _containment(
         roots.append(root)
         depths[str(root.path)] = depth if snapshot else 0
     return egress, tuple(allowances), tuple(roots), depths
+
+
+def _credential_file(
+    config: Mapping[str, Any], what: str, pin_path: Path
+) -> CredentialFile | None:
+    """Parse the pin's ``credential_file`` block (shape only: no file is read).
+
+    The source is resolved the way the rest of the pin resolves paths — relative to
+    the pin file — and its *presence* is checked for a real run where the rest of
+    the credential is checked, so a refusal still leaves nothing staged.
+    """
+    raw = config.get("credential_file")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CanaryError(f"{what} credential_file must be an object")
+    _refuse_unknown(raw, _CREDENTIAL_FILE_KEYS, f"{what} credential_file")
+    source = Path(_required_str(raw, "path", f"{what} credential_file")).expanduser()
+    if not source.is_absolute():
+        source = pin_path.parent / source
+    kind = _required_str(raw, "kind", f"{what} credential_file")
+    home_path = _required_str(raw, "home_path", f"{what} credential_file")
+    candidate = PurePosixPath(home_path)
+    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+        raise CanaryError(
+            f"{what} credential_file home_path {home_path!r} must be relative to the "
+            "attempt home and must not escape it"
+        )
+    mode = _required_str(raw, "mode", f"{what} credential_file")
+    if mode != CREDENTIAL_FILE_MODE:
+        raise CanaryError(
+            f"{what} credential_file mode must be {CREDENTIAL_FILE_MODE!r} (got "
+            f"{mode!r}): the staged copy is credential material"
+        )
+    return CredentialFile(source=source.resolve(), kind=kind, home_path=home_path, mode=mode)
 
 
 def _limits(config: Mapping[str, Any], what: str) -> RuntimeLimits:
@@ -610,13 +704,34 @@ def load_canary_pin(
     argv = tuple(part.replace(MODEL_PLACEHOLDER, slug) for part in raw_argv)
     preflight_argv = _str_tuple(config, "preflight_argv", what)
 
-    credential_env = _required_str(config, "credential_env", what)
-    env_allowlist = _str_tuple(config, "env_allowlist", what)
-    if credential_env not in env_allowlist:
+    credential_env = config.get("credential_env", "")
+    credential_file = _credential_file(config, what, source)
+    env_allowlist = _str_tuple(config, "env_allowlist", what, allow_empty=True)
+    if credential_env and credential_file is not None:
         raise CanaryError(
-            f"{what} credential_env {credential_env!r} is not in env_allowlist; the "
-            "child could never receive it"
+            f"{what} names both credential_env and credential_file; exactly one route "
+            "may be configured, so a run cannot silently prefer one over the other"
         )
+    if not credential_env and credential_file is None:
+        raise CanaryError(
+            f"{what} names no credential: set credential_env (a platform API key in the "
+            "environment) or credential_file (the operator's session file)"
+        )
+    if credential_file is not None:
+        if env_allowlist:
+            raise CanaryError(
+                f"{what} env_allowlist must be empty with credential_file: the runtime "
+                "reads its session from the staged home, so no credential variable — "
+                f"not {', '.join(env_allowlist)} — may be passed to the child"
+            )
+    else:
+        if not isinstance(credential_env, str) or not credential_env.strip():
+            raise CanaryError(f"{what} credential_env must be a non-empty string")
+        if credential_env not in env_allowlist:
+            raise CanaryError(
+                f"{what} credential_env {credential_env!r} is not in env_allowlist; the "
+                "child could never receive it"
+            )
 
     stdin_from = _required_str(config, "stdin_from", what)
     if stdin_from != "prompt":
@@ -649,6 +764,7 @@ def load_canary_pin(
         snapshot_depths=snapshot_depths,
         env_allowlist=env_allowlist,
         credential_env=credential_env,
+        credential_file=credential_file,
         stdin_from=stdin_from,
         allowed_scope=_str_tuple(config, "allowed_scope", what),
         limits=_limits(config, what),
@@ -1436,7 +1552,51 @@ def collect_patch(
     )
 
 
-# -- usage -----------------------------------------------------------------
+# -- usage and failure classification ---------------------------------------
+
+#: What a rejected credential looks like in the pinned runtime's own output. A 401
+#: does not end the attempt — the CLI reconnects until the attempt deadline — so the
+#: supervisor's verdict can read `timeout` while the cause is an authentication
+#: rejection. These markers are how the cause is named beside the verdict.
+AUTH_REJECTION_MARKERS = (
+    "401 Unauthorized",
+    "invalid_api_key",
+    "Missing bearer",
+)
+
+
+def classify_auth_rejection(stdout: str, stderr: str) -> dict[str, Any]:
+    """Whether the attempt's failure was a rejected credential, not the boundary.
+
+    Classification only: the verdict stays exactly what the supervisor observed, so
+    a rejected credential the runtime keeps retrying still reads `timeout`. This says
+    what the cause was and where the evidence for it is, because a report that reads
+    "timeout" otherwise invites exactly the wrong conclusion about the boundary.
+    """
+    lines = [
+        line.strip()
+        for line in f"{stderr}\n{stdout}".splitlines()
+        if line.strip()
+    ]
+    for marker in AUTH_REJECTION_MARKERS:
+        for line in lines:
+            if marker in line:
+                return {
+                    "detected": True,
+                    "marker": marker,
+                    "detail": line[:MAX_DETAIL_CHARS],
+                    "verdict_unchanged": True,
+                    "evidence_of_cause": (
+                        "attempt.stderr_tail and the supervisor's output.stdout; the "
+                        "runtime retries a rejected connection, so the attempt can "
+                        "still end at its deadline"
+                    ),
+                }
+    return {
+        "detected": False,
+        "markers": list(AUTH_REJECTION_MARKERS),
+        "verdict_unchanged": True,
+    }
 
 
 def parse_usage(stdout: str, *, truncated: bool) -> dict[str, Any]:
@@ -1541,6 +1701,127 @@ def _missing_credential_message(variable: str) -> str:
     )
 
 
+def _missing_credential_file_message(spec: CredentialFile, detail: str = "") -> str:
+    suffix = f" ({detail})" if detail else ""
+    return (
+        f"refused: the operator's session credential {spec.source} is missing or "
+        f"unreadable{suffix}. The pin stages that file into the run's own home, so it "
+        "has to exist first: the runtime's own login writes it (`codex login`). "
+        "Alternatively configure credential_env with a scoped, low-limit platform key. "
+        "Nothing was staged or created."
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialUse:
+    """The one credential this run uses, holding only what is safe to keep.
+
+    ``value``/``content`` never leave this process except into the child's own
+    environment or its attempt home; ``forbidden`` lists the secrets that must not
+    appear in the evidence file, so the check is made against the token values
+    actually present rather than against a hope.
+    """
+
+    route: str  # "env" or "file"
+    variable: str = ""
+    value: str = ""
+    file: CredentialFile | None = None
+    content: bytes = b""
+    source_present: bool = False
+    carries_refresh_material: bool = False
+    forbidden: tuple[str, ...] = ()
+
+    def as_dict(self, *, dry_run: bool) -> dict[str, Any]:
+        if self.file is not None:
+            return {
+                "route": "file",
+                "kind": self.file.kind,
+                "source": str(self.file.source),
+                "source_present": self.source_present,
+                "home_path": self.file.home_path,
+                "mode": self.file.mode,
+                "staged": False,
+                "used": not dry_run,
+                "in_argv": False,
+                "in_evidence": False,
+                "content_logged": False,
+            }
+        return {
+            "route": "env",
+            "variable": self.variable,
+            "present": bool(self.value),
+            "used": not dry_run,
+            "in_argv": False,
+            "in_evidence": False,
+        }
+
+
+def _session_material(
+    spec: CredentialFile, content: bytes
+) -> tuple[Mapping[str, Any], tuple[str, ...]]:
+    """The session tokens in a credential file, and the values that must not leak.
+
+    Only the shape is inspected: whether there are tokens at all, and whether one of
+    them is refresh material. The contents are never logged, stored or returned to a
+    caller beyond this process.
+    """
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CanaryError(
+            f"refused: the session credential {spec.source} is not readable JSON "
+            f"({exc.__class__.__name__}). Nothing was staged or created."
+        ) from exc
+    tokens = payload.get("tokens") if isinstance(payload, dict) else None
+    if not isinstance(tokens, dict) or not tokens:
+        raise CanaryError(
+            f"refused: the session credential {spec.source} carries no tokens. The "
+            "runtime's own login writes both; re-run it rather than editing the file "
+            "by hand. Nothing was staged or created."
+        )
+    forbidden = [
+        value for value in tokens.values() if isinstance(value, str) and value.strip()
+    ]
+    api_key = payload.get("OPENAI_API_KEY")
+    if isinstance(api_key, str) and api_key.strip():
+        forbidden.append(api_key)
+    return tokens, tuple(forbidden)
+
+
+def resolve_credential(pin: CanaryPin, *, dry_run: bool) -> CredentialUse:
+    """Resolve the pin's one credential route, refusing before anything is staged.
+
+    A dry run reads no secret: it records whether the route could be satisfied, and
+    a real run is where a missing or tokenless source is refused.
+    """
+    if pin.credential_file is not None:
+        spec = pin.credential_file
+        present = spec.source.is_file() and os.access(spec.source, os.R_OK)
+        if dry_run:
+            return CredentialUse(route="file", file=spec, source_present=present)
+        if not present:
+            raise CanaryError(_missing_credential_file_message(spec))
+        try:
+            content = spec.source.read_bytes()
+        except OSError as exc:
+            raise CanaryError(
+                _missing_credential_file_message(spec, detail=str(exc))
+            ) from exc
+        tokens, forbidden = _session_material(spec, content)
+        return CredentialUse(
+            route="file",
+            file=spec,
+            content=content,
+            source_present=True,
+            carries_refresh_material=bool(tokens.get("refresh_token")),
+            forbidden=forbidden,
+        )
+    value = os.environ.get(pin.credential_env, "").strip()
+    if not value and not dry_run:
+        raise CanaryError(_missing_credential_message(pin.credential_env))
+    return CredentialUse(route="env", variable=pin.credential_env, value=value)
+
+
 def _host_record() -> dict[str, Any]:
     return {
         "description": describe_host(),
@@ -1600,21 +1881,35 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _assert_no_secret(path: Path, secret: str) -> None:
+def _assert_no_secret(path: Path, secrets: Sequence[str]) -> None:
     """The credential must not be in the evidence, whatever else happened."""
-    if not secret:
-        return
-    if secret in path.read_text(encoding="utf-8"):
-        path.unlink(missing_ok=True)
-        raise CanaryError(
-            f"the credential value appeared in {path}; the evidence was deleted and the "
-            "run refused",
-            exit_code=EXIT_FAILED,
-        )
+    text = path.read_text(encoding="utf-8")
+    for secret in secrets:
+        if secret and secret in text:
+            path.unlink(missing_ok=True)
+            raise CanaryError(
+                f"a credential value appeared in {path}; the evidence was deleted and "
+                "the run refused",
+                exit_code=EXIT_FAILED,
+            )
 
 
 def _run_id(now: datetime) -> str:
     return f"run-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
+
+
+def _credential_line(credential: CredentialUse) -> str:
+    """One summary line: which route, and whether the stage succeeded."""
+    if credential.file is not None:
+        return (
+            f"operator session file {credential.file.source} → attempt home "
+            f"{credential.file.home_path} at {credential.file.mode}"
+        )
+    return (
+        f"{credential.variable} from the environment"
+        if credential.value
+        else f"{credential.variable} (not set)"
+    )
 
 
 def _summary(
@@ -1622,6 +1917,7 @@ def _summary(
     phase: str,
     options: CanaryOptions,
     pin: CanaryPin,
+    credential: CredentialUse,
     staged: StagedRuntime,
     workspace: CanaryWorkspace,
     matrix: DenialMatrix,
@@ -1646,6 +1942,7 @@ def _summary(
         f"  remote: {workspace.remote} ({len(workspace.remote_refs)} ref at start)",
         f"  denial matrix: {passed}/{len(checks)} checks passed "
         f"({', '.join(check.name for check in checks)})",
+        f"  credential: {_credential_line(credential)}",
     ]
     lines.extend(f"  {line}" for line in extra)
     lines.append(f"  evidence: {evidence_path}")
@@ -1667,11 +1964,7 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
 
     # The credential is checked before anything is staged or created: a run that
     # cannot make its model call must not leave half a canary behind.
-    credential_value = ""
-    if not options.dry_run:
-        credential_value = os.environ.get(pin.credential_env, "").strip()
-        if not credential_value:
-            raise CanaryError(_missing_credential_message(pin.credential_env))
+    credential = resolve_credential(pin, dry_run=options.dry_run)
 
     policy = pin.containment_policy()
     limits = (
@@ -1750,13 +2043,7 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
             "policy": policy.as_dict(),
             "denial_matrix": matrix.as_dict(),
         },
-        "credentials": {
-            "variable": pin.credential_env,
-            "present": bool(credential_value),
-            "used": not options.dry_run,
-            "in_argv": False,
-            "in_evidence": False,
-        },
+        "credentials": credential.as_dict(dry_run=options.dry_run),
         "task": TASK,
         "limits": limits.as_dict(),
         "attempt": None,
@@ -1777,7 +2064,13 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
 
     if options.dry_run:
         extra.append("model call: skipped (dry run)")
-        if not credential_value:
+        if credential.route == "file" and not credential.source_present:
+            assert pin.credential_file is not None
+            extra.append(
+                f"note: the operator's session file {pin.credential_file.source} is not "
+                "present; a real run stages it into the attempt home and would refuse"
+            )
+        elif credential.route == "env" and not credential.value:
             extra.append(
                 f"note: {pin.credential_env} is not set; a real run needs a scoped, "
                 "low-limit key"
@@ -1791,7 +2084,16 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
             limits=limits,
             state_dir=run_dir / "state",
             containment=policy,
-            credentials={pin.credential_env: credential_value},
+            credentials=(
+                {pin.credential_env: credential.value}
+                if credential.route == "env" and credential.value
+                else {}
+            ),
+            home_seed=(
+                {credential.file.home_path: credential.content}
+                if credential.file is not None
+                else None
+            ),
             workspace_paths=changed_paths,
         )
         request = RuntimeRequest(
@@ -1819,6 +2121,31 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
             policy=policy, workspace=workspace, attempt_dir=run_dir / "push-attempt"
         )
         snapshot_changes = diff_snapshots(snapshot_before, snapshot_after)
+
+        if credential.file is not None:
+            # The staged copy is attempt-scoped: the supervisor removes it as soon as
+            # the child is gone, and this is the observation, not the promise.
+            staged_path = (
+                Path(attempt.attempt_dir)
+                / ATTEMPT_HOME_DIR
+                / credential.file.home_path
+            )
+            removed = not staged_path.exists() and not staged_path.is_symlink()
+            evidence["credentials"].update(
+                {
+                    "staged": True,
+                    "staged_path": str(staged_path),
+                    "staged_sha256": hashlib.sha256(credential.content).hexdigest(),
+                    "staged_mode": credential.file.mode,
+                    "carries_refresh_material": credential.carries_refresh_material,
+                    "removed": removed,
+                }
+            )
+            if not removed:
+                reasons.append(
+                    f"the staged session credential {staged_path} was still on disk "
+                    "after the attempt"
+                )
 
         evidence["attempt"] = {
             "supervisor_status": attempt.status,
@@ -1849,6 +2176,8 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
             ),
         }
         evidence["usage"] = parse_usage(attempt.stdout, truncated=attempt.output_truncated)
+        rejection = classify_auth_rejection(attempt.stdout, attempt.stderr)
+        evidence["attempt"]["auth_rejection"] = rejection
         evidence["patch"] = patch.as_dict()
         evidence["containment_checks"] = {
             "push": push.as_dict(),
@@ -1908,6 +2237,13 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
                 f"{usage.get('cached_input_tokens')}, output {usage.get('output_tokens')}",
             ]
         )
+        if rejection["detected"]:
+            extra.append(
+                f"cause: the credential was rejected ({rejection['marker']}); the verdict "
+                f"stays {attempt.status} because the runtime retries a rejected "
+                "connection until the deadline — the 401 is in the attempt's "
+                "stderr_tail and in the child's stdout"
+            )
 
     ok = not reasons
     verdict = {"ok": ok, "reasons": reasons}
@@ -1916,12 +2252,13 @@ def run_canary(options: CanaryOptions) -> CanaryReport:
     evidence["exit_code"] = exit_code
 
     _write_json(evidence_path, evidence)
-    _assert_no_secret(evidence_path, credential_value)
+    _assert_no_secret(evidence_path, (credential.value, *credential.forbidden))
 
     summary = _summary(
         phase="dry run" if options.dry_run else "run",
         options=options,
         pin=pin,
+        credential=credential,
         staged=staged,
         workspace=workspace,
         matrix=matrix,
