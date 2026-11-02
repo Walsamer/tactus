@@ -198,6 +198,22 @@ Statuses: `success | failed | timeout | cancelled | invalid | unterminated`.
   (`containment.enabled=false`) and this port is then an observation port, not a
   sandbox.
 
+## What the canary has shown
+
+The operator ran `scripts/run-agent-canary.sh` under the shipped pin. Two findings
+belong to supervision, not only to containment:
+
+* the child is given an attempt-local `HOME`, so a session credential has to be
+  placed there for the runtime to find it: the pin's `credential_file` is staged
+  as a `home_seed` at `0600`, its digest is in the canary's evidence, and it is
+  gone when the attempt ends (the attempt directory is retained, the credential is
+  not);
+* the failure the run ends on is observed, not summarised: the supervisor keeps
+  the runtime's JSONL stdout, so `thread.started` followed by
+  `401 Unauthorized … invalid_api_key` (platform-key route) or
+  `workspace routing discovery failed` (session route) is evidence that the model
+  call was reached inside the boundary.
+
 ## Prerequisite for a real coding agent (what phase 2 closed, what is still open)
 
 Phase 2 closed the four questions this section used to list as open, and each
@@ -236,10 +252,13 @@ What is still open, and why no real agent is started:
    `result_contract`, so a pin that names a launcher gets the boundary
    (`integrations/dagster/agent_attempt.py`). The only real-runtime pin is the
    canary's own (`config/agent-runtime-canary.json`), run by hand.
-2. **The one canary has not been run.** A hosted model needs open egress for the
-   length of one run and a scoped provider credential: both need explicit operator
-   approval, and the operator's subscription quota was spent on the earlier
-   measurement work.
+2. **The canary reaches the model call, and has not yet produced an edit.** Open
+   egress for one approved run plus the operator's session file get the pinned CLI
+   to the model endpoint inside the boundary; on this network the subscription
+   backend answers `HTTP 451` (in and outside the boundary alike), and the
+   platform-key route is rejected only when the key is a placeholder. A completed
+   edit needs either a network that reaches the subscription backend or a scoped
+   platform key.
 3. **The durable half waits on Ictus B4** (see
    [`AGENT_EXECUTION_SLICE.md`](AGENT_EXECUTION_SLICE.md)); it is proven only in a
    throwaway clone.

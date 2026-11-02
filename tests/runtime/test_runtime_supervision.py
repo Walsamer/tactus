@@ -156,6 +156,64 @@ def test_success_returns_structured_evidence_and_releases_the_lock(tmp_path):
     assert Path(data["attempt_dir"]).is_dir()
 
 
+def test_a_seeded_home_file_is_readable_only_during_the_attempt(tmp_path):
+    """A session credential exists for the child, and for nothing afterwards.
+
+    The child's own report is the evidence that the stage worked: it read the file
+    from its own ``$HOME`` at ``0600``. The supervisor's job is the other half —
+    the attempt directory that stays behind as evidence does not still hold it.
+    """
+    secret = b'{"tokens":{"refresh_token":"super-secret-value"}}'
+    evidence = _supervisor(
+        tmp_path, "read-home", home_seed={".codex/auth.json": secret}
+    ).run(_request())
+
+    output = Path(evidence.attempt_dir) / "output" / "result.json"
+    summary = json.loads(output.read_text(encoding="utf-8"))["summary"]
+    assert "home file readable" in summary
+    assert "mode 0o600" in summary
+    assert hashlib.sha256(secret).hexdigest()[:16] in summary
+
+    staged = Path(evidence.attempt_dir) / "home" / ".codex" / "auth.json"
+    assert not staged.exists()
+    # Nothing of the credential survives anywhere in the retained attempt record.
+    for path in Path(evidence.attempt_dir).rglob("*"):
+        if path.is_file():
+            assert b"super-secret-value" not in path.read_bytes(), path
+
+
+def test_a_home_seed_may_not_escape_the_attempt_home(tmp_path):
+    for forbidden in ("../escape", "/etc/passwd", ""):
+        with pytest.raises(RuntimeSupervisionError, match="home seed"):
+            _supervisor(tmp_path, "success", home_seed={forbidden: b"x"})
+    with pytest.raises(RuntimeSupervisionError, match="must be bytes"):
+        _supervisor(tmp_path, "success", home_seed={".codex/auth.json": "text"})
+
+
+def test_a_failed_spawn_does_not_leave_the_seed_behind(tmp_path, monkeypatch):
+    """The removal is in the ``finally``, not on the success path."""
+    real_popen = subprocess.Popen
+
+    def refuse_the_agent(argv, *args, **kwargs):
+        # The version probe still has to work (preflight runs it); only the
+        # attempt itself is refused, after the seed has been written.
+        if "--version" not in argv:
+            raise OSError("spawn refused by the test")
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", refuse_the_agent)
+    supervisor = _supervisor(
+        tmp_path, "success", home_seed={".codex/auth.json": b"token"}
+    )
+
+    evidence = supervisor.run(_request())
+
+    assert evidence.status == "failed"
+    assert any("could not be started" in error for error in evidence.errors)
+    staged = Path(evidence.attempt_dir) / "home" / ".codex" / "auth.json"
+    assert not staged.exists()
+
+
 def test_each_attempt_gets_its_own_evidence_directory(tmp_path):
     supervisor = _supervisor(tmp_path, "success")
     first = supervisor.run(_request("attempt-1"))

@@ -2,10 +2,11 @@
 
 Status: **contract version `1.1.0` implemented and tested; the OS boundary behind
 it is enforced and proven with real child processes** (see
-[`CONTAINMENT.md`](CONTAINMENT.md)). No real coding agent is launched: the only
-pinned runtime is the deterministic fake agent, and the one real-runtime canary
-has not been run — it needs explicit operator approval and a scoped provider
-credential.
+[`CONTAINMENT.md`](CONTAINMENT.md)). No real coding agent is launched on this
+route: the only pinned runtime here is the deterministic fake agent. The one
+real-runtime canary is an operator command and has been run — the pinned CLI
+reaches the model call inside the boundary, with one operator-designated session
+credential staged into the run's own home and removed when the attempt ends.
 
 The adapter now has a **caller**: the Tactus-owned Dagster code location
 (`integrations/dagster/agent_location.py`) executes exactly one attempt per
@@ -134,7 +135,7 @@ diff. The suite proves:
 | restart hold | new writer refused while the prior attempt is `spawning`; explicit operator resolution unblocks a later run |
 | scope violation | `invalid`; escaped path rejected; lock released |
 | task on stdin | the task reaches the child through stdin and its digest is in the result; an empty task is refused |
-| credential hygiene | the supervisor constructs `PATH`, the two Tactus attempt/intent variables and the per-run attempt marker, with attempt-local `HOME`/`TMPDIR`/git config; the child receives no GitHub/publication token and no SSH agent socket, and only allowlisted variable *names* |
+| credential hygiene | the supervisor constructs `PATH`, the two Tactus attempt/intent variables and the per-run attempt marker, with attempt-local `HOME`/`TMPDIR`/git config; the child receives no GitHub/publication token and no SSH agent socket, and only allowlisted variable *names*. A runtime that authenticates from a session *file* gets that one file staged into its own home at `0600` and unlinked when the attempt ends |
 
 This is a **fake runtime**: no model provider, Pi, Codex, GitHub operation, Stax
 process or credential is involved. The child still runs as the same OS account —
@@ -146,10 +147,12 @@ Neither suite calls a model.
 
 ## Remaining gates (explicit, not implied)
 
-1. **The real-runtime canary has not been run.** It needs explicit operator
-   approval and a scoped provider credential, and the operator's subscription
-   quota was spent on the boundary work. Until it runs, no attempt has observed
-   `open` egress end to end.
+1. **The real-runtime canary's containment is measured; its edit is not.** The
+   operator's run reaches the model call inside the boundary and ends there: this
+   network answers the subscription backend with `HTTP 451` (`chatgpt.com`, in and
+   outside the boundary alike), and the platform-key route returns
+   `401 Unauthorized` for a placeholder key. Until a run completes one edit, no
+   patch, push refusal and token account have been observed for a real runtime.
 2. **The egress posture is the canary's, not the default.** Standing posture is
    `deny network*`, or one `localhost:<port>` for a locally served model; open
    egress exists for the length of the approved canary only, and the rendered

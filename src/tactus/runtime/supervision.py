@@ -34,6 +34,12 @@ exists, launches the runtime through the pinned launcher, and refuses to release
 the writer lock while any process still carries the attempt marker. A failed
 self-test starts nothing.
 
+Credential material follows the same rule: a caller that needs the runtime to
+find a session file in its home passes it as ``home_seed``. The supervisor writes
+it into the attempt's own home at ``0600`` immediately before the spawn and
+removes it as soon as the child is gone, so the attempt directory that stays
+behind as evidence carries the account of the file, never the file.
+
 Not claimed
 -----------
 * Without a pinned launcher this is **not a sandbox**: same OS account, same
@@ -61,7 +67,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
 from tactus.runtime.containment import (
@@ -113,6 +119,13 @@ ATTEMPT_FILE = "attempt.json"
 LOCK_FILE = "writer.lock"
 RECOVERY_LOG = "recovery.jsonl"
 ATTEMPTS_DIR = "attempts"
+#: The attempt's own home, which the child receives as ``HOME``. Attempt-local on
+#: purpose: the profile denies the operator's real home, so anything the runtime
+#: reads from ``$HOME`` has to live here.
+ATTEMPT_HOME_DIR = "home"
+#: The mode of a seeded home file. The one thing staged this way is credential
+#: material, so the mode is fixed rather than configured.
+HOME_SEED_MODE = 0o600
 SUPPORTED_RESULT_SCHEMA = 1
 
 #: Durable record phases.
@@ -579,6 +592,7 @@ class RuntimeSupervisor:
         start_marker: Callable[[int], str | None] | None = None,
         containment: ContainmentPolicy | None = None,
         credentials: Mapping[str, str] | None = None,
+        home_seed: Mapping[str, bytes] | None = None,
     ) -> None:
         if descriptor.launcher is not None and containment is None:
             # A launcher without a policy would mean launching through a wrapper
@@ -609,6 +623,7 @@ class RuntimeSupervisor:
         self._workspace = workspace
         self._containment = containment
         self._credentials = dict(credentials or {})
+        self._home_seed = _validated_home_seed(home_seed)
         self._limits = limits or RuntimeLimits()
         self._state_dir = (
             Path(state_dir).resolve()
@@ -709,6 +724,23 @@ class RuntimeSupervisor:
     def attempt_record_path(self) -> Path:
         return self._state_dir / ATTEMPT_FILE
 
+    def _seed_home(self, attempt_dir: Path) -> list[Path]:
+        """Write the caller's home seed into the attempt's own home.
+
+        Returns the paths written, so the same paths can be removed when the
+        attempt ends. Nothing about the content is logged: a caller that stages
+        credential material records the path and the digest itself.
+        """
+        written: list[Path] = []
+        for relative, content in self._home_seed.items():
+            target = Path(attempt_dir) / ATTEMPT_HOME_DIR / Path(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.touch(mode=HOME_SEED_MODE, exist_ok=True)
+            target.write_bytes(content)
+            target.chmod(HOME_SEED_MODE)
+            written.append(target)
+        return written
+
     # -- lifecycle -------------------------------------------------------
 
     def preflight(self) -> RuntimeProvenance:
@@ -737,6 +769,8 @@ class RuntimeSupervisor:
         started_at = _now()
         stopwatch = time.monotonic()
         process: subprocess.Popen[bytes] | None = None
+        attempt_dir: Path | None = None
+        seeded_paths: list[Path] = []
         pid: int | None = None
         pgid: int | None = None
         timed_out = False
@@ -919,6 +953,11 @@ class RuntimeSupervisor:
             if self._descriptor.result_contract == "workspace-diff":
                 self._workspace_base()
 
+            # Last thing before the spawn, so the window in which the file exists is
+            # the attempt itself: seeded into the attempt's own home, removed in the
+            # `finally` below whatever happens to the child.
+            seeded_paths = self._seed_home(attempt_dir)
+
             stdin_handle = (
                 prompt_path.open("rb") if prompt_path is not None else subprocess.DEVNULL
             )
@@ -984,6 +1023,11 @@ class RuntimeSupervisor:
                     break
                 time.sleep(self._limits.poll_interval_seconds)
         finally:
+            # The seed outlives only the child: a retained copy of credential
+            # material is exactly what must not be left in the attempt directory.
+            for seeded in seeded_paths:
+                with contextlib.suppress(OSError):
+                    seeded.unlink(missing_ok=True)
             if pgid is not None:
                 termination = self._terminate(
                     pgid, process, self._limits.termination_grace_seconds
@@ -1822,6 +1866,31 @@ def _status_for(
     return "success"
 
 
+def _validated_home_seed(home_seed: Mapping[str, bytes] | None) -> dict[str, bytes]:
+    """Check a caller's attempt-home seed before anything is written.
+
+    Keys are paths relative to the attempt's own home. An absolute path or a
+    ``..`` segment would put the file outside the directory the profile makes
+    writable for this attempt, so both are refused before a byte is written.
+    """
+    seed: dict[str, bytes] = {}
+    for relative, content in (home_seed or {}).items():
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeSupervisionError("home seed entries need a non-empty path")
+        candidate = PurePosixPath(relative)
+        if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+            raise RuntimeSupervisionError(
+                f"home seed path {relative!r} must be relative to the attempt home "
+                "and must not escape it"
+            )
+        if not isinstance(content, (bytes, bytearray)):
+            raise RuntimeSupervisionError(
+                f"home seed content for {relative!r} must be bytes"
+            )
+        seed[relative] = bytes(content)
+    return seed
+
+
 def _read_bounded(path: Path, limit: int) -> bytes:
     """Read at most ``limit`` bytes + 1, so an oversized file is never loaded."""
     with path.open("rb") as handle:
@@ -1861,7 +1930,7 @@ def _child_environment(
         # Per-run marker for the survivor sweep (see containment.ATTEMPT_MARKER_VARIABLE).
         env["TACTUS_ATTEMPT_DIR"] = attempt_marker
     if attempt_dir is not None:
-        home = attempt_dir / "home"
+        home = attempt_dir / ATTEMPT_HOME_DIR
         temp = attempt_dir / "tmp"
         home.mkdir(parents=True, exist_ok=True)
         temp.mkdir(parents=True, exist_ok=True)

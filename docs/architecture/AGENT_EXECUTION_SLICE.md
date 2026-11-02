@@ -17,11 +17,21 @@ variable *names*, and a survivor sweep that gates `confirmed` and lock release
 without a model call: `tests/runtime/test_containment.py`,
 `tests/runtime/test_runtime_supervision.py` and
 `tests/integrations/agents/test_agent_adapter.py` run real child processes and no
-provider. **The canary itself has not been run**: it needs explicit operator
-approval and a scoped provider credential, and the operator's provider
-subscription quota was spent on the boundary work. It is an operator command
-rather than a code path these tests drive, so no attempt has observed it end to
-end.
+provider.
+
+The canary itself has now been run by the operator, and its containment posture
+is measured rather than argued. Under the shipped pin the pinned CLI starts and
+reaches the model call inside the boundary, which needs three named mach services
+and the operator's session credential staged into the run's own home; the
+denial matrix holds 8/8 with those allowances, and no ambient credential is
+reachable (the denial of `$HOME`, `~/.codex`, `~/.ssh` and `~/Library/Keychains`
+is unchanged). What the run does *not* yet show is a completed edit: this
+network answers the subscription backend with `HTTP 451` (`chatgpt.com`, inside
+and outside the boundary alike), so the attempt authenticates and then fails at
+that endpoint. The platform-key route is what reaches the model endpoint
+(measured: `401 Unauthorized`, `invalid_api_key`, with a dummy key), and it stays
+documented as the alternative in the pin. See
+[`CONTAINMENT.md`](CONTAINMENT.md) "Measured on this host" for each observation.
 
 ## What this slice is
 
@@ -133,7 +143,7 @@ the pinned revision rather than against whatever is installed in the venv.
 | `integrations/dagster/agent_attempt.py` | Dagster-free: load the operator runtime pin, verify the executable digest, supervise one attempt, re-check patch evidence, write the durable attempt account next to the artifacts. |
 | `integrations/dagster/agent_location.py` | Dagster: job `software_agent_job` with `prepare_op` → `execute_op` → `verify_op`, resource `SoftwareAgentSettings`. Fails closed without `TACTUS_AGENT_WORKSPACE_ROOT`; no retry policy and `allow_retries=False`, so an agent is never silently re-run. |
 | `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, allowed scope, limits, and — since phase 2 — optional `artifacts`, `containment`, `env_allowlist` and `stdin_from`. The shipped fake pin declares **none** of those, so the attempt it describes runs uncontained; a pin that declares a launcher gets the boundary, verified at preflight. |
-| `config/agent-runtime-canary.json` | The operator canary's pin: the Codex CLI release tree and executable by digest, the launcher by digest, denied roots, `egress: open` for that run only, the `ipc-posix-shm` allowance the runtime needs, and `CODEX_API_KEY` by name (the pinned Codex CLI authenticates `codex exec` from it and ignores `OPENAI_API_KEY`). Run through `scripts/run-agent-canary.sh`. |
+| `config/agent-runtime-canary.json` | The operator canary's pin: the Codex CLI release tree and executable by digest, the launcher by digest, denied roots, `egress: open` for that run only, the runtime's recorded allowances (`ipc-posix-shm` plus the three named mach services it cannot start without — `com.apple.cfprefsd.daemon`, `com.apple.cfprefsd.agent`, `com.apple.SecurityServer`), and its credential: the operator's session file (`credential_file`, `~/.codex/auth.json`) staged into the run's own home at `0600` and removed when the attempt ends. Exactly one credential route may be configured; `credential_env` (`CODEX_API_KEY`, a scoped platform key) is the documented alternative. Run through `scripts/run-agent-canary.sh`. |
 | `scripts/run-agent-slice.sh`, `scripts/validate_agent_slice.py` | The evidence harness. |
 | `tests/integrations/dagster/test_agent_attempt.py` | Dagster-free tests: pin drift, unknown/missing pin keys, unpinned runtime refused before anything is touched, success with real workspace edit, crash, timeout, scope violation, route-capability mismatch, JSON-safe accounts. |
 

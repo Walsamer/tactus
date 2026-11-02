@@ -51,13 +51,23 @@
     "probe_argv": ["{executable}", "debug", "models"],
     "probe_timeout_seconds": 60.0
   },
-  "env_allowlist": ["CODEX_API_KEY"],
-  "credential_env": "CODEX_API_KEY",
+  "env_allowlist": [],
+  "credential_file": {
+    "kind": "codex-session",
+    "path": "~/.codex/auth.json",
+    "home_path": ".codex/auth.json",
+    "mode": "0600"
+  },
   "stdin_from": "prompt",
   "allowed_scope": ["src", "tests"],
   "containment": {
     "egress": {"mode": "open"},
-    "allowances": ["ipc-posix-shm"],
+    "allowances": [
+      "ipc-posix-shm",
+      "mach-lookup (global-name \"com.apple.cfprefsd.daemon\")",
+      "mach-lookup (global-name \"com.apple.cfprefsd.agent\")",
+      "mach-lookup (global-name \"com.apple.SecurityServer\")"
+    ],
     "denied_roots": [
       {
         "path": "~",

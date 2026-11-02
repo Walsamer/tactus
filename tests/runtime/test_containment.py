@@ -209,9 +209,19 @@ def test_profile_records_declared_allowances_verbatim(
     attempt = tmp_path / "attempt"
     workspace.mkdir()
     attempt.mkdir()
-    policy = _policy(pinned_launcher, allowances=("ipc-posix-shm",))
+    policy = _policy(
+        pinned_launcher,
+        allowances=(
+            "ipc-posix-shm",
+            'mach-lookup (global-name "com.apple.cfprefsd.daemon")',
+        ),
+    )
     text = policy.profile_text(workspace=workspace, attempt_dir=attempt)
     assert "(allow ipc-posix-shm)" in text
+    # A named mach service is data, rendered as its own allowance line — never a
+    # blanket grant of the mach-lookup operation.
+    assert '(allow mach-lookup (global-name "com.apple.cfprefsd.daemon"))' in text
+    assert "(allow mach-lookup)" not in text
 
 
 def test_profile_hash_changes_when_the_policy_changes(
@@ -331,6 +341,55 @@ def test_self_test_proves_every_denial(
     assert result.profile_sha256 and len(result.profile_sha256) == 64
     # The probe writes are cleaned up: the workspace is not left dirty.
     assert not (workspace / ".containment-write-probe").exists()
+
+
+@pytest.mark.seatbelt
+def test_the_keychain_store_is_probed_when_the_pin_denies_one(
+    containment_paths: tuple[Path, Path, DeniedRoot],
+    seatbelt_launcher: Launcher,
+    tmp_path: Path,
+) -> None:
+    """A keychain store is a file denial, independent of any mach allowance.
+
+    The canary grants securityd so the runtime can evaluate TLS trust; the
+    operator's keychain *files* stay unreadable, and this is the check that says so
+    instead of leaving it to prose.
+    """
+    workspace, attempt, denied = containment_paths
+    keychains = tmp_path / "Library" / "Keychains"
+    keychains.mkdir(parents=True)
+    store = keychains / "login.keychain-db"
+    store.write_text("not really a keychain\n", encoding="utf-8")
+
+    result = run_self_test(
+        _policy(
+            seatbelt_launcher,
+            denied_roots=(denied, DeniedRoot(path=keychains, reason="the keychain stores")),
+            allowances=('mach-lookup (global-name "com.apple.SecurityServer")',),
+        ),
+        workspace=workspace,
+        attempt_dir=attempt,
+    )
+    by_name = {check.name: check for check in result.checks}
+    check = by_name["read_denied_keychain_store"]
+    assert check.ok and check.required, check.as_dict()
+    # The probe target is the pin's own store, not a happy accident.
+    assert str(store) in check.detail
+
+
+@pytest.mark.seatbelt
+def test_a_pin_that_denies_no_keychain_store_records_the_check_as_skipped(
+    containment_paths: tuple[Path, Path, DeniedRoot], seatbelt_launcher: Launcher
+) -> None:
+    workspace, attempt, denied = containment_paths
+    result = run_self_test(
+        _policy(seatbelt_launcher, denied_roots=(denied,)),
+        workspace=workspace,
+        attempt_dir=attempt,
+    )
+    check = {item.name: item for item in result.checks}["read_denied_keychain_store"]
+    assert check.ok is True and check.required is False
+    assert "skipped" in check.detail
 
 
 @pytest.mark.seatbelt
