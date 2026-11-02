@@ -9,8 +9,9 @@ of Ictus policy. It is the cross-repository half of the Ictus adapter evidence:
 * it builds the ``ictus`` binary from that revision into a disposable target
   directory (``cargo build --offline --locked``), so no canonical checkout is
   mutated and no vendored source is needed;
-* it feeds a snapshot payload to ``ictus decide`` over stdin/stdout and returns
-  the real ``{proposal, policy_decision, execution_intent}`` envelope.
+* it feeds a snapshot to legacy ``ictus decide`` or wraps fixture evidence in
+  ``DecisionContext`` for ``decide --context``, returning the actual triple or
+  validated ``DecisionEnvelope`` by shape, never by process exit code.
 
 The pinned Ictus policy reads the canonical ``attempts.semantic`` /
 ``attempts.max_semantic`` budget keys that Tactus emits, so the payload goes to
@@ -33,8 +34,18 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from tactus.integrations.ictus import (
+    is_decision_envelope,
+    is_legacy_decision_triple,
+    parse_envelope,
+)
+
+TACTUS_CONTEXT_PROFILE = "tactus.generic.v2"
+
 
 #: Exact reviewed Ictus revision this harness validates against.
 PINNED_ICTUS_COMMIT = "67877fb99dacdba2ed44d3d1dfc47a02090566e2"
@@ -88,16 +99,28 @@ class IctusBoundary:
     ) -> "DecideOutcome":
         return run_decide(self.binary, payload, args=args, timeout=timeout)
 
+    def decide_context(
+        self, context: Mapping[str, Any], *, timeout: float = 60.0
+    ) -> "DecideOutcome":
+        return run_decide(self.binary, context, args=("decide", "--context"), timeout=timeout)
+
 
 @dataclass(frozen=True, slots=True)
 class DecideOutcome:
-    """The real Ictus decision envelope plus its process return code."""
+    """A real Ictus triple or validated envelope, plus process evidence."""
 
     returncode: int
     proposal: Mapping[str, Any]
     policy_decision: Mapping[str, Any]
     execution_intent: Mapping[str, Any] | None
     raw: Mapping[str, Any]
+    shape: str
+    outcome: str | None
+    verdict: str | None
+
+    @property
+    def has_intent(self) -> bool:
+        return self.execution_intent is not None
 
     @property
     def proposal_decision(self) -> str:
@@ -105,11 +128,11 @@ class DecideOutcome:
 
     @property
     def policy_decision_kind(self) -> str:
-        return str(self.policy_decision.get("decision"))
+        return str(self.verdict)
 
     @property
     def executable(self) -> bool:
-        return self.execution_intent is not None
+        return self.outcome == "EXECUTABLE" if self.shape == "envelope" else self.has_intent
 
     @property
     def reason(self) -> str:
@@ -117,17 +140,86 @@ class DecideOutcome:
 
     @property
     def subject_id(self) -> str:
-        raw_subject = self.proposal.get("subject")
+        source = self.raw if self.shape == "envelope" else self.proposal
+        raw_subject = source.get("subject")
         if isinstance(raw_subject, Mapping):
             return str(raw_subject.get("id"))
         return ""
 
     @property
     def subject_type(self) -> str:
-        raw_subject = self.proposal.get("subject")
+        source = self.raw if self.shape == "envelope" else self.proposal
+        raw_subject = source.get("subject")
         if isinstance(raw_subject, Mapping):
             return str(raw_subject.get("type"))
         return ""
+
+
+def to_canonical_utc(value: datetime | str) -> str:
+    """Format a context-path clock at whole UTC seconds, never snapshot digests."""
+
+    instant = (
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if isinstance(value, str) else value
+    )
+    if instant.utcoffset() is None:
+        raise ValueError("context clock must be timezone-aware")
+    return instant.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def build_decision_context(
+    snapshot: Mapping[str, Any],
+    *,
+    context_id: str | None = None,
+    kind: str | None = None,
+    revision: int | None = None,
+    attempts: Mapping[str, Any] | None = None,
+    recovery: Mapping[str, Any] | None = None,
+    profile: str = TACTUS_CONTEXT_PROFILE,
+) -> dict[str, Any]:
+    """Wrap evidence only: Tactus has no runtime ``--context`` producer yet.
+
+    The snapshot is unchanged. Callers building fresh evidence snapshots must
+    choose a ``to_canonical_utc`` clock *before* sealing their digest. RECOVERY
+    callers supply the actual failed snapshot ref; correlated observation and
+    attempt bindings are read from the snapshot facts, never fabricated.
+    """
+
+    facts = {fact["key"]: fact["value"] for fact in snapshot["facts"]}
+    if snapshot["timestamp"] != to_canonical_utc(snapshot["timestamp"]):
+        raise ValueError("choose a canonical context clock before sealing the snapshot")
+    context = {
+        "schema_version": 1,
+        "context_id": context_id if context_id is not None else f"context:{snapshot['snapshot_id']}",
+        "kind": kind if kind is not None else facts["snapshot.phase"],
+        "profile": profile,
+        "snapshot": snapshot,
+        "revision": revision if revision is not None else facts["work_order.revision"],
+        "attempts": dict(attempts) if attempts is not None else {
+            "semantic_attempts": facts["attempts.semantic"],
+            "max_semantic_attempts": facts["attempts.max_semantic"],
+            "step_retries": facts["attempts.step_retries"],
+        },
+        "grants": [],
+    }
+    if context["kind"] == "RECOVERY":
+        if recovery is None or "failed_snapshot" not in recovery:
+            raise ValueError("RECOVERY evidence requires the actual failed_snapshot ref")
+        observation = {
+            key.removeprefix("observation."): value
+            for key, value in facts.items() if key.startswith("observation.")
+        }
+        observation["schema_version"] = 1
+        observation["observed_at"] = to_canonical_utc(observation["observed_at"])
+        context["recovery"] = {
+            "failed_attempt_id": facts["recovery.attempt_id"],
+            "failed_intent_id": facts["recovery.intent_id"],
+            "observation": observation,
+            **recovery,
+        }
+    elif recovery is not None:
+        raise ValueError("INITIAL evidence must not carry recovery")
+    return context
 
 
 def _looks_like_ictus_checkout(root: Path) -> bool:
@@ -374,13 +466,23 @@ def run_decide(
     if not isinstance(raw, Mapping):
         raise IctusBoundaryUnavailable("ictus decide emitted a non-object envelope")
 
-    proposal = raw.get("proposal")
-    policy_decision = raw.get("policy_decision")
-    if not isinstance(proposal, Mapping) or not isinstance(policy_decision, Mapping):
+    envelope = is_decision_envelope(raw)
+    legacy = is_legacy_decision_triple(raw)
+    if envelope == legacy:
         raise IctusBoundaryUnavailable(
-            "ictus decide envelope is missing proposal/policy_decision"
+            "ictus decide must emit exactly one of envelope or legacy triple"
         )
-    execution_intent = raw.get("execution_intent")
+    proposal = raw.get("proposal")
+    policy_decision = raw.get("policy" if envelope else "policy_decision")
+    if not isinstance(proposal, Mapping) or not isinstance(policy_decision, Mapping):
+        raise IctusBoundaryUnavailable("ictus decide is missing proposal/policy")
+    if envelope:
+        # Validation failures are evidence failures too, never a legacy fallback.
+        try:
+            parse_envelope(raw)
+        except ValueError as error:
+            raise IctusBoundaryUnavailable(f"invalid decision envelope: {error}") from error
+    execution_intent = raw.get("intent" if envelope else "execution_intent")
     if execution_intent is not None and not isinstance(execution_intent, Mapping):
         raise IctusBoundaryUnavailable("execution_intent must be an object or null")
 
@@ -390,6 +492,9 @@ def run_decide(
         policy_decision=policy_decision,
         execution_intent=execution_intent,
         raw=raw,
+        shape="envelope" if envelope else "legacy_triple",
+        outcome=raw["outcome"] if envelope else None,
+        verdict=policy_decision.get("verdict" if envelope else "decision"),
     )
 
 
@@ -411,6 +516,39 @@ def _report_snapshot(boundary: IctusBoundary, path: Path) -> dict[str, Any]:
     }
 
 
+def _report_context(boundary: IctusBoundary, path: Path) -> dict[str, Any]:
+    from tactus.integrations.ictus import validate_snapshot_profile
+
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    validate_snapshot_profile(snapshot)
+    facts = {fact["key"]: fact["value"] for fact in snapshot["facts"]}
+    recovery = None
+    if facts["snapshot.phase"] == "RECOVERY":
+        # These two golden fixtures are a documented initial/recovery pair.
+        initial = json.loads(
+            (path.parent / "initial_snapshot.v2.json").read_text(encoding="utf-8")
+        )
+        validate_snapshot_profile(initial)
+        initial_facts = {fact["key"]: fact["value"] for fact in initial["facts"]}
+        recovery = {
+            "failed_snapshot": {
+                "snapshot_id": initial["snapshot_id"],
+                "revision": initial_facts["work_order.revision"],
+                "digest": initial_facts["snapshot.digest"],
+            }
+        }
+    outcome = boundary.decide_context(build_decision_context(snapshot, recovery=recovery))
+    return {
+        "snapshot_id": snapshot["snapshot_id"],
+        "shape": outcome.shape,
+        "outcome": outcome.outcome,
+        "verdict": outcome.verdict,
+        "proposal.decision": outcome.proposal_decision,
+        "has_intent": outcome.has_intent,
+        "returncode": outcome.returncode,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI: build the pinned boundary and report real decisions for snapshots."""
 
@@ -421,6 +559,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--root", default=None, help=f"override {ICTUS_ROOT_ENV}")
     parser.add_argument("--target-dir", default=None, help="disposable cargo target dir")
     parser.add_argument("--force-build", action="store_true")
+    parser.add_argument(
+        "--context", action="store_true", help="wrap evidence fixtures in DecisionContext"
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--keep-build", action="store_true", help="keep the target dir")
     args = parser.parse_args(argv)
@@ -439,7 +580,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"pinned Ictus boundary: {boundary.commit} ({PINNED_ICTUS_REPOSITORY})\n"
             f"binary: {boundary.binary}"
         )
-        reports = [_report_snapshot(boundary, path) for path in args.snapshots]
+        report = _report_context if args.context else _report_snapshot
+        reports = [report(boundary, path) for path in args.snapshots]
         print(json.dumps(reports, indent=2, sort_keys=True))
     finally:
         if held_target is not None:

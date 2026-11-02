@@ -140,7 +140,7 @@ def _initial_snapshot(work_order: WorkOrder, snapshot_id: str) -> dict[str, Any]
         semantic_budget=SemanticBudget(0, 3),
         step_retry=StepRetryDiagnostic(0),
         snapshot_id=snapshot_id,
-        timestamp=_now(),
+        timestamp=datetime.fromisoformat(slice_harness.to_canonical_utc(_now())),
         capability_id=CAPABILITY,
         dependencies_satisfied=True,
         source_revision=SOURCE_REVISION,
@@ -634,7 +634,7 @@ def _verify_pinned_checkout(ictus_root: Path, *, allow_dirty: bool) -> dict[str,
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     ictus_root = Path(args.ictus_root).expanduser().resolve()
-    binary = ictus_root / "target" / "debug" / "ictus"
+    binary = slice_harness.load_boundary(ictus_root).binary
     pin = slice_harness._verify_ictus_pin(ictus_root, binary)  # noqa: SLF001
     checkout = _verify_pinned_checkout(
         ictus_root, allow_dirty=bool(getattr(args, "allow_dirty_ictus", False))
@@ -655,12 +655,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     # 1. A real pinned-Ictus decision for the agent capability.
     snapshot = _initial_snapshot(_work_order(), "snapshot-agent-entry")
     payload, decision = slice_harness._decide(binary, snapshot)  # noqa: SLF001
-    if decision["policy_decision"]["decision"] != "ALLOW":
+    if decision["outcome"] != "EXECUTABLE":
+        raise ValidationError("Ictus agent outcome was not EXECUTABLE")
+    if decision["policy"]["verdict"] != "ALLOW":
         raise ValidationError(
             "Ictus did not authorize the agent capability: "
             + json.dumps(decision, sort_keys=True)
         )
-    intent = decision.get("execution_intent")
+    intent = decision.get("intent")
     if intent is None:
         raise ValidationError(f"Ictus returned no ExecutionIntent for {CAPABILITY}")
     if intent["capability"] != CAPABILITY:
@@ -745,8 +747,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "decision": {
             "snapshot_id": snapshot["snapshot_id"],
             "snapshot_digest": slice_harness._fact(snapshot, "snapshot.digest"),  # noqa: SLF001
-            "legacy_boundary_payload": payload,
-            "policy_decision": decision["policy_decision"],
+            "context": payload,
+            "outcome": decision["outcome"],
+            "policy": decision["policy"],
             "execution_intent": intent,
         },
         "seam": seam,
@@ -822,6 +825,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "agent-slice validation passed: "
         f"mode={evidence['mode']} "
+        f"outcome={evidence['decision']['outcome']} "
+        f"verdict={evidence['decision']['policy']['verdict']} "
         f"intent={evidence['admission']['intent_id']} "
         f"attempt={attempt['attempt_id']} "
         f"runtime={attempt['runtime']['runtime_id']} ({attempt['runtime']['runtime_kind']}) "
