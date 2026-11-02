@@ -105,12 +105,36 @@ def test_a_launcher_pinned_by_path_alone_is_refused(pinned_launcher: Launcher) -
 
 
 def test_launcher_digest_mismatch_fails_closed(pinned_launcher: Launcher) -> None:
+    """Both sides are named, so the next OS update explains itself.
+
+    A bare pair of digests leaves the operator to guess whether the binary was
+    replaced by an OS update or by something else; the message says which host the
+    pin belongs to and which host refused it.
+    """
+    drifted = Launcher(
+        path=pinned_launcher.path,
+        argv_prefix=pinned_launcher.argv_prefix,
+        sha256="0" * 64,
+        recorded_on="macOS 0.0 (TESTBUILD)",
+    )
+    with pytest.raises(ContainmentUnavailable, match="digest mismatch") as excinfo:
+        drifted.verify()
+    message = str(excinfo.value)
+    assert "recorded on macOS 0.0 (TESTBUILD)" in message
+    assert "this host is" in message
+    assert "confirming the Apple signature chain" in message
+
+
+def test_a_launcher_digest_without_its_host_is_still_refused(
+    pinned_launcher: Launcher,
+) -> None:
+    """Older pins keep failing closed; the message says the host is not recorded."""
     drifted = Launcher(
         path=pinned_launcher.path,
         argv_prefix=pinned_launcher.argv_prefix,
         sha256="0" * 64,
     )
-    with pytest.raises(ContainmentUnavailable, match="digest mismatch"):
+    with pytest.raises(ContainmentUnavailable, match="unspecified host"):
         drifted.verify()
 
 

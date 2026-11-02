@@ -59,6 +59,7 @@ __all__ = [
     "SelfTestResult",
     "describe_host",
     "digest_tree",
+    "host_build_label",
     "redact_process_command",
     "residual_processes",
     "run_self_test",
@@ -171,12 +172,16 @@ class Launcher:
 
     ``argv_prefix`` may contain the ``{profile}`` and ``{workspace}``
     placeholders; its first element must resolve to ``path``, so a descriptor
-    cannot verify one launcher and run another.
+    cannot verify one launcher and run another. ``recorded_on`` names the host the
+    digest was recorded on, so a mismatch names both sides of the comparison.
     """
 
     path: Path
     argv_prefix: tuple[str, ...]
     sha256: str = ""
+    #: The host the digest was recorded on, e.g. ``macOS 27.2 (26B123)``. A
+    #: preflight mismatch names both sides, so the next OS update explains itself.
+    recorded_on: str = ""
 
     def __post_init__(self) -> None:
         path = Path(self.path).expanduser()
@@ -189,6 +194,10 @@ class Launcher:
         object.__setattr__(self, "argv_prefix", prefix)
         if self.sha256 and not _SHA256_RE.fullmatch(self.sha256):
             raise ContainmentError("launcher sha256 must be a lowercase SHA-256 digest")
+        recorded_on = self.recorded_on.strip()
+        if self.recorded_on and not recorded_on:
+            raise ContainmentError("launcher recorded_on must name a host when it is set")
+        object.__setattr__(self, "recorded_on", recorded_on)
 
     @classmethod
     def for_path(cls, path: str | Path, argv_prefix: Sequence[str] | None = None) -> "Launcher":
@@ -226,17 +235,23 @@ class Launcher:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if self.sha256 and digest != self.sha256:
             raise ContainmentUnavailable(
-                f"containment launcher digest mismatch: pinned {self.sha256}, "
-                f"observed {digest} ({path}); re-record the launcher pin for this host"
+                f"containment launcher digest mismatch: pinned {self.sha256} "
+                f"recorded on {self.recorded_on or 'an unspecified host'}, observed "
+                f"{digest} ({path}); this host is {host_build_label()}; re-record the "
+                "launcher pin for this host only after confirming the Apple signature "
+                "chain and the new OS build"
             )
         return digest
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "path": str(self.path),
             "argv_prefix": list(self.argv_prefix),
             "sha256": self.sha256,
         }
+        if self.recorded_on:
+            data["recorded_on"] = self.recorded_on
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +567,36 @@ def describe_host() -> str:
     except Exception:  # pragma: no cover - defensive
         version = "unknown"
     return f"macos-{version}-{platform.machine()}"
+
+
+def host_build_label() -> str:
+    """The macOS version and build this host runs, e.g. ``macOS 27.2 (26B123)``.
+
+    Recorded beside a launcher digest so a mismatch can name the host the pin
+    belongs to and the host that refused it — an OS update then produces a message
+    that explains itself instead of a bare digest diff. Never guessed: an
+    unreadable host says so.
+    """
+    try:
+        version = platform.mac_ver()[0]
+    except Exception:  # pragma: no cover - defensive
+        version = ""
+    build = ""
+    try:
+        completed = subprocess.run(
+            ["sw_vers", "-buildVersion"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if completed.returncode == 0:
+            build = completed.stdout.strip()
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - non-macOS hosts
+        build = ""
+    if not version:
+        return "unknown"
+    return f"macOS {version} ({build})" if build else f"macOS {version}"
 
 
 #: Interpreters used for the connect probe, in order of preference. The

@@ -20,15 +20,28 @@ without a model call: `tests/runtime/test_containment.py`,
 provider.
 
 The canary itself has now been run by the operator, and its containment posture
-is measured rather than argued. Under the shipped pin the pinned CLI starts and
-reaches the model call inside the boundary, which needs three named mach services
-and the operator's session credential staged into the run's own home; the
+is measured rather than argued. Under the shipped pin the pinned CLI starts
+inside the boundary, which needs three named mach services and the operator's
+session credential staged into the run's own home; the
 denial matrix holds 8/8 with those allowances, and no ambient credential is
 reachable (the denial of `$HOME`, `~/.codex`, `~/.ssh` and `~/Library/Keychains`
-is unchanged). What the run does *not* yet show is a completed edit: this
-network answers the subscription backend with `HTTP 451` (`chatgpt.com`, inside
-and outside the boundary alike — a fact about the network, **not** a boundary
-failure), so the attempt authenticates and then ends at that endpoint. The
+is unchanged). What the run does *not* yet show is a completed edit: the attempt
+authenticates (no 401, `attempt.auth_rejection.detected` `false`) and then ends
+before the model call at `workspace routing discovery failed`, retried five times
+against `chatgpt.com/backend-api/ps/mcp`, then `turn.failed` — exit 1 after 19 s,
+empty patch. That path answers `HTTP 451` with
+`{"message":"no_biscuit_no_service"}` while its sibling paths
+(`/backend-api/me`, `/models`, `/conversation/init`) answer `401`/`403` in the
+same moment, inside the attempt's profile and outside it alike — so the network
+is reachable and the boundary does not block that host; the refusal belongs to
+that one path and **why** is unknown. It is not evidence of a broken endpoint or
+an out-of-step CLI: the authenticated CLI run outside the boundary completes the
+same edit and never requests that path. The open question is the failure the
+contained run does report, and it is narrowed but not answered: the same staged
+home (`HOME` seeded with `.codex/auth.json` alone, no `config.toml`) and the same
+argv, run *outside* the boundary, complete the edit (exit 0, 11.5 s, exactly the
+two files), so the staged credential alone is not the cause — the difference lies
+inside the boundary, and which denial produces it is not identified. The
 platform-key route is what reaches the model endpoint (measured:
 `401 Unauthorized`, `invalid_api_key`, with a dummy key), and it stays documented
 as the alternative in the pin.
@@ -36,9 +49,10 @@ as the alternative in the pin.
 Two things the operator must not misread in the evidence: a verdict of `timeout`
 can mean a *rejected credential*, because the CLI reconnects until the deadline —
 the 401 is in `attempt.stderr_tail` and in the child's stdout, and
-`attempt.auth_rejection` names it beside the verdict; and `HTTP 451` is the
-network refusing the subscription backend, not the profile refusing the runtime.
-See [`CONTAINMENT.md`](CONTAINMENT.md) "Measured on this host" for each
+`attempt.auth_rejection` names it beside the verdict; and the `HTTP 451` from
+that one subscription-backend path is neither a network nor a containment
+failure, and does not explain the contained run's routing-discovery failure.
+See [`CONTAINMENT.md`](CONTAINMENT.md) "Reading a canary verdict" for each
 observation.
 
 ## What this slice is

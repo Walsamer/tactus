@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -168,6 +169,7 @@ def _pin(
             "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest()
             if launcher.is_file()
             else "",
+            "recorded_on": "macOS 0.0 (TESTBUILD)",
         },
         "executable": str(executable),
         "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
@@ -471,6 +473,38 @@ def test_the_shipped_pin_denies_the_operator_keychain_and_codex_home() -> None:
     pin = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
     denied = {root["path"] for root in pin["containment"]["denied_roots"]}
     assert {"~", "~/.ssh", "~/.codex", "~/Library/Keychains"} <= denied
+
+
+def test_the_shipped_pin_records_the_host_its_launcher_digest_belongs_to() -> None:
+    """The digest is not a universal value: it belongs to one OS build.
+
+    A macOS update replaces `/usr/bin/sandbox-exec`, so the pin names the host the
+    digest was recorded on and a preflight mismatch can name both sides. Without
+    that, the message is two bare digests and the next operator has to guess.
+    """
+    shipped = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
+    launcher = shipped["launcher"]
+    assert re.fullmatch(r"macOS \d+\.\d+ \([0-9A-Za-z]+\)", launcher["recorded_on"]), launcher
+    assert len(launcher["sha256"]) == 64
+
+
+def test_a_launcher_pinned_by_digest_must_record_its_host(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Refused, not filled in: a digest without its host is the rubber stamp."""
+    pin = _pin(tmp_path)
+    config = json.loads(pin.read_text(encoding="utf-8"))
+    config["launcher"].pop("recorded_on")
+    pin.write_text(json.dumps(config), encoding="utf-8")
+
+    code = command.main(
+        ["--dry-run", "--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    captured = capsys.readouterr()
+    assert code == command.EXIT_REFUSED
+    assert "does not record the host" in captured.err
+    assert not (tmp_path / "stage").exists()
 
 
 # -- staging ---------------------------------------------------------------

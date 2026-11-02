@@ -260,13 +260,19 @@ What is still open, and why no real agent is started:
    `result_contract`, so a pin that names a launcher gets the boundary
    (`integrations/dagster/agent_attempt.py`). The only real-runtime pin is the
    canary's own (`config/agent-runtime-canary.json`), run by hand.
-2. **The canary reaches the model call, and has not yet produced an edit.** Open
-   egress for one approved run plus the operator's session file get the pinned CLI
-   to the model endpoint inside the boundary; on this network the subscription
-   backend answers `HTTP 451` (in and outside the boundary alike), and the
-   platform-key route is rejected only when the key is a placeholder. A completed
-   edit needs either a network that reaches the subscription backend or a scoped
-   platform key.
+2. **The canary authenticates and has not yet produced an edit.** Open egress
+   for one approved run plus the operator's session file get the pinned CLI
+   inside the boundary, and the attempt then ends before the model call at
+   `workspace routing discovery failed` against `chatgpt.com/backend-api/ps/mcp`
+   (exit 1, no 401, empty patch). The same staged home and argv outside the
+   boundary complete the edit, so the staged credential alone is not the cause
+   and the difference lies inside the boundary — which denial does it is unknown,
+   and finding out needs a controlled allowance experiment, which is an operator
+   decision. That path's unauthenticated `HTTP 451`
+   (`{"message":"no_biscuit_no_service"}`) is answered the same inside and
+   outside the boundary, so it explains nothing about this failure. The
+   platform-key route is the one that gets further, and it is rejected only when
+   the key is a placeholder.
 3. **The durable half waits on Ictus B4** (see
    [`AGENT_EXECUTION_SLICE.md`](AGENT_EXECUTION_SLICE.md)); it is proven only in a
    throwaway clone.
