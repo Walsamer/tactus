@@ -2,7 +2,7 @@
 > govern new work; [reconciliation](BASELINE_V1_RECONCILIATION.md) records the
 > profile, initial-context and validation gaps this adapter closes. The pinned
 > Ictus schemas describe inspected main (Ictus commit
-> `c140af38304b401d6628109cb45d818f3d8aeeb1`).
+> `67877fb99dacdba2ed44d3d1dfc47a02090566e2`).
 
 # Tactus → Ictus `StateSnapshot` versioned context adapter
 
@@ -55,7 +55,7 @@ Ictus DecisionProvider              (owns all decision/policy)
 | Item | Value |
 |---|---|
 | Ictus repository | `Walsamer/ictus` |
-| Pinned commit | `c140af38304b401d6628109cb45d818f3d8aeeb1` |
+| Pinned commit | `67877fb99dacdba2ed44d3d1dfc47a02090566e2` |
 | `StateSnapshot` schema | `contracts/state-snapshot.schema.json` |
 | Supported generic `schema_version` | `1` |
 | Tactus fact-profile version | `2` (independent, `snapshot.profile_version`) |
