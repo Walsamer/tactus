@@ -12,7 +12,7 @@ no HTTP, event bus or service topology is mandated.
 |---|---|---|
 | WorkSourceRevision | GitHub adapter → Tactus/current Fleet | Immutable source specification and change detector; see migration document. |
 | DecisionContext / StateSnapshot profile | Tactus → Ictus | Generic subject, snapshot identity/revision, phase INITIAL or RECOVERY, facts with provenance, authorization and constraints. |
-| ValidatedDecision / RecoveryDecision | Ictus → Tactus | Typed effect plus policy/capability validation and binding to exact context; no direct state mutation. |
+| DecisionEnvelope / RecoveryDecision | Ictus → Tactus | Versioned validated decision: `schema_version` 1 (frozen capability-bearing shape) or 2 (conditional); binds subject, snapshot identity/revision/digest, proposal and policy identity/version/verdict, capability validation, approvals, the resolved outcome and an expiry; no direct state mutation. |
 | ExecutionIntent | Ictus → Tactus admission → Dagster bridge | Exact allowed capability, selected route and restrictions bound to validated context. |
 | SubmissionReceipt / ExecutionStatus | Dagster bridge → Tactus | Durable receipt or explicit rejection/unknown; opaque execution ID with submission identity. |
 | ExecutionResult / ExecutionObservation | Execution bridge → Tactus | Correlated terminal facts/evidence; no domain lifecycle decision. |
@@ -62,12 +62,64 @@ approval references, permitted effect, issued/expiry time and evidence refs.
 ExecutionIntent additionally binds capability arguments, authorized scope,
 limits, backend/provider/runtime/model and idempotency identity.
 
-Only an ALLOW verdict with sufficient current approval grants can yield an
-executable intent. DENY and REQUIRE_APPROVAL have no executable intent. A typed
-no-route/invalid-context outcome carries reasons for a domain blocker; Tactus
-does not reinterpret it as permission to try another backend. Approval
-requirements and missing inputs remain explicit outputs, not exceptions that
-cause a fallback.
+Admission is **outcome-first**, never verdict-first. `EXECUTABLE` is the only
+outcome that carries an `ExecutionIntent` and may start new work. `NO_EXECUTION`
+was validated and permitted and reaches no execution backend, so Tactus acts on
+`proposal.decision` (ESCALATE and ABORT today; DECOMPOSE once its proposal
+binding can be verified) through the same applier and decision ledger as any
+other authorising decision. An executable intent must bind the validated
+proposal digest and the snapshot it was validated against: an intent for a
+different payload is not the result of that validation. `DENIED`, `PENDING`,
+`NO_ROUTE` and `INVALID` are typed non-authorising results: the caller receives
+the outcome, and no Work Order transition, intervention request or ledger row is
+written. Reading the policy verdict instead of the resolved outcome is the bug
+this contract exists to prevent — a `NO_EXECUTION` decision also carries
+`ALLOW`/`MODIFY`. A malformed payload fails closed with an exception; a
+well-formed refusal is not an exception. A refusal carries its resolved outcome,
+the proposal's decision and the policy verdict — not Ictus's prose, which the
+envelope does not carry — and a no-route or invalid-context outcome is never
+reinterpreted as permission to try another backend.
+
+The envelope is version tolerant: `schema_version` 1 and 2 are accepted and an
+unknown version is refused. Version 1 is the frozen capability-bearing shape and
+always carries `capability_validation`; version 2 carries it exactly when the
+decision carries a capability, so ESCALATE, ABORT and DECOMPOSE carry none.
+Whether a decision carries a capability, and whether it may carry a route,
+approvals, grants or an intent, are shape rules derived from `proposal.decision`
+— they are not version rules, and a decision that carries no capability must not
+claim capability validation.
+
+Expiry is compared to `validation.validated_at`, which Ictus derives from the
+snapshot's fact time, never to a wall clock. A wall-clock liveness rule would
+need its own explicitly injected clock and is not part of admission.
+
+The decision ledger records a versioned digest: a new row is `sha256:v1:`
+prefixed, an existing bare 64-hex row reads as `sha256:v0`, and comparing two
+different versions is an immutable-record conflict rather than a replay.
+
+The canonical form is Ictus's identity-digest protocol v1 (`docs/IDENTITY_DIGEST.md`,
+`contracts/digest-vectors.json` `schema_version` 1), including its number domain:
+an integer outside −2^63…2^64−1, a non-finite value, and a document literal that
+only rounds to its double are refused with a typed error naming the rule and the
+JSON path, never hashed as the nearest representable value. The rule is enforced
+wherever a digest is computed and at the text ingress that parses Ictus output, so
+a document Ictus would refuse cannot be digested here either. The published
+vectors are mirrored in `tests/integrations/ictus/test_digest_vectors.py` until a
+pin advance brings the artefact into the pinned revision.
+
+DECOMPOSE is refused with a typed reason, and no child Work Order is created:
+the bounded child plan is not carried in the envelope, and
+`validation.proposal_digest` cannot be re-verified because Ictus currently
+serializes the proposal in struct field order rather than canonical form.
+Canonical digest vectors are required before a plan may be acted on.
+
+The legacy unvalidated triple (`{proposal, policy_decision, execution_intent}`)
+is **deprecated**, not removed: the same admission boundary still accepts it,
+because plain `ictus decide` (no `--context`) still emits that shape and the
+conformance harness's default report exercises it — CI runs that report and the
+validated-envelope report side by side. It stays only until a `DecisionContext`
+producer exists;
+Tactus builds a context in evidence code, never at runtime.
 
 Validation evidence must come from a trusted Ictus invocation or authenticated
 boundary, with persisted immutable payload/digest. A self-asserted JSON `ALLOW`

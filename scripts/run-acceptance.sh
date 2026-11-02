@@ -7,7 +7,9 @@
 #   3. the execution-failure scenarios (transient, terminal, escalation, duplicate)
 #
 # Requires TACTUS_ICTUS_ROOT to point at the pinned Ictus checkout with its
-# existing venv (dagster + ictus_dagster) and prebuilt target/debug/ictus.
+# existing venv (dagster + ictus_dagster) and an `ictus` binary in the disposable
+# conformance target directory (`TACTUS_ICTUS_TARGET_DIR`, else a commit-keyed
+# temp directory), which the harness builds on demand and reuses.
 # Every runtime step uses a temporary SQLite ledger, DAGSTER_HOME and workspace
 # root; nothing under the repository is written.
 #

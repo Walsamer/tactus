@@ -45,6 +45,12 @@ from tactus.domain.admission import (
 )
 from tactus.domain._clock import utcnow
 from tactus.domain.work_order import OpenStatus, WorkOrderState
+from tactus.integrations.ictus.digests import (
+    CrossVersionDigestConflict,
+    MalformedDigestError,
+    UnknownDigestVersionError,
+    is_replay,
+)
 
 
 _MIGRATION_ID = "0001_execution_admission"
@@ -588,9 +594,22 @@ class SqliteExecutionAdmission(DurableExecutionAdmissionPort):
                 (record.decision_id,),
             ).fetchone()
             if previous is not None:
+                try:
+                    replay = is_replay(previous["decision_digest"], record.decision_digest)
+                except (
+                    CrossVersionDigestConflict, MalformedDigestError, UnknownDigestVersionError
+                ) as exc:
+                    versions = [
+                        digest.rpartition(":")[0] if ":" in digest else "sha256:v0 (bare)"
+                        for digest in (previous["decision_digest"], record.decision_digest)
+                    ]
+                    raise ImmutableRecordConflictError(
+                        f"recovery decision digest versions {versions[0]} and "
+                        f"{versions[1]} cannot be replayed: {exc}"
+                    ) from exc
                 if (
                     previous["attempt_id"] == (None if record.attempt_id is None else str(record.attempt_id))
-                    and previous["decision_digest"] == record.decision_digest
+                    and replay
                 ):
                     return False
                 raise ImmutableRecordConflictError(
