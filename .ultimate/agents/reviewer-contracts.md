@@ -10,7 +10,7 @@ Review the coordinator's explicit immutable full-SHA range directly in Git (`git
 
 Your only question: is each contract on the boundary honoured exactly — versioned, closed, fail-closed — and does the thing that stands in for the other side still match the real one? The contracts are in `docs/architecture/`: `CROSS_SYSTEM_CONTRACTS.md`, `ICTUS_OBSERVATION_CONTRACT.md`, `ICTUS_STATE_SNAPSHOT_CONTRACT.md`, `DECISION_APPLICATION.md`, `AGENT_ADAPTER_CONTRACT.md`, `STAX_ADAPTER.md`, `WORK_SOURCE_ADAPTER.md`, `EXECUTION_AND_RECOVERY.md`.
 
-The real Ictus artifact is on disk: the worktree links it as `./agentic-control`, and the source checkout has it as `../agentic-control` (pinned revision `c140af38304b401d6628109cb45d818f3d8aeeb1`; the checkout may sit ahead — read the pinned files at that revision with `git -C <path> show <commit>:<file>` rather than trusting its working tree). Read it; do not modify it, build it or run anything in it.
+The real Ictus artifact is on disk: the worktree links it as `./agentic-control`, and the source checkout has it as `../agentic-control` (pinned revision `67877fb99dacdba2ed44d3d1dfc47a02090566e2`; the checkout may sit ahead — read the pinned files at that revision with `git -C <path> show <commit>:<file>` rather than trusting its working tree). Read it; do not modify it, build it or run anything in it.
 
 Look for:
 
