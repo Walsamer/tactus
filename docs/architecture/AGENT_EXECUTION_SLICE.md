@@ -21,39 +21,32 @@ provider.
 
 The canary itself has now been run by the operator, and its containment posture
 is measured rather than argued. Under the shipped pin the pinned CLI starts
-inside the boundary, which needs three named mach services and the operator's
+inside the boundary, which needs four named mach services and the operator's
 session credential staged into the run's own home; the
 denial matrix holds 8/8 with those allowances, and no ambient credential is
 reachable (the denial of `$HOME`, `~/.codex`, `~/.ssh` and `~/Library/Keychains`
-is unchanged). What the run does *not* yet show is a completed edit: the attempt
-authenticates (no 401, `attempt.auth_rejection.detected` `false`) and then ends
-before the model call at `workspace routing discovery failed`, retried five times
-against `chatgpt.com/backend-api/ps/mcp`, then `turn.failed` — exit 1 after 19 s,
-empty patch. That path answers `HTTP 451` with
-`{"message":"no_biscuit_no_service"}` while its sibling paths
-(`/backend-api/me`, `/models`, `/conversation/init`) answer `401`/`403` in the
-same moment, inside the attempt's profile and outside it alike — so the network
-is reachable and the boundary does not block that host; the refusal belongs to
-that one path and **why** is unknown. It is not evidence of a broken endpoint or
-an out-of-step CLI: the authenticated CLI run outside the boundary completes the
-same edit and never requests that path. The open question is the failure the
-contained run does report, and it is narrowed but not answered: the same staged
-home (`HOME` seeded with `.codex/auth.json` alone, no `config.toml`) and the same
-argv, run *outside* the boundary, complete the edit (exit 0, 11.5 s, exactly the
-two files), so the staged credential alone is not the cause — the difference lies
-inside the boundary, and which denial produces it is not identified. The
-platform-key route is what reaches the model endpoint (measured:
-`401 Unauthorized`, `invalid_api_key`, with a dummy key), and it stays documented
-as the alternative in the pin.
+is unchanged). The run now **completes its edit inside the boundary**, and the
+failure that preceded it is named rather than open: it ended before the model
+call at `workspace routing discovery failed`, and the kernel log gave the denial
+per failing run — `mach-lookup com.apple.trustd.agent`, TLS trust evaluation —
+so every HTTPS request failed at the transport until that one allowance was
+added. The staged credential, the network and the OS update are all exonerated
+(the same staged home and argv complete the edit outside the boundary); `configd`
+was tried first, changed nothing and was removed again. See
+[`CONTAINMENT.md`](CONTAINMENT.md) "Reading a canary verdict" for the
+measurements.
 
 Two things the operator must not misread in the evidence: a verdict of `timeout`
 can mean a *rejected credential*, because the CLI reconnects until the deadline —
 the 401 is in `attempt.stderr_tail` and in the child's stdout, and
 `attempt.auth_rejection` names it beside the verdict; and the `HTTP 451` from
 that one subscription-backend path is neither a network nor a containment
-failure, and does not explain the contained run's routing-discovery failure.
-See [`CONTAINMENT.md`](CONTAINMENT.md) "Reading a canary verdict" for each
-observation.
+failure and does not explain the earlier routing-discovery failure. Likewise the
+`401 invalid_api_key` seen on `wss://api.openai.com` with a placeholder key was
+the WebSocket transport rejecting a placeholder key — it never exercised the
+HTTPS trust check, so it is not evidence that the platform-key route or any
+routing path worked. `credential_env` stays documented as the alternative route
+in the pin; the shipped route is the operator's session file.
 
 ## What this slice is
 
@@ -165,7 +158,7 @@ the pinned revision rather than against whatever is installed in the venv.
 | `integrations/dagster/agent_attempt.py` | Dagster-free: load the operator runtime pin, verify the executable digest, supervise one attempt, re-check patch evidence, write the durable attempt account next to the artifacts. |
 | `integrations/dagster/agent_location.py` | Dagster: job `software_agent_job` with `prepare_op` → `execute_op` → `verify_op`, resource `SoftwareAgentSettings`. Fails closed without `TACTUS_AGENT_WORKSPACE_ROOT`; no retry policy and `allow_retries=False`, so an agent is never silently re-run. |
 | `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, allowed scope, limits, and — since phase 2 — optional `artifacts`, `containment`, `env_allowlist` and `stdin_from`. The shipped fake pin declares **none** of those, so the attempt it describes runs uncontained; a pin that declares a launcher gets the boundary, verified at preflight. |
-| `config/agent-runtime-canary.json` | The operator canary's pin: the Codex CLI release tree and executable by digest, the launcher by digest, denied roots, `egress: open` for that run only, the runtime's recorded allowances (`ipc-posix-shm` plus the three named mach services it cannot start without — `com.apple.cfprefsd.daemon`, `com.apple.cfprefsd.agent`, `com.apple.SecurityServer`), and its credential: the operator's session file (`credential_file`, `~/.codex/auth.json`) staged into the run's own home at `0600` and removed when the attempt ends. Exactly one credential route may be configured; `credential_env` (`CODEX_API_KEY`, a scoped platform key) is the documented alternative. Run through `scripts/run-agent-canary.sh`. |
+| `config/agent-runtime-canary.json` | The operator canary's pin: the Codex CLI release tree and executable by digest, the launcher by digest (with the host it was recorded on), denied roots, `egress: open` for that run only, the runtime's recorded allowances (`ipc-posix-shm` plus the four named mach services it cannot run without — `com.apple.cfprefsd.daemon`, `com.apple.cfprefsd.agent`, `com.apple.SecurityServer`, `com.apple.trustd.agent`), and its credential: the operator's session file (`credential_file`, `~/.codex/auth.json`) staged into the run's own home at `0600` and removed when the attempt ends. Exactly one credential route may be configured; `credential_env` (`CODEX_API_KEY`, a scoped platform key) is the documented alternative. Run through `scripts/run-agent-canary.sh`. |
 | `scripts/run-agent-slice.sh`, `scripts/validate_agent_slice.py` | The evidence harness. |
 | `tests/integrations/dagster/test_agent_attempt.py` | Dagster-free tests: pin drift, unknown/missing pin keys, unpinned runtime refused before anything is touched, success with real workspace edit, crash, timeout, scope violation, route-capability mismatch, JSON-safe accounts. |
 

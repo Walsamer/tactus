@@ -71,29 +71,30 @@ this host: with `(allow default)` plus a file-level denial of `$HOME`,
 `security find-generic-password` still *answered* (`The specified item could not
 be found`); under `(deny default)` it fails at the XPC layer instead.
 
-### The three mach services the pinned runtime needs
+### The mach services the pinned runtime needs
 
 A deny-default profile is not free for a hosted runtime. Measured with
 `codex-cli 0.162.1` and the shipped pin's profile: with `ipc-posix-shm` alone the
 CLI cannot start at all — `thread/start failed: failed to load configuration:
 Failed to synchronize managed preferences (code -32600)` — because it
 synchronises its managed preferences through `cfprefsd`, which Mach IPC denial
-also closes. The canary pin therefore records exactly three named services and
+also closes. The canary pin therefore records exactly four named services and
 nothing else:
 
 | Allowance | Why the runtime needs it |
 |---|---|
 | `mach-lookup (global-name "com.apple.cfprefsd.daemon")` | managed-preferences sync (the `cfprefsd` daemon) |
 | `mach-lookup (global-name "com.apple.cfprefsd.agent")` | managed-preferences sync (the per-user agent) |
-| `mach-lookup (global-name "com.apple.SecurityServer")` | TLS trust evaluation via securityd; without it every HTTPS call fails `invalid peer certificate: UnknownIssuer` |
+| `mach-lookup (global-name "com.apple.SecurityServer")` | the Security framework: the keychain search list and the trust anchors; without it HTTPS fails `invalid peer certificate: UnknownIssuer` |
+| `mach-lookup (global-name "com.apple.trustd.agent")` | TLS trust evaluation for HTTPS. Without it **every** HTTPS request fails at the transport (`error sending request`), so workspace routing discovery never completes and the attempt dies before the model call — measured 2026-11-02, see "Reading a canary verdict" |
 
-The honest sentence is this: **the CLI cannot start under a deny-default profile
-without them, so the profile grants three named mach services and nothing else.**
-A blanket `(allow mach-lookup)` is exactly what must not land, and does not:
-allowances are listed in the pin file, so each one is reviewable and cannot grow
-silently.
+The honest sentence is this: **the CLI can neither start nor make an HTTPS
+request under a deny-default profile without them**, so the profile grants four
+named mach services and nothing else. A blanket `(allow mach-lookup)` is exactly
+what must not land, and does not: allowances are listed in the pin file, so each
+one is reviewable and cannot grow silently.
 
-What those three services do and do not grant the child is measured, not assumed
+What those four services do and do not grant the child is measured, not assumed
 (see "Measured on this host"). In short: the child can now *use* the Security
 framework and its own preferences domain — it can talk to securityd, list its
 keychain search list (`/Library/Keychains/System.keychain`), and create and use a
@@ -162,13 +163,16 @@ These are the denials the matrix observes, run as real children:
 | read `~/Library/Keychains/login.keychain-db` | `Operation not permitted` — the keychain *store* stays denied at the file level even with `SecurityServer` allowed |
 | read the Ictus checkout on `/Volumes` | `Operation not permitted` |
 | `ssh-add -l` | `Error connecting to agent: Operation not permitted` |
-| `security find-generic-password` | refused at the XPC layer (Keychain closed) **only** while no mach allowance is declared. With the canary's three services it reaches securityd: `security list-keychains` answers `/Library/Keychains/System.keychain`, a keychain *file* can be created in the writable workspace, an item added to it and read back. No operator item is readable without its ACL, and the operator's stores are unreadable (row above) |
+| `security find-generic-password` | refused at the XPC layer (Keychain closed) **only** while no mach allowance is declared. With the canary's mach allowances it reaches securityd: `security list-keychains` answers `/Library/Keychains/System.keychain`, a keychain *file* can be created in the writable workspace, an item added to it and read back. No operator item is readable without its ACL, and the operator's stores are unreadable (row above) |
 | `defaults read com.apple.dock` | `Domain not found` — the child's `HOME` is attempt-local, so it syncs its own preferences domain, not the operator's |
 | `gh auth status` | `not logged into any GitHub hosts` (no credential reachable) |
 | outbound connect, deny egress | `EPERM` |
 | start the pinned CLI under the profile with `ipc-posix-shm` only | `Failed to synchronize managed preferences (code -32600)` — never reaches the model call |
-| the same with the three named mach services, a bogus platform key | reaches the model call: `401 Unauthorized … auth error code: invalid_api_key` on `wss://api.openai.com/v1/responses` |
-| the same with the operator's session file staged | auth accepted (no 401); the contained attempt ends before the model call: `workspace routing discovery failed` against `chatgpt.com/backend-api/ps/mcp`, retried 5/5, then `turn.failed` |
+| the same with the mach services then recorded, a bogus platform key | the WebSocket transport reaches the endpoint and is rejected: `401 Unauthorized … auth error code: invalid_api_key` on `wss://api.openai.com/v1/responses`. That path never exercised the HTTPS trust check, so it says nothing about routing |
+| the same with the operator's session file staged, four mach services | auth accepted (no 401); the contained attempt ends before the model call: `workspace routing discovery failed` against `chatgpt.com/backend-api/ps/mcp`, retried 5/5, then `turn.failed` |
+| the same, with `mach-lookup com.apple.SystemConfiguration.configd` added instead | byte-identical failure (exit 1, 18.8 s, empty patch): added, changed nothing, removed again |
+| the same, with `mach-lookup com.apple.trustd.agent` added | the edit completes: exit 0, 11.8 s, `src/calc.py` and `tests/test_calc.py`, patch 742 B applying to a pristine copy, 41 560 input / 323 output tokens, matrix still 8/8 |
+| the pin as landed (`ipc-posix-shm` plus the four mach services) | the edit completes: exit 0, 14.8 s, matrix 8/8, exactly `src/calc.py` and `tests/test_calc.py`, patch 742 B applying to a pristine copy, push inside the boundary refused, survivors clear, credential removed, 41 516 input / 384 output tokens |
 | the same staged home and argv (`HOME` seeded with `.codex/auth.json` alone, no `config.toml`) with **no** boundary | the edit completes: exit 0, 11.5 s, exactly `src/calc.py` and `tests/test_calc.py`, no 401 and no `ps/mcp` request at all |
 | `curl` of that endpoint, in the attempt's own profile and uncontained | `451`, `{"message":"no_biscuit_no_service"}`, both ways; sibling paths `/backend-api/me` `401`, `/models` and `/conversation/init` `403` |
 | `git push` to a remote outside the workspace | rejected; the remote's ref list is unchanged |
@@ -198,23 +202,39 @@ The rows above that an operator can misread are spelled out:
   or that the pinned CLI is out of step: the authenticated CLI run outside the
   boundary never requests that path at all and completes the edit.
 
-The real question is the failure the contained run actually reports, and it is
-open:
+#### What the failure was, and how it was found (2026-11-02)
 
-* **The contained attempt ends before the model call, at `workspace routing
+* **The contained attempt ended before the model call, at `workspace routing
   discovery failed`**, retried five times against
-  `chatgpt.com/backend-api/ps/mcp`, then `turn.failed` (measured 2026-11-02: exit
-  1 after 19 s, `attempt.auth_rejection.detected` `false`, no 401 anywhere, patch
-  empty). The authenticated CLI outside the boundary, with the operator's own
-  login, completes the same task; and **with the same staged home and argv** —
-  `HOME` seeded with `.codex/auth.json` alone, no `config.toml`, the same fixture
-  and the same supervisor `containment=None` — it completes it too (exit 0,
-  11.5 s, exactly the two intended files, no `ps/mcp` request). So the staged
-  credential alone is not the cause: **the difference lies inside the
-  boundary**, and which denial produces it is not identified. No allowance was
-  added to find out, because the recorded allowances are a measured list and
-  changing them is an operator decision, not a canary one; the next step is that
-  controlled experiment, and its result belongs in the table above.
+  `chatgpt.com/backend-api/ps/mcp`, then `turn.failed` (exit 1 after 19 s,
+  `attempt.auth_rejection.detected` `false`, no 401 anywhere, patch empty). The
+  authenticated CLI outside the boundary completes the same task; and **with the
+  same staged home and argv** — `HOME` seeded with `.codex/auth.json` alone, no
+  `config.toml`, the same fixture, `containment=None` — it completes it too (exit
+  0, 11.5 s, exactly the two files, no `ps/mcp` request). The credential, the
+  network and the OS update are therefore all exonerated, and the difference was
+  inside the boundary.
+* **The kernel named the denial.** `log show` for the failing attempt's window
+  gives one `codex` denial per failing run and none in the run that passes:
+  `deny(1) mach-lookup com.apple.trustd.agent`. TLS trust evaluation is a Mach
+  service in this profile, so every HTTPS request failed at the transport
+  (`error sending request`), routing discovery could not complete, and the
+  attempt died before the model call. `system-info net.link.addr`,
+  `system-info vfs.disk-space` and `mach-lookup com.apple.SystemConfiguration.configd`
+  were denied too and are noise: they stay denied in the run that passes.
+* **One allowance fixed it, and nothing else moved.** `TMPDIR` was already
+  attempt-local and inside the write allowlist (no temp-file denial appears in any
+  log), so there was no environmental candidate. `configd` was added first: the
+  failure was byte-identical, and it was removed again. `trustd.agent` was added
+  next: the attempt completes, and the matrix still holds 8/8 with it. The pin as
+  landed carries that fifth allowance, and the shipped configuration now
+  completes its edit (exit 0, 14.8 s, patch applying to a pristine copy).
+* **What that allowance costs.** It lets the child ask the user's trust daemon to
+  evaluate certificate chains: a small CPU/OCSP surface under an egress window
+  that is already open for this run, with trust settings read-only to it. It
+  grants no file access, no credential and no egress the profile does not already
+  have; the keychain stores stay denied at the file level, and individual items
+  stay gated by their ACLs.
 
 Cost, measured rather than estimated: **8 checks in 0.17–0.18 s** (two runs, this
 host) per attempt; artifact digest **~1.0 s** for a single 246 MB binary, **~3.8 s
@@ -336,15 +356,16 @@ suite, both jobs' tests included.
   a silent weakening is not possible, because every claim above is a check that
   must pass before a spawn.
 * **Allowances are permissions too.** Codex 0.162.1 needs `(allow ipc-posix-shm)`
-  to start a thread under `(deny default)`, and three named mach services
+  to start a thread under `(deny default)`, and four named mach services
   (`com.apple.cfprefsd.daemon`, `com.apple.cfprefsd.agent`,
-  `com.apple.SecurityServer`) before it can load its configuration or evaluate
-  TLS trust at all — see "The three mach services the pinned runtime needs". They
-  are a same-user shared-memory channel, two preferences daemons and securityd:
-  enough to use the Security framework and its own preferences domain, not enough
-  to read the operator's keychain stores (measured above). Pinned runtimes record
-  their allowances in the pin file, so an allowance can be reviewed and cannot
-  grow silently. Pi 1.3.0 needs none.
+  `com.apple.SecurityServer`, `com.apple.trustd.agent`) before it can load its
+  configuration, use the Security framework or evaluate TLS trust at all — see
+  "The mach services the pinned runtime needs". They are a same-user shared-memory
+  channel, two preferences daemons, securityd and the per-user trust daemon:
+  enough to use the Security framework, its own preferences domain and a TLS
+  handshake, not enough to read the operator's keychain stores (measured above).
+  Pinned runtimes record their allowances in the pin file, so an allowance can be
+  reviewed and cannot grow silently. Pi 1.3.0 needs none.
 * **Survivors are found by two checks, and neither is complete.** The marker
   sweep reads `ps -E`, which on macOS does not expose the environment of every
   binary, so a leftover `/bin/sleep` or `/bin/sh` helper is invisible to it — and

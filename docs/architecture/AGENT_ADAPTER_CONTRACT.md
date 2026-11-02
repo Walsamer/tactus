@@ -4,11 +4,12 @@ Status: **contract version `1.1.0` implemented and tested; the OS boundary behin
 it is enforced and proven with real child processes** (see
 [`CONTAINMENT.md`](CONTAINMENT.md)). No real coding agent is launched on this
 route: the only pinned runtime here is the deterministic fake agent. The one
-real-runtime canary is an operator command and has been run — the pinned CLI
-starts inside the boundary and authenticates with one operator-designated session
-credential staged into the run's own home and removed when the attempt ends; it
-then ends before the model call, and "Remaining gates" says what that leaves
-open.
+real-runtime canary is an operator command and has been run: the pinned CLI
+starts inside the boundary, authenticates with one operator-designated session
+credential staged into the run's own home and removed when the attempt ends, and
+completes its one edit — which needed a fourth recorded mach allowance,
+`com.apple.trustd.agent` (TLS trust evaluation), named by the kernel log as the
+denial behind the earlier routing-discovery failure.
 
 The adapter now has a **caller**: the Tactus-owned Dagster code location
 (`integrations/dagster/agent_location.py`) executes exactly one attempt per
@@ -149,18 +150,20 @@ Neither suite calls a model.
 
 ## Remaining gates (explicit, not implied)
 
-1. **The real-runtime canary's containment is measured; its edit is not.** The
-   operator's run authenticates inside the boundary and ends before the model
-   call at `workspace routing discovery failed`, against
-   `chatgpt.com/backend-api/ps/mcp`; the same staged home and argv outside the
-   boundary complete the edit, so the staged credential alone is not the cause
-   and the difference lies inside the boundary — *which* denial it is remains
-   unknown. That path answers `HTTP 451` (`{"message":"no_biscuit_no_service"}`)
-   with its siblings answering `401`/`403`, identically inside and outside the
-   boundary, so the 451 is neither a network nor a boundary failure and does not
-   explain the routing failure. The platform-key route returns
-   `401 Unauthorized` for a placeholder key. Until a run completes one edit, no
-   patch, push refusal and token account have been observed for a real runtime.
+1. **The real-runtime canary's containment is measured, and its edit is
+   observed once.** The operator's run reaches the model call inside the
+   boundary, changes exactly the two intended files and leaves a patch that
+   applies to a pristine copy — with the fourth recorded allowance,
+   `com.apple.trustd.agent`. The denial that had blocked it is named rather than
+   unknown: the kernel log shows `mach-lookup com.apple.trustd.agent` denied in
+   every failing run and none that passed, so every HTTPS request failed at the
+   transport (`configd` was tried first, changed nothing and was removed again).
+   The `HTTP 451` on `chatgpt.com/backend-api/ps/mcp` is answered identically
+   inside and outside the boundary and explains nothing about it, and the earlier
+   `401 invalid_api_key` on `wss://api.openai.com` was a WebSocket auth rejection
+   that never exercised the HTTPS trust check. What is still not measured is a
+   *second* completed edit: the push refusal and the token account are observed
+   once, for one attempt.
 2. **The egress posture is the canary's, not the default.** Standing posture is
    `deny network*`, or one `localhost:<port>` for a locally served model; open
    egress exists for the length of the approved canary only, and the rendered

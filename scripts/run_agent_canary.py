@@ -55,21 +55,22 @@ The evidence says which failure happened, and none of them is guessed:
   verdict. The deadline is the real bound and is never shortened to make a verdict
   prettier;
 * an **attempt that ends before the model call**, at ``workspace routing discovery
-  failed`` against ``chatgpt.com/backend-api/ps/mcp``. Measured 2026-11-02: the
-  same staged home (``HOME`` seeded with ``.codex/auth.json`` alone, no
-  ``config.toml``) and the same argv, run *outside* the boundary, complete the
-  edit — exit 0, no 401, no ``ps/mcp`` request at all — while the contained run
-  fails there. The staged credential alone is therefore not the cause; the
-  difference lies inside the boundary, and *which* denial does it is unknown
-  (``CONTAINMENT.md`` "Reading a canary verdict"). The unauthenticated ``HTTP
-  451`` that path returns, with ``{"message":"no_biscuit_no_service"}`` while its
+  failed`` against ``chatgpt.com/backend-api/ps/mcp``. Measured 2026-11-02 and
+  then diagnosed: the kernel log names ``mach-lookup com.apple.trustd.agent``
+  (TLS trust evaluation) as denied in every failing run and in none that passed,
+  so every HTTPS request fails at the transport until that allowance is recorded.
+  `configd` was tried first, changed nothing and was removed again, and the same
+  staged home with the same argv completes the edit outside the boundary — the
+  credential and the network are exonerated. The unauthenticated ``HTTP 451``
+  that path returns, with ``{"message":"no_biscuit_no_service"}`` while its
   sibling paths answer ``401``/``403``, is answered identically inside and
-  outside the boundary, so it neither proves a broken endpoint nor explains the
+  outside the boundary: it neither proves a broken endpoint nor explains the
   failure.
 
-The environment route (``credential_env``) reaches ``api.openai.com`` instead, which
-is the route that gets further: a dummy platform key fails at the model call with
-``401 … invalid_api_key``.
+The environment route (``credential_env``) reaches ``api.openai.com`` instead; a
+dummy platform key is rejected at the model call with ``401 … invalid_api_key``,
+but that rejection travels the WebSocket path and never exercises the HTTPS trust
+check, so it is not evidence that routing works.
 
 The pinned runtime's argv
 -------------------------
