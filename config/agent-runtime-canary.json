@@ -18,7 +18,8 @@
   "launcher": {
     "path": "/usr/bin/sandbox-exec",
     "argv_prefix": ["/usr/bin/sandbox-exec", "-f", "{profile}"],
-    "sha256": "58839ef01b4eef8aac0d2aa8f9d1c074ae45aafe3533965b030672450064acc8"
+    "sha256": "10cf4a46a575e4747d2419cf343800db0d11ae6e6e9b8415998d3d8f336b2a92",
+    "recorded_on": "macOS 27.2 (26B123)"
   },
   "executable": "/Users/samueleder/.codex/packages/standalone/releases/0.162.1-aarch64-apple-darwin/bin/codex",
   "executable_sha256": "74c6a6d263f40d65f99c27a815275f5b4ed0bcc2baecc396b4cf3255498bdfc0",
@@ -66,7 +67,8 @@
       "ipc-posix-shm",
       "mach-lookup (global-name \"com.apple.cfprefsd.daemon\")",
       "mach-lookup (global-name \"com.apple.cfprefsd.agent\")",
-      "mach-lookup (global-name \"com.apple.SecurityServer\")"
+      "mach-lookup (global-name \"com.apple.SecurityServer\")",
+      "mach-lookup (global-name \"com.apple.trustd.agent\")"
     ],
     "denied_roots": [
       {

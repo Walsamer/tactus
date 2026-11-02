@@ -338,6 +338,7 @@ def _containment_block(tmp_path: Path, launcher: attempt.Launcher) -> dict:
             "path": str(launcher.path),
             "argv_prefix": list(launcher.argv_prefix),
             "sha256": launcher.sha256,
+            "recorded_on": "macOS 0.0 (TESTBUILD)",
         },
         "denied_roots": [{"path": str(denied), "reason": "operator home"}],
         "egress": {"mode": "deny"},

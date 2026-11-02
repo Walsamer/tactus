@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -168,6 +169,7 @@ def _pin(
             "sha256": hashlib.sha256(launcher.read_bytes()).hexdigest()
             if launcher.is_file()
             else "",
+            "recorded_on": "macOS 0.0 (TESTBUILD)",
         },
         "executable": str(executable),
         "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
@@ -431,11 +433,13 @@ def test_the_shipped_pin_takes_the_operator_session_file() -> None:
 def test_the_shipped_pin_records_the_mach_services_the_runtime_needs(
     tmp_path: Path,
 ) -> None:
-    """Exactly the three named mach services, and no blanket mach grant.
+    """Exactly the four named mach services, and no blanket mach grant.
 
-    Measured: under the shipped allowances the pinned CLI reaches the model call;
-    with `ipc-posix-shm` alone it fails to load its configuration. The pin is the
-    record of that measurement, so it is asserted there rather than inferred.
+    Measured: with `ipc-posix-shm` alone the CLI fails to load its configuration;
+    without `trustd.agent` every HTTPS request fails at the transport, so routing
+    discovery never completes and the attempt dies before the model call. The pin
+    is the record of those measurements, so it is asserted there rather than
+    inferred.
     """
     shipped = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
     assert shipped["containment"]["allowances"] == [
@@ -443,6 +447,7 @@ def test_the_shipped_pin_records_the_mach_services_the_runtime_needs(
         'mach-lookup (global-name "com.apple.cfprefsd.daemon")',
         'mach-lookup (global-name "com.apple.cfprefsd.agent")',
         'mach-lookup (global-name "com.apple.SecurityServer")',
+        'mach-lookup (global-name "com.apple.trustd.agent")',
     ]
 
     policy = ContainmentPolicy(
@@ -460,6 +465,7 @@ def test_the_shipped_pin_records_the_mach_services_the_runtime_needs(
         "com.apple.cfprefsd.daemon",
         "com.apple.cfprefsd.agent",
         "com.apple.SecurityServer",
+        "com.apple.trustd.agent",
     ):
         assert f'(allow mach-lookup (global-name "{name}"))' in text
     # The blanket grant is exactly what must not land.
@@ -471,6 +477,38 @@ def test_the_shipped_pin_denies_the_operator_keychain_and_codex_home() -> None:
     pin = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
     denied = {root["path"] for root in pin["containment"]["denied_roots"]}
     assert {"~", "~/.ssh", "~/.codex", "~/Library/Keychains"} <= denied
+
+
+def test_the_shipped_pin_records_the_host_its_launcher_digest_belongs_to() -> None:
+    """The digest is not a universal value: it belongs to one OS build.
+
+    A macOS update replaces `/usr/bin/sandbox-exec`, so the pin names the host the
+    digest was recorded on and a preflight mismatch can name both sides. Without
+    that, the message is two bare digests and the next operator has to guess.
+    """
+    shipped = json.loads(SHIPPED_PIN.read_text(encoding="utf-8"))
+    launcher = shipped["launcher"]
+    assert re.fullmatch(r"macOS \d+\.\d+ \([0-9A-Za-z]+\)", launcher["recorded_on"]), launcher
+    assert len(launcher["sha256"]) == 64
+
+
+def test_a_launcher_pinned_by_digest_must_record_its_host(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Refused, not filled in: a digest without its host is the rubber stamp."""
+    pin = _pin(tmp_path)
+    config = json.loads(pin.read_text(encoding="utf-8"))
+    config["launcher"].pop("recorded_on")
+    pin.write_text(json.dumps(config), encoding="utf-8")
+
+    code = command.main(
+        ["--dry-run", "--approve", "--operator", "tester", *_arguments(tmp_path, pin)]
+    )
+
+    captured = capsys.readouterr()
+    assert code == command.EXIT_REFUSED
+    assert "does not record the host" in captured.err
+    assert not (tmp_path / "stage").exists()
 
 
 # -- staging ---------------------------------------------------------------

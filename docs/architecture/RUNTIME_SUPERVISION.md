@@ -260,13 +260,19 @@ What is still open, and why no real agent is started:
    `result_contract`, so a pin that names a launcher gets the boundary
    (`integrations/dagster/agent_attempt.py`). The only real-runtime pin is the
    canary's own (`config/agent-runtime-canary.json`), run by hand.
-2. **The canary reaches the model call, and has not yet produced an edit.** Open
-   egress for one approved run plus the operator's session file get the pinned CLI
-   to the model endpoint inside the boundary; on this network the subscription
-   backend answers `HTTP 451` (in and outside the boundary alike), and the
-   platform-key route is rejected only when the key is a placeholder. A completed
-   edit needs either a network that reaches the subscription backend or a scoped
-   platform key.
+2. **The canary completes one edit, and only as an operator command.** Open
+   egress for one approved run plus the operator's session file plus four
+   recorded mach allowances (the fourth is `com.apple.trustd.agent`, TLS trust
+   evaluation) get the pinned CLI through routing discovery, through the model
+   call, and to a patch: the attempt changed exactly the two intended files and
+   left a patch that applies to a pristine copy. The failure that preceded it was
+   named by the kernel — `mach-lookup com.apple.trustd.agent`, denied in every
+   failing run and in none that passed — so every HTTPS request had failed at the
+   transport; `configd` was tried first, changed nothing and was removed again.
+   The 451 on `chatgpt.com/backend-api/ps/mcp` is answered identically inside and
+   outside the boundary and explains nothing about it, and the earlier
+   `401 invalid_api_key` on `wss://api.openai.com` was a WebSocket auth rejection
+   that never exercised the trust check.
 3. **The durable half waits on Ictus B4** (see
    [`AGENT_EXECUTION_SLICE.md`](AGENT_EXECUTION_SLICE.md)); it is proven only in a
    throwaway clone.
