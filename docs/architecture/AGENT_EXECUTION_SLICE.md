@@ -2,7 +2,7 @@
 
 Status: **the Tactus half is implemented, tested and runnable, and the boundary an
 attempt can run behind is now enforced and proven without a model call; the
-durable link waits on one Ictus change that is agreed and scheduled (B4).** The
+durable link reaches Ictus's runtime seam, which landed at Ictus `67877fb`.** The
 pinned runtime is still the deterministic **fake** agent: no model provider, no
 credentials, no publication — and, in this slice, still no containment, because
 its pin pins no launcher. Issue #22 is **not** closed by this slice.
@@ -80,7 +80,7 @@ The job itself is a **fail-closed placeholder**: one step that always raises wit
 `allow_retries=False`. That is deliberate — "a real implementation must be
 registered by a capable backend" — and this slice is that backend.
 
-## The seam, and why it is a contract (blocked dependency B4)
+## The seam: Ictus's port, registered here (B4, landed)
 
 Dagster records the execution plan from **Ictus's** job definition when the run
 is created, then replays it in whichever code location the environment names: the
@@ -88,39 +88,48 @@ recorded **step selection** and snapshots are replayed, while the plan itself is
 rebuilt from the location's own job. Identical step names are therefore
 *necessary* — and, as the experiment below shows, sufficient in practice — but
 they are not a guarantee that Ictus's recorded graph is what executes. The
-pinned placeholder carries one step:
+pinned job used to carry one placeholder step, and a run recorded against it
+could not execute in a location that declared a different graph:
 
-| | pinned Ictus `software_agent_job` | Tactus `software_agent_job` |
+| | pinned Ictus `software_agent_job` (before B4) | the Tactus code location (now) |
 |---|---|---|
-| steps | `software_agent_placeholder_op` | `prepare_op` → `execute_op` → `verify_op` |
-| resource key | `software_agent_settings` | `software_agent_settings` |
+| steps | `software_agent_placeholder_op` | Ictus's `software_agent_{prepare,execute,verify,finalize}_op` — registered, not defined |
+| resource key | `software_agent_settings` | `software_agent_settings`, re-bound so `runtime_seam` is a resource default |
 
-A run submitted against the pinned revision fails with
-`DagsterExecutionStepNotFoundError: Can not build subset plan from unknown step:
-software_agent_placeholder_op`. The two honest ways out are *renaming the Tactus
-steps to impersonate the placeholder* (which would also relabel every failure as
-`INTEGRATION_CONFLICT` through the bridge's `FAILED_STEP_CATEGORY` table — a
-mislabelled fact fed to Ictus) or **giving the Ictus job a real skeleton**.
+**B4 landed at the pinned revision `67877fb`.** `software_agent_job` and
+`software_publish_job` now carry a `prepare → execute → verify → finalize`
+skeleton and reach a runtime only through a port named in an operator-owned
+configuration file (`contracts/runtime-seam.schema.json`).
 
-**B4 (Ictus-owned, agreed and scheduled, not implementable from a Tactus Work
-Order):** replace the placeholder step of `software_agent_job` with a contract
-skeleton of the same kind `capability_execution_job` already uses for foreign
-backends, keeping the placeholder behaviour as the fail-closed default until a
-backend implements it. Ictus has taken this as its next slice, together with the
-identical change for `software_publish_job` (Issue #23), and will express the
-runtime seam as a port named in configuration — **no Ictus dependency on Tactus
-code**. The seam requirements sent to Ictus are exactly the contract this
-location already satisfies:
+`agent_location.py` therefore defines no graph at all any more: it registers
+Ictus's two jobs unchanged and supplies the seam path as a **class-level
+default** on the settings resource. The class is the point —
+`ictus_dagster/submission.py::_run_config` always writes that resource's
+run-config block, and a run-config document *replaces* a
+`ConfigurableResource`'s instance values and falls back to the class defaults. An
+instance-only default is wiped by the bridge's own run config; a class default is
+what survives it. Unset, `runtime_seam` is `None` and the route keeps
+Ictus's exact fail-closed placeholder failure, `INTEGRATION_CONFLICT` and
+non-retryable.
 
-| Requirement | Value Tactus implements |
+That did require Tactus code, and the earlier claim that it would not is deleted
+rather than softened:
+
+| Requirement | What Tactus supplies |
 |---|---|
-| step keys | `prepare_op` → `execute_op` → `verify_op` (one dict in/out each) |
-| resource key | `software_agent_settings` |
-| settings shape | what the pinned mapper emits: `{"capability", "placeholder"}` |
-| failure vocabulary | the bridge's `FAILED_STEP_CATEGORY` names, so a failure is normalized by Ictus's table |
+| step keys | none of its own: it registers Ictus's two jobs unchanged |
+| backend | `agent_backend:create_backend`, implementing `describe_workspace` / `execute` / `verify` |
+| evidence | `runtime-evidence.schema.json`, translated from the supervisor's own account |
+| bounds | none in the runtime pin: `write_scope`, the wall clock and the step budget arrive on the attempt request, and the pin carries only identity plus `runtime_caps`, which the runtime enforces itself and which can only be **tighter** than the seam's bounds, never a second opinion about them |
 
-Once that lands, `scripts/run-agent-slice.sh` switches to durable submission
-automatically (see "Modes" below) and no Tactus code changes.
+What this repository cannot establish, and does not claim: it has no Dagster
+dependency (`pyproject.toml` declares none), no Ictus worker, no queued
+coordinator and no Dagster instance, so it can show that the backend satisfies
+the published contract and that the registered jobs have the pinned step keys —
+and nothing at all about a run executing. `scripts/validate_agent_slice.py`
+remains the tool that measures the durable path where a deployment exists, and
+`tests/integrations/ictus/test_runtime_seam_conformance.py` measures the contract
+against the pinned artifact.
 
 Evidence that the rest of the chain already works, from two throwaway experiments
 (neither committed):
@@ -156,8 +165,9 @@ the pinned revision rather than against whatever is installed in the venv.
 | Path | Purpose |
 |---|---|
 | `integrations/dagster/agent_attempt.py` | Dagster-free: load the operator runtime pin, verify the executable digest, supervise one attempt, re-check patch evidence, write the durable attempt account next to the artifacts. |
-| `integrations/dagster/agent_location.py` | Dagster: job `software_agent_job` with `prepare_op` → `execute_op` → `verify_op`, resource `SoftwareAgentSettings`. Fails closed without `TACTUS_AGENT_WORKSPACE_ROOT`; no retry policy and `allow_retries=False`, so an agent is never silently re-run. |
-| `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, allowed scope, limits, and — since phase 2 — optional `artifacts`, `containment`, `env_allowlist` and `stdin_from`. The shipped fake pin declares **none** of those, so the attempt it describes runs uncontained; a pin that declares a launcher gets the boundary, verified at preflight. |
+| `integrations/dagster/agent_location.py` | Dagster: registers Ictus's `software_agent_job` and `software_publish_job` unchanged and re-binds their settings resources so `runtime_seam` (from `TACTUS_RUNTIME_SEAM`) is a resource default — `None` when unset, which keeps Ictus's fail-closed placeholder. Defines no steps of its own. |
+| `integrations/dagster/agent_backend.py` | Dagster-free: the seam backend Ictus resolves by name (`agent_backend:create_backend`). Runs one supervised attempt through the pin and reports it as `runtime-evidence.schema.json`. It does not use `control.spawn`; the supervisor owns the child's process group and confirms its termination. |
+| `config/agent-runtime.json` | Operator-owned runtime pin (the analogue of `config/stax-pin.json`): runtime id/kind, adapter, executable path, exact SHA-256, argv and probe templates, expected version token, `runtime_caps`, and — since phase 2 — optional `artifacts`, `containment`, `env_allowlist` and `stdin_from`. It declares **no** write scope, deadline or step budget: those are the attempt's bounds and arrive on the attempt request. The shipped fake pin declares no launcher, so the attempt it describes runs uncontained; a pin that declares a launcher gets the boundary, verified at preflight. |
 | `config/agent-runtime-canary.json` | The operator canary's pin: the Codex CLI release tree and executable by digest, the launcher by digest (with the host it was recorded on), denied roots, `egress: open` for that run only, the runtime's recorded allowances (`ipc-posix-shm` plus the four named mach services it cannot run without — `com.apple.cfprefsd.daemon`, `com.apple.cfprefsd.agent`, `com.apple.SecurityServer`, `com.apple.trustd.agent`), and its credential: the operator's session file (`credential_file`, `~/.codex/auth.json`) staged into the run's own home at `0600` and removed when the attempt ends. Exactly one credential route may be configured; `credential_env` (`CODEX_API_KEY`, a scoped platform key) is the documented alternative. Run through `scripts/run-agent-canary.sh`. |
 | `scripts/run-agent-slice.sh`, `scripts/validate_agent_slice.py` | The evidence harness. |
 | `tests/integrations/dagster/test_agent_attempt.py` | Dagster-free tests: pin drift, unknown/missing pin keys, unpinned runtime refused before anything is touched, success with real workspace edit, crash, timeout, scope violation, route-capability mismatch, JSON-safe accounts. |
@@ -168,16 +178,25 @@ model or anything else that is a pinnable artifact with a probe and a protocol �
 selecting one is a reviewed change to that file, not a code change. The
 deterministic fake agent is the only runtime pinned today.
 
-Step names matter: the bridge normalizes a failure by step key
-(`execute_op` → `PROCESS_CRASH`, `verify_op` → `VERIFICATION_FAILURE`), so this
-location never reclassifies a failure and never invents a category.
+Failures are typed, not inferred from a step name. Ictus's seam raises a
+`Failure` with `allow_retries=False` and an `ictus.failure_category` on every
+path, and the bridge reports that typed category in preference to guessing one
+from the step key — so `SCOPE_VIOLATION`, `WALL_CLOCK_EXCEEDED`,
+`TERMINATION_UNCONFIRMED` and the rest reach a control plane as typed metadata,
+and the **category** is what crosses into an `ExecutionResult`. This location
+never reclassifies a failure and never invents a category. One kind is currently
+reported more coarsely than it could be: a write-scope escape the supervisor
+detects arrives as `RUNTIME_VERIFICATION_FAILED` rather than `SCOPE_VIOLATION`.
+Both map to `VERIFICATION_FAILURE`, and the category does not change, but the
+kind a recovery decision would key on is lost.
 
-Runtime selection, workspace and limits come from the operator pin and the
-process environment, **never** from the intent: the pinned mapper sends only
-`{"capability", "placeholder"}`, `placeholder` is unused, and `capability` is
-only *checked* against this location's route constant — a run config naming any
-other capability fails closed, and the attempt's capability is always the
-constant, never the incoming label.
+The runtime backend and the working workspace come from operator configuration —
+the seam file named by `TACTUS_RUNTIME_SEAM` and `TACTUS_AGENT_WORKSPACE_ROOT` —
+and the attempt's bounds (write scope, wall clock, step budget) from the request
+Ictus constructs, **never** from the intent: the pinned mapper sends only
+`{"capability", "placeholder"}`, `placeholder` is unused, and the backend refuses
+any capability but `software.implement` — a promotion routed at this backend
+fails closed rather than reporting a publication that never happened.
 
 ## Modes of the harness
 
@@ -187,7 +206,7 @@ proved in the evidence file:
 | Mode | When | What it proves |
 |---|---|---|
 | `durable-submission` | pinned job steps equal the Tactus location's steps | The whole chain, including durable submission through the pinned bridge and Tactus applying the terminal result exactly once. |
-| `in-process` | the pinned job still has only the placeholder step (today, until B4 lands) | A real Ictus ALLOW + intent for `software.implement`, a real Dagster execution of the Tactus job, one supervised attempt under the pin, and a recorded patch that applies to a clean copy of the original workspace. `blocked_dependencies` names B4. |
+| `in-process` | the deployment configures no seam, so the route keeps Ictus's placeholder failure | A real Ictus ALLOW + intent for `software.implement`, a real Dagster execution of Ictus's registered job, one supervised attempt under the pin, and a recorded patch that applies to a clean copy of the original workspace. `blocked_dependencies` reports the seam probe's own verdict. |
 
 Tactus's own result-application path is already proven by
 `scripts/run-execution-slice.sh` for the generic capability, so the in-process

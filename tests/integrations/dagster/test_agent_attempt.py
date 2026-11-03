@@ -68,19 +68,30 @@ def _workspace(tmp_path: Path) -> Path:
     return root
 
 
-def _run(tmp_path: Path, *, mode: str = "edit", limits: dict | None = None, **overrides):
+def _run(
+    tmp_path: Path,
+    *,
+    mode: str = "edit",
+    runtime_caps: dict | None = None,
+    wall_clock_seconds: float = 120.0,
+    cancelled=None,
+    **overrides,
+):
     config = _config(mode=mode, **overrides)
-    if limits is not None:
-        config["limits"] = {**_shipped()["limits"], **limits}
+    if runtime_caps is not None:
+        config["runtime_caps"] = {**_shipped()["runtime_caps"], **runtime_caps}
     config_path = _write_config(tmp_path, config)
     return attempt.run_agent_attempt(
         intent_id="intent:agent-slice",
         capability="software.implement",
         attempt=1,
         workspace_root=_workspace(tmp_path),
+        write_scope=("src",),
+        wall_clock_seconds=wall_clock_seconds,
         repo_root=REPO_ROOT,
         config_path=config_path,
         state_dir=tmp_path / "state",
+        cancelled=cancelled,
     )
 
 
@@ -96,11 +107,15 @@ def test_shipped_config_pins_the_repository_agent_exactly():
     assert pin.runtime_kind == "fake-canary"
     assert pin.executable == FAKE_AGENT.resolve()
     assert pin.executable_sha256 == hashlib.sha256(FAKE_AGENT.read_bytes()).hexdigest()
-    assert pin.allowed_scope == ("src",)
     assert pin.expected_version_token == "fake-workspace-agent 1.0.0"
     assert pin.argv[0] == str(FAKE_AGENT.resolve())
     assert attempt.REQUEST_PLACEHOLDER in pin.argv
-    assert pin.limits.timeout_seconds > 0 and pin.limits.max_changed_paths >= 1
+    assert pin.runtime_caps.max_changed_paths >= 1
+    serialized = pin.as_dict()
+    assert serialized["runtime_caps"] == _shipped()["runtime_caps"]
+    assert "allowed_scope" not in serialized
+    assert "limits" not in serialized
+    assert "timeout_seconds" not in serialized["runtime_caps"]
     # The pin is data for a descriptor the supervisor can execute unchanged.
     descriptor = pin.descriptor()
     assert descriptor.executable == str(FAKE_AGENT.resolve())
@@ -127,7 +142,7 @@ def test_pin_rejects_unknown_keys_missing_keys_and_bad_argv(tmp_path):
         attempt.load_agent_runtime_pin(_write_config(tmp_path, unknown), repo_root=REPO_ROOT)
 
     incomplete = _config()
-    incomplete.pop("allowed_scope")
+    incomplete.pop("runtime_id")
     with pytest.raises(attempt.AgentRuntimePinError, match="missing required keys"):
         attempt.load_agent_runtime_pin(
             _write_config(tmp_path, incomplete), repo_root=REPO_ROOT
@@ -157,6 +172,8 @@ def test_unpinned_runtime_is_refused_before_anything_is_touched(tmp_path):
             capability="software.implement",
             attempt=1,
             workspace_root=workspace,
+            write_scope=("src",),
+            wall_clock_seconds=120.0,
             repo_root=REPO_ROOT,
             config_path=config_path,
             state_dir=tmp_path / "state",
@@ -184,6 +201,7 @@ def test_attempt_runs_the_pinned_agent_and_reports_patch_evidence(tmp_path):
     )
     assert summary["runtime"]["reported_version"] == "fake-workspace-agent 1.0.0"
     assert summary["artifacts"]["changed_paths"] == ["src/example.py"]
+    assert summary["workspace"]["allowed_scope"] == ["src"]
     assert summary["publication_authority"] is False
     assert summary["isolation"].startswith("none")
     # Scope detection is limited to what the runtime declares and the patch
@@ -228,6 +246,8 @@ def test_attempt_refuses_a_workspace_inside_the_repository(tmp_path):
             capability="software.implement",
             attempt=1,
             workspace_root=REPO_ROOT / "src",
+            write_scope=("src",),
+            wall_clock_seconds=120.0,
             repo_root=REPO_ROOT,
             config_path=config_path,
             state_dir=tmp_path / "state",
@@ -248,16 +268,19 @@ def test_attempt_crash_reports_failure_and_releases_the_writer_lock(tmp_path):
     assert Path(summary["process"]["attempt_dir"]).is_dir()
 
 
-def test_attempt_timeout_terminates_the_process_group(tmp_path):
+def test_attempt_deadline_comes_from_the_caller_and_terminates_the_process_group(tmp_path):
+    assert "timeout_seconds" not in _shipped()["runtime_caps"]
     started = time.monotonic()
     summary = _run(
         tmp_path,
         mode="timeout",
-        limits={"timeout_seconds": 0.6, "termination_grace_seconds": 0.5},
+        wall_clock_seconds=0.6,
+        runtime_caps={"termination_grace_seconds": 0.5},
     )
     elapsed = time.monotonic() - started
 
     assert summary["status"] == "timeout"
+    assert summary["limits"]["timeout_seconds"] == 0.6
     assert summary["process"]["timed_out"] is True
     assert summary["termination"]["confirmed"] is True
     assert summary["termination"]["alive_after"] is False
@@ -268,6 +291,39 @@ def test_attempt_timeout_terminates_the_process_group(tmp_path):
     with pytest.raises(ProcessLookupError):
         os.killpg(pid, 0)
     assert elapsed < 15.0
+
+
+def test_external_cancellation_stops_a_running_attempt_and_releases_the_writer(tmp_path):
+    probes = []
+
+    def cancelled():
+        record = json.loads((tmp_path / "state" / "attempt.json").read_text())
+        assert record["phase"] == "running"
+        os.kill(record["pid"], 0)  # The probe changes only while the child is alive.
+        probes.append(record["pid"])
+        return len(probes) > 1
+
+    summary = _run(
+        tmp_path,
+        mode="cancel",
+        cancelled=cancelled,
+        runtime_caps={"termination_grace_seconds": 0.5},
+    )
+
+    assert len(probes) == 2
+    assert summary["status"] == "cancelled"
+    assert summary["process"]["cancelled"] is True
+    assert summary["process"]["cancel_reason"]
+    assert summary["process"]["timed_out"] is False
+    assert summary["termination"]["confirmed"] is True
+    assert summary["termination"]["alive_after"] is False
+    assert summary["containment"]["sweep"] == "clear"
+    assert summary["writer_lock"]["released"] is True
+    assert summary["process"]["pid"] == probes[0] == probes[1]
+    with pytest.raises(ProcessLookupError):
+        os.kill(summary["process"]["pid"], 0)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(summary["process"]["pgid"], 0)
 
 
 def test_attempt_rejects_a_changed_path_outside_the_workspace_scope(tmp_path):
@@ -296,10 +352,10 @@ def test_attempt_summary_is_json_safe_and_carries_no_publication_authority(tmp_p
 # -- workspace scope is data, not a guess ----------------------------------
 
 
-def test_each_attempt_gets_its_own_evidence_directory_and_the_pin_scope(tmp_path):
+def test_each_attempt_gets_its_own_evidence_directory_and_the_request_scope(tmp_path):
     workspace = _workspace(tmp_path)
     (workspace / "docs").mkdir()
-    config = _config(allowed_scope=["src"])
+    config = _config()
     config_path = _write_config(tmp_path, config)
 
     digests = set()
@@ -309,11 +365,13 @@ def test_each_attempt_gets_its_own_evidence_directory_and_the_pin_scope(tmp_path
             capability="software.implement",
             attempt=1,
             workspace_root=workspace,
+            write_scope=("src", "docs"),
+            wall_clock_seconds=120.0,
             repo_root=REPO_ROOT,
             config_path=config_path,
             state_dir=tmp_path / "state",
         )
-        assert summary["workspace"]["allowed_scope"] == ["src"]
+        assert summary["workspace"]["allowed_scope"] == ["src", "docs"]
         digests.add(summary["process"]["attempt_dir"])
     # Distinct attempts never share an evidence directory.
     assert len(digests) == 2
@@ -358,6 +416,8 @@ def test_the_pin_can_declare_containment_and_the_account_records_it(
         capability="software.implement",
         attempt=1,
         workspace_root=_workspace(tmp_path),
+        write_scope=("src",),
+        wall_clock_seconds=120.0,
         repo_root=REPO_ROOT,
         config_path=config_path,
         state_dir=tmp_path / "state",
@@ -422,6 +482,8 @@ def test_a_named_credential_missing_from_the_environment_fails_at_preflight(
             capability="software.implement",
             attempt=1,
             workspace_root=_workspace(tmp_path),
+            write_scope=("src",),
+            wall_clock_seconds=120.0,
             repo_root=REPO_ROOT,
             config_path=config_path,
             state_dir=tmp_path / "state",
@@ -440,6 +502,8 @@ def test_a_named_credential_reaches_the_child_by_name_only(tmp_path, monkeypatch
         capability="software.implement",
         attempt=1,
         workspace_root=_workspace(tmp_path),
+        write_scope=("src",),
+        wall_clock_seconds=120.0,
         repo_root=REPO_ROOT,
         config_path=config_path,
         state_dir=tmp_path / "state",
@@ -464,6 +528,8 @@ def test_the_task_is_recorded_as_a_digest_in_the_account(tmp_path):
         capability="software.implement",
         attempt=1,
         workspace_root=_workspace(tmp_path),
+        write_scope=("src",),
+        wall_clock_seconds=120.0,
         task=task,
         repo_root=REPO_ROOT,
         config_path=config_path,

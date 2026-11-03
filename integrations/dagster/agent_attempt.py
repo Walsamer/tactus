@@ -37,9 +37,9 @@ import json
 import os
 import subprocess
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from tactus.integrations.agents import RuntimeAgentAdapter
 from tactus.runtime.containment import (
@@ -97,13 +97,12 @@ _REQUIRED_KEYS = frozenset(
         "argv",
         "preflight_argv",
         "expected_version_token",
-        "allowed_scope",
     }
 )
 
 _OPTIONAL_KEYS = frozenset(
     {
-        "limits",
+        "runtime_caps",
         "purpose",
         "containment",
         "artifacts",
@@ -113,9 +112,8 @@ _OPTIONAL_KEYS = frozenset(
     }
 )
 
-_LIMIT_KEYS = frozenset(
+_RUNTIME_CAP_KEYS = frozenset(
     {
-        "timeout_seconds",
         "max_output_bytes",
         "max_patch_bytes",
         "max_result_bytes",
@@ -171,8 +169,10 @@ class AgentRuntimePin:
     argv: tuple[str, ...]
     preflight_argv: tuple[str, ...]
     expected_version_token: str
-    allowed_scope: tuple[str, ...]
-    limits: RuntimeLimits
+    # Containment settings the runtime enforces itself (byte/path caps, grace, poll),
+    # strictly tighter than the seam's bounds and never a second opinion about them:
+    # write scope, wall clock and step budget come from the attempt request.
+    runtime_caps: RuntimeLimits
     purpose: str = ""
     #: Vendor-free pinned artifact set (file, or tree with a declared digest
     #: order). Empty keeps the phase-1 shape: one executable verified above.
@@ -202,8 +202,6 @@ class AgentRuntimePin:
             raise AgentRuntimePinError(
                 "runtime pin executable_sha256 must be a lowercase SHA-256 hex digest"
             )
-        if not self.allowed_scope:
-            raise AgentRuntimePinError("runtime pin must declare a non-empty allowed_scope")
         if not self.argv or not self.preflight_argv:
             raise AgentRuntimePinError("runtime pin must declare argv and preflight_argv")
         if self.result_contract not in ("agent-artifacts", "workspace-diff"):
@@ -239,8 +237,9 @@ class AgentRuntimePin:
             "argv": list(self.argv),
             "preflight_argv": list(self.preflight_argv),
             "expected_version_token": self.expected_version_token,
-            "allowed_scope": list(self.allowed_scope),
-            "limits": self.limits.as_dict(),
+            "runtime_caps": {
+                key: getattr(self.runtime_caps, key) for key in sorted(_RUNTIME_CAP_KEYS)
+            },
             "purpose": self.purpose,
             "artifacts": [artifact.as_dict() for artifact in self.artifacts],
             "containment": self.containment.as_dict() if self.containment else None,
@@ -317,21 +316,21 @@ def _resolve_executable(raw: str, repo_root: Path) -> Path:
     return resolved
 
 
-def _limits(config: Mapping[str, Any], path: Path) -> RuntimeLimits:
-    raw = config.get("limits")
+def _runtime_caps(config: Mapping[str, Any], path: Path) -> RuntimeLimits:
+    raw = config.get("runtime_caps")
     if raw is None:
         return RuntimeLimits()
     if not isinstance(raw, dict):
-        raise AgentRuntimePinError(f"runtime pin limits must be an object ({path})")
-    unknown = set(raw) - _LIMIT_KEYS
+        raise AgentRuntimePinError(f"runtime pin runtime_caps must be an object ({path})")
+    unknown = set(raw) - _RUNTIME_CAP_KEYS
     if unknown:
         raise AgentRuntimePinError(
-            "runtime pin limits has unknown keys: " + ", ".join(sorted(unknown))
+            "runtime pin runtime_caps has unknown keys: " + ", ".join(sorted(unknown))
         )
     try:
         return RuntimeLimits(**raw)
     except (TypeError, ValueError) as exc:
-        raise AgentRuntimePinError(f"runtime pin limits are invalid ({path}): {exc}") from exc
+        raise AgentRuntimePinError(f"runtime pin runtime_caps are invalid ({path}): {exc}") from exc
 
 
 def _artifacts(config: Mapping[str, Any], root: Path, path: Path) -> tuple[Artifact, ...]:
@@ -535,8 +534,7 @@ def load_agent_runtime_pin(
         argv=argv,
         preflight_argv=preflight_argv,
         expected_version_token=_required_str(config, "expected_version_token", path),
-        allowed_scope=_str_tuple(config, "allowed_scope", path),
-        limits=_limits(config, path),
+        runtime_caps=_runtime_caps(config, path),
         purpose=purpose,
         artifacts=_artifacts(config, root, path),
         containment=_containment(config, path),
@@ -624,10 +622,13 @@ def run_agent_attempt(
     capability: str,
     attempt: int,
     workspace_root: str | os.PathLike[str],
+    write_scope: Sequence[str],
+    wall_clock_seconds: float,
     task: str = "",
     repo_root: str | os.PathLike[str] | None = None,
     config_path: str | os.PathLike[str] | None = None,
     state_dir: str | os.PathLike[str] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Supervise one pinned agent attempt and return its bounded account.
 
@@ -642,7 +643,7 @@ def run_agent_attempt(
     pin = load_agent_runtime_pin(config_path, repo_root=root)
     workspace = Workspace(
         root=Path(workspace_root),
-        allowed_scope=pin.allowed_scope,
+        allowed_scope=write_scope,
         # The workspace must never be the checkout the code lives in: an allowed
         # path inside this repository is not a bounded agent workspace.
         forbidden_roots=(root,),
@@ -653,8 +654,9 @@ def run_agent_attempt(
     supervisor = RuntimeSupervisor(
         pin.descriptor(),
         workspace,
-        limits=pin.limits,
+        limits=replace(pin.runtime_caps, timeout_seconds=wall_clock_seconds),
         state_dir=state_dir,
+        cancelled=cancelled,
         workspace_paths=diff_provider,
         containment=pin.containment,
         # A model credential is handed over by *name* and only when the pin asks
