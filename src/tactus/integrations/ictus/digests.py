@@ -18,10 +18,11 @@ refused with :class:`DigestNumberDomainError` naming the rule and the JSON path,
 never hashed as its nearest representable form: a digest produced where Ictus
 produces a refusal would make an unverified proposal look validated.
 
-Ledger canonicalization is not yet Ictus's proposal-binding serialization: at
-the pinned Ictus ``67877fb`` a proposal digest is still computed over the struct
-in declaration order, so these helpers must not be used to claim verification of
-``validation.proposal_digest``.
+Ledger canonicalization is now also Ictus's proposal-binding serialization: at
+the pinned Ictus ``c2aa092`` ``validation.proposal_digest`` is computed over the
+published canonical form, :func:`~tactus.integrations.ictus.envelope.verify_proposal_binding`
+recomputes it, and ``tests/integrations/ictus/test_digest_vectors.py`` asserts the
+shipped ``contracts/digest-vectors.json`` artefact from the pinned checkout.
 """
 
 from __future__ import annotations
