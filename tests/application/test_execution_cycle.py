@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 
 from tactus.application import (
+    DecompositionPlanNotCarriedError,
     ExecutionCycle,
     IntentDecisionError,
     ObservationCorrelationError,
@@ -38,7 +39,6 @@ from tactus.domain._clock import utcnow
 from tactus.integrations.ictus import (
     EnvelopeOutcome,
     MalformedEnvelopeError,
-    ProposalBindingUnverifiedError,
     SemanticBudget,
     StepRetryDiagnostic,
     parse_observation,
@@ -689,16 +689,26 @@ def test_no_execution_abort_is_terminal_and_audited(tmp_path):
     assert db.work_order_snapshot(WORK_ORDER)[1] is WorkOrderState.RETIRED
 
 
-def test_decompose_fails_closed_and_leaves_the_ledger_untouched(tmp_path):
+def test_decompose_is_refused_because_the_wire_carries_no_plan(tmp_path):
+    """No child for a plan nothing binds — and the reason is the true one now.
+
+    The digest contract is published at the pinned revision and
+    ``verify_proposal_binding`` implements it; what is missing is the plan a
+    ``DECOMPOSE`` binds, which the wire does not carry.
+    """
+
     cycle, db, work_order, accepted, receipt = _failed_cycle(tmp_path)
     before = db.work_order_snapshot(WORK_ORDER)
-    with pytest.raises(ProposalBindingUnverifiedError):
+    with pytest.raises(DecompositionPlanNotCarriedError) as refused:
         cycle.apply_recovery_decision(
             work_order,
             _envelope(decision="DECOMPOSE", proposal_id="proposal-dec", include_intent=False),
             state_port=db,
             expected_revision=_rev(db),
         )
+    message = str(refused.value)
+    assert "plan: None" in message and "no child is created" in message
+    assert "verify_proposal_binding implements it" in message
     assert db.work_order_snapshot(WORK_ORDER) == before
     assert work_order.state is WorkOrderState.ACTIVE
     assert db._connection.execute(

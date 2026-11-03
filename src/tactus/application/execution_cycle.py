@@ -100,6 +100,10 @@ class WorkOrderProjectionError(ExecutionCycleError):
     """The durable Work Order projection cannot accept the requested effect."""
 
 
+class DecompositionPlanNotCarriedError(IntentDecisionError):
+    """A ``DECOMPOSE`` binds a bounded plan the wire does not carry."""
+
+
 @runtime_checkable
 class InterventionRequestPort(Protocol):
     """Durable boundary for the typed request an ESCALATE effect creates.
@@ -831,14 +835,13 @@ class ExecutionCycle:
                         "INITIAL context source revision does not match the Work Order"
                     )
             if admission.proposal_decision == "DECOMPOSE":
-                # An envelope carries no raw proposal, so nothing can be re-hashed
-                # against validation.proposal_digest yet; the deprecated triple
-                # still carries its proposal and passes it. The hook fails closed
-                # because the canonical vectors are not asserted here yet, so no
-                # child is created for a plan nothing binds.
-                verify_proposal_binding(
-                    admission, None if admission.raw is None else admission.raw.get("proposal")
-                )
+                # The binding is verified before any child exists, from the
+                # proposal this decision carries. A validated envelope carries
+                # only ``validation.proposal_digest``, so for a real DECOMPOSE
+                # there is nothing to re-hash and ``_decomposition_proposal``
+                # refuses with the reason that is actually true instead of
+                # creating children no digest binds.
+                verify_proposal_binding(admission, _decomposition_proposal(admission))
             state["application"] = applier.apply(
                 work_order, decision, child_plan=child_plan, at=at
             )
@@ -922,6 +925,32 @@ class ExecutionCycle:
                 "Work Order was not ACTIVE at the expected revision when success "
                 "was applied"
             )
+
+
+def _decomposition_proposal(admission: DecisionAdmission) -> Mapping[str, Any]:
+    """The proposal a ``DECOMPOSE`` binds, if the wire carried it at all.
+
+    A ``DECOMPOSE`` binds a typed bounded decomposition plan *inside* the
+    proposal it digested (``intent.arguments.decomposition_plan``), and the wire
+    carries only ``validation.proposal_digest``. The pinned bridge makes that
+    structural: it passes ``plan: None`` (``crates/bridge/src/main.rs:256``) and
+    ``USAGE`` has no plan flag, so ``ictus decide --context`` cannot emit a
+    ``DECOMPOSE`` at all. Absent proposal bytes are therefore a refusal, never a
+    skipped check: there is nothing to re-hash and no child to create, while the
+    digest contract is published at the pin and the binding is implemented.
+    """
+
+    proposal = None if admission.raw is None else admission.raw.get("proposal")
+    if not isinstance(proposal, Mapping):
+        raise DecompositionPlanNotCarriedError(
+            "Ictus DECOMPOSE binds its bounded decomposition plan inside the "
+            "proposal, and the wire carries only validation.proposal_digest: "
+            "the pinned bridge passes plan: None (crates/bridge/src/main.rs:256) "
+            "and USAGE has no plan flag, so no plan is ever carried. There is "
+            "nothing to verify and no child is created; the digest contract is "
+            "published at the pin and verify_proposal_binding implements it."
+        )
+    return proposal
 
 
 def _snapshot_work_order(work_order: WorkOrder) -> tuple[Any, ...]:
@@ -1034,6 +1063,7 @@ def _work_order_id(value: WorkOrderId | str) -> WorkOrderId:
 __all__ = [
     "AcceptedExecution",
     "CorrelatedObservation",
+    "DecompositionPlanNotCarriedError",
     "DurableWorkOrderStatePort",
     "ExecutionCycleAdmissionPort",
     "ExecutionCycle",

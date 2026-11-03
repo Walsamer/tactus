@@ -19,6 +19,7 @@ from .decomposition import (
 from .execution_cycle import (
     AcceptedExecution,
     CorrelatedObservation,
+    DecompositionPlanNotCarriedError,
     DurableWorkOrderStatePort,
     ExecutionCycle,
     ExecutionCycleAdmissionPort,
@@ -45,6 +46,7 @@ __all__ = [
     "ChildMaterializationStore",
     "ChildMaterializer",
     "CorrelatedObservation",
+    "DecompositionPlanNotCarriedError",
     "DurableWorkOrderStatePort",
     "ExecutionCycle",
     "ExecutionCycleAdmissionPort",

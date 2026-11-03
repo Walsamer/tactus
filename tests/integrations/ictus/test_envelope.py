@@ -1,14 +1,19 @@
 """Core envelope shape, normalization and fail-closed binding behavior."""
 
-from collections.abc import Mapping
 from datetime import datetime, timezone
 
 import pytest
 
 from tactus.domain.decisions import DecisionKind, RouteConstraints
+from tactus.integrations.ictus.digests import (
+    DIGEST_INTEGER_MAX,
+    DigestNumberDomainError,
+    canonical_digest,
+)
 from tactus.integrations.ictus.envelope import (
     DecisionAdmission,
     DecisionSource,
+    EnvelopeContractError,
     EnvelopeExpiredError,
     EnvelopeOutcome,
     MalformedEnvelopeError,
@@ -390,22 +395,114 @@ def test_real_binary_legacy_triple_is_not_mistaken_for_an_envelope():
     assert admission.outcome is EnvelopeOutcome.NO_EXECUTION
 
 
-def test_proposal_binding_fails_closed_even_for_a_well_formed_proposal():
-    proposal = _legacy(token="ESCALATE")["proposal"]
-    with pytest.raises(ProposalBindingUnverifiedError, match=r"validation.proposal_digest.*contracts/digest-vectors.json"):
-        verify_proposal_binding(parse_envelope(_envelope()), proposal)
+def _bound(proposal, **overrides):
+    """An envelope whose ``validation.proposal_digest`` binds ``proposal``."""
+
+    validation = {
+        "context_id": "context-1",
+        "proposal_digest": canonical_digest(proposal),
+        "capability_version": "not-applicable",
+        "validated_at": "2026-01-01T00:00:00Z",
+    }
+    validation.update(overrides.pop("validation", {}))
+    return parse_envelope(_envelope(validation=validation, **overrides))
 
 
-def test_proposal_binding_raises_before_using_either_input():
-    class UnreadableMapping(Mapping):
-        def __getitem__(self, key):
-            pytest.fail("binding stub must not inspect unverified input")
+def _escalate_proposal():
+    return {
+        "proposal_id": "proposal-1",
+        "schema_version": 2,
+        "decision": "ESCALATE",
+        "subject": {"type": "work_order", "id": "WO-1"},
+        "provider": {"provider_type": "RECOVERY", "provider_id": "recovery.v1"},
+        "proposed_at": "2026-01-01T00:00:00Z",
+        "reason": "semantic budget exhausted",
+    }
 
-        def __iter__(self):
-            pytest.fail("binding stub must not inspect unverified input")
 
-        def __len__(self):
-            pytest.fail("binding stub must not inspect unverified input")
+def test_proposal_binding_accepts_the_proposal_ictus_digested():
+    proposal = _escalate_proposal()
+    admission = _bound(proposal)
 
-    with pytest.raises(ProposalBindingUnverifiedError):
-        verify_proposal_binding(UnreadableMapping(), UnreadableMapping())
+    assert admission.validation.proposal_digest == canonical_digest(proposal)
+    assert verify_proposal_binding(admission, proposal) is None
+
+
+def test_proposal_binding_accepts_a_digest_in_either_hex_case():
+    proposal = _escalate_proposal()
+    admission = _bound(
+        proposal, validation={"proposal_digest": canonical_digest(proposal).upper()}
+    )
+
+    assert verify_proposal_binding(admission, proposal) is None
+
+
+def test_proposal_binding_refuses_a_mutated_proposal_naming_both_digests():
+    """One changed field is a different proposal, and the refusal says which."""
+
+    proposal = _escalate_proposal()
+    admission = _bound(proposal)
+    mutated = {**proposal, "reason": "a different failure"}
+
+    with pytest.raises(ProposalBindingUnverifiedError) as refused:
+        verify_proposal_binding(admission, mutated)
+
+    message = str(refused.value)
+    assert "does not bind" in message
+    # Both sides are named, truncated, and the decision they disagree about.
+    assert admission.validation.proposal_digest[:12] in message
+    assert canonical_digest(mutated)[:12] in message
+    assert "ESCALATE" in message and "proposal-1" in message
+
+
+def test_a_missing_proposal_is_refused_and_never_skipped():
+    """No "skip if absent" branch: absent proposal bytes are a refusal.
+
+    A hook that returned when there is nothing to compare would let an
+    unverified plan through, so this case must keep raising.
+    """
+
+    admission = _bound(_escalate_proposal())
+
+    with pytest.raises(EnvelopeContractError, match="must be a JSON object"):
+        verify_proposal_binding(admission, None)
+
+
+@pytest.mark.parametrize("proposal", [["proposal"], "proposal", 1, True])
+def test_a_proposal_that_is_not_an_object_is_malformed(proposal):
+    """There is no canonical digest for anything but a JSON object."""
+
+    with pytest.raises(MalformedEnvelopeError, match="must be a JSON object"):
+        verify_proposal_binding(_bound(_escalate_proposal()), proposal)
+
+
+def test_a_decision_without_a_digest_cannot_be_bound():
+    """The deprecated triple carries a proposal but no digest to bind it to."""
+
+    admission = parse_decision_payload(_legacy(token="ESCALATE"))
+
+    assert admission.validation is None
+    with pytest.raises(ProposalBindingUnverifiedError, match="no validation.proposal_digest"):
+        verify_proposal_binding(admission, admission.raw["proposal"])
+
+
+def test_the_binding_needs_the_parsed_admission_not_a_raw_payload():
+    proposal = _escalate_proposal()
+    payload = _envelope(validation={"proposal_digest": canonical_digest(proposal)})
+
+    with pytest.raises(MalformedEnvelopeError, match="parsed envelope admission"):
+        verify_proposal_binding(payload, proposal)
+
+
+def test_a_proposal_outside_the_number_domain_is_refused_not_hashed():
+    """The writer's refusal is the binding's refusal: never a rounded digest."""
+
+    proposal = {
+        "proposal_id": "proposal-1",
+        "arguments": {"limit": DIGEST_INTEGER_MAX + 1},
+    }
+    admission = _bound(_escalate_proposal())
+
+    with pytest.raises(DigestNumberDomainError) as refused:
+        verify_proposal_binding(admission, proposal)
+    assert refused.value.path == "$.arguments.limit"
