@@ -75,6 +75,14 @@ created through a durable child-creation capability. The parent is retired
 or does not match, the parent stays `ACTIVE`. Ictus itself creates no child work
 items.
 
+No validated wire decision reaches this effect yet. A `DECOMPOSE` binds its plan
+inside the proposal, the envelope carries only `validation.proposal_digest`, and
+the pinned bridge cannot emit a `DECOMPOSE` at all (`plan: None` in
+`crates/bridge/src/main.rs:256`, no plan flag in `USAGE`). The application seam
+therefore refuses a `DECOMPOSE` with `DecompositionPlanNotCarriedError` before
+any child exists; the domain effect above stays proven by its own tests and is
+not reachable from the wire.
+
 ## Fail-closed
 
 - An unknown decision token is rejected at the inbound boundary

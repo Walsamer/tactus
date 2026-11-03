@@ -46,13 +46,17 @@ from tactus.integrations.ictus import (
     FACT_SNAPSHOT_DIGEST,
     FACT_SNAPSHOT_PHASE,
     FACT_WORK_ORDER_ID,
+    ProposalBindingUnverifiedError,
     SemanticBudget,
     SnapshotPhase,
     StateSnapshotContractError,
     StepRetryDiagnostic,
     build_state_snapshot,
+    canonical_digest,
     compute_snapshot_digest,
+    parse_envelope,
     validate_snapshot_profile,
+    verify_proposal_binding,
 )
 from tactus.integrations.ictus.facts import (
     LEGACY_FACT_RETRY_ATTEMPT,
@@ -309,6 +313,33 @@ def test_context_clock_preserves_snapshot_digest_vectors() -> None:
             ],
         }
         assert compute_snapshot_digest(body) == pinned_digest
+
+
+def test_a_real_envelope_binds_the_proposal_the_binary_digested(
+    ictus_boundary: conformance.IctusBoundary,
+) -> None:
+    """The claim the binding rests on: the pinned binary's digest is ours.
+
+    ``ictus decide`` prints the proposal it built; ``ictus decide --context``
+    prints the envelope whose ``validation.proposal_digest`` binds a proposal
+    from the same deterministic provider over the same snapshot. Recomputing the
+    published canonical form over the proposal the binary printed must therefore
+    equal the digest the binary validated, and one changed field must not.
+    """
+
+    snapshot = json.loads((pf.DATA_DIR / "initial_snapshot.v2.json").read_text())
+    proposal = ictus_boundary.decide(snapshot).raw["proposal"]
+    envelope = ictus_boundary.decide_context(conformance.build_decision_context(snapshot))
+    admission = parse_envelope(envelope.raw)
+
+    assert admission.envelope_id == envelope.raw["envelope_id"]
+    assert verify_proposal_binding(admission, proposal) is None
+
+    mutated = {**proposal, "proposal_id": f"{proposal['proposal_id']}-mutated"}
+    with pytest.raises(ProposalBindingUnverifiedError) as refused:
+        verify_proposal_binding(admission, mutated)
+    assert admission.validation.proposal_digest[:12] in str(refused.value)
+    assert canonical_digest(mutated)[:12] in str(refused.value)
 
 
 # -- recovery fixture and binding -----------------------------------------
