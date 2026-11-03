@@ -2,7 +2,7 @@
 
 Pinned contract
 ---------------
-* Ictus commit: ``67877fb99dacdba2ed44d3d1dfc47a02090566e2``
+* Ictus commit: ``c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1``
 * Contract source: ``contracts/decision-envelope.schema.json`` and
   ``crates/core/src/envelope.rs::validate``; route: ``proposal.schema.json``
 * Supported envelope ``schema_version``: ``1`` (frozen capability shape), ``2``
@@ -392,17 +392,19 @@ def _parse_legacy_triple(payload: Mapping[str, Any]) -> DecisionAdmission:
 
 
 def verify_proposal_binding(envelope: Any, raw_proposal: Any) -> None:
-    """Always fail closed until Ictus publishes ``contracts/digest-vectors.json``.
+    """Fail closed: ``validation.proposal_digest`` is not re-verified here yet.
 
-    Ictus's ``validation.proposal_digest`` is currently computed using
-    ``sha256(serde_json::to_vec(proposal))``: struct field order, not canonical
-    JSON. Canonical vectors arrive later; until then no canonical re-verification
-    can pass. This single hook must raise before inspecting or using either input.
+    At the pinned Ictus revision the digest is the published canonical form and
+    ``contracts/digest-vectors.json`` ships with it; asserting that artefact
+    from :mod:`tactus.integrations.ictus.digests` is a follow-up. Until it lands,
+    no canonical re-verification runs, so this single hook must raise before
+    inspecting or using either input.
     """
 
     raise ProposalBindingUnverifiedError(
-        "validation.proposal_digest cannot be verified until Ictus publishes "
-        "contracts/digest-vectors.json for canonical proposal serialization"
+        "validation.proposal_digest is not re-verified yet: the canonical form "
+        "and contracts/digest-vectors.json are at the pinned Ictus revision, and "
+        "asserting them here is a follow-up"
     )
 
 

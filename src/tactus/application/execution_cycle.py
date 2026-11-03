@@ -834,8 +834,8 @@ class ExecutionCycle:
                 # An envelope carries no raw proposal, so nothing can be re-hashed
                 # against validation.proposal_digest yet; the deprecated triple
                 # still carries its proposal and passes it. The hook fails closed
-                # until Ictus publishes canonical digest vectors, so no child is
-                # created for a plan nothing binds.
+                # because the canonical vectors are not asserted here yet, so no
+                # child is created for a plan nothing binds.
                 verify_proposal_binding(
                     admission, None if admission.raw is None else admission.raw.get("proposal")
                 )

@@ -105,14 +105,15 @@ only rounds to its double are refused with a typed error naming the rule and the
 JSON path, never hashed as the nearest representable value. The rule is enforced
 wherever a digest is computed and at the text ingress that parses Ictus output, so
 a document Ictus would refuse cannot be digested here either. The published
-vectors are mirrored in `tests/integrations/ictus/test_digest_vectors.py` until a
-pin advance brings the artefact into the pinned revision.
+vectors are mirrored in `tests/integrations/ictus/test_digest_vectors.py`; the
+pinned revision now carries the artefact, so asserting the checked-in file in
+place of that mirror is a follow-up.
 
 DECOMPOSE is refused with a typed reason, and no child Work Order is created:
 the bounded child plan is not carried in the envelope, and
-`validation.proposal_digest` cannot be re-verified because Ictus currently
-serializes the proposal in struct field order rather than canonical form.
-Canonical digest vectors are required before a plan may be acted on.
+`validation.proposal_digest` is not re-verified here yet: the canonical form and
+`contracts/digest-vectors.json` are at the pinned revision, and asserting the
+checked-in artefact is required before a plan may be acted on.
 
 The legacy unvalidated triple (`{proposal, policy_decision, execution_intent}`)
 is **deprecated**, not removed: the same admission boundary still accepts it,

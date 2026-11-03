@@ -39,8 +39,9 @@ A payload carrying both shapes, or neither, is refused rather than guessed.
   existing bare 64-hex row reads as `sha256:v0`, and comparing two versions
   raises an immutable-record conflict.
 - **DECOMPOSE** is refused with `ProposalBindingUnverifiedError` and creates no
-  children until Ictus publishes canonical proposal digest vectors:
-  `verify_proposal_binding` is the single hook that fails closed.
+  children: `verify_proposal_binding` is the single hook that fails closed, and
+  the canonical `validation.proposal_digest` is not re-verified against the
+  published `contracts/digest-vectors.json` here yet.
 
 The work-order effect is unchanged: the same total decision-to-effect mapping and
 the same decision ledger apply, whichever shape the decision arrived in.
@@ -76,7 +77,7 @@ TACTUS_ICTUS_ROOT=/path/to/agentic-control \
 | Item | Value |
 |---|---|
 | Pinned Ictus repository | `Walsamer/ictus` |
-| Pinned Ictus commit | `67877fb99dacdba2ed44d3d1dfc47a02090566e2` |
+| Pinned Ictus commit | `c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1` |
 | Overrides | `TACTUS_ICTUS_ROOT`, `TACTUS_ICTUS_TARGET_DIR` |
 
 The normal test entry point (`uv run pytest`) executes the same boundary; a

@@ -19,7 +19,7 @@ env:
   # checkout HEAD and fails visibly on any mismatch; the workflow also checks it
   # explicitly before any build runs.
   ICTUS_REPOSITORY: Walsamer/ictus
-  ICTUS_COMMIT: 67877fb99dacdba2ed44d3d1dfc47a02090566e2
+  ICTUS_COMMIT: c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1
 
 jobs:
   python:
@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: Walsamer/ictus
-          ref: 67877fb99dacdba2ed44d3d1dfc47a02090566e2
+          ref: c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1
           path: .ictus
 
       - name: verify pinned Ictus revision
