@@ -593,6 +593,7 @@ class RuntimeSupervisor:
         containment: ContainmentPolicy | None = None,
         credentials: Mapping[str, str] | None = None,
         home_seed: Mapping[str, bytes] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         if descriptor.launcher is not None and containment is None:
             # A launcher without a policy would mean launching through a wrapper
@@ -647,6 +648,7 @@ class RuntimeSupervisor:
         self._start_marker = start_marker or process_start_marker
         self._cancel = threading.Event()
         self._cancel_reason = ""
+        self._cancelled_by = cancelled
         self._attempt_dir: Path | None = None
         self._base_revision: str | None = None
         self._sweep_detail = ""
@@ -1017,6 +1019,10 @@ class RuntimeSupervisor:
             while process.poll() is None:
                 if self._cancel.is_set():
                     cancelled = True
+                    break
+                if self._cancelled_by is not None and self._cancelled_by():
+                    cancelled = True
+                    self._cancel_reason = "external cancellation"
                     break
                 if time.monotonic() >= deadline:
                     timed_out = True

@@ -11,7 +11,8 @@ See [Architecture Baseline v1](../../docs/architecture/SYSTEM_ARCHITECTURE.md).
 | Path | Owner | Purpose |
 | --- | --- | --- |
 | `definitions.py` | Tactus | A **Tactus-owned capability code location** used only by the execution-failure scenarios. Same job name and `settings` resource shape the pinned Ictus bridge expects; the capability implementation fails deterministically on request. |
-| `agent_location.py` | Tactus | The Tactus-owned implementation of the `software.implement` route: job `software_agent_job`, resource `software_agent_settings`, steps `prepare_op` → `execute_op` → `verify_op`, one supervised agent attempt per run. Durable submission from the pinned bridge waits on Ictus's agreed skeleton for that job (`AGENT_EXECUTION_SLICE.md`, B4). |
+| `agent_location.py` | Tactus | The Tactus-owned code location for `software.implement` and `software.promote`: it **registers Ictus's** `software_agent_job` / `software_publish_job` unchanged and re-binds their settings resources so `runtime_seam` (from `TACTUS_RUNTIME_SEAM`) is a resource default. It defines no steps of its own, because Dagster pins the recording location's step keys on the run. Unset means `None`, which keeps Ictus's fail-closed placeholder. |
+| `agent_backend.py` | Tactus | Dagster-free: the seam backend Ictus resolves by name (`agent_backend:create_backend`). Runs one supervised attempt through the pin and reports it as `runtime-evidence.schema.json`. It never uses `control.spawn` — the supervisor owns the child's process group and confirms its termination — so the `termination` it reports is ours, not Ictus's. |
 | `agent_attempt.py` | Tactus | Dagster-free attempt body: operator runtime pin (`config/agent-runtime.json`), digest-verified executable, one supervised attempt, patch evidence re-checked, durable attempt account. |
 | `failure_control.py` | Tactus | Bounded, Dagster-free failure-control surface (JSON file keyed by `ictus.intent_id`, loaded **after** authorization). Rejects intent-argument spellings so execution knobs cannot creep back into an `ExecutionIntent`. |
 
@@ -37,9 +38,14 @@ confirmed and the writer lock released — and every one of those proofs is name
 [`RUNTIME_SUPERVISION.md`](../../docs/architecture/RUNTIME_SUPERVISION.md), with
 the attempt contract in
 [`AGENT_ADAPTER_CONTRACT.md`](../../docs/architecture/AGENT_ADAPTER_CONTRACT.md).
-This location does not use it yet: `config/agent-runtime.json` pins no launcher and
-its pin loader reads the pre-phase-2 key set, so the attempt it runs is still
-uncontained and its account says `isolation: none`.
+The backend runs behind it, but the shipped pin still declares no launcher:
+`config/agent-runtime.json` carries identity plus `runtime_caps` (the runtime's own
+containment settings the runtime enforces itself — capture/patch/result byte caps,
+changed-path cap, termination grace, poll interval) and treats them as strictly
+tighter than the seam's bounds, not as another opinion about them, and no `write_scope`, deadline or step budget, which come
+from the attempt request. A pin that named a launcher would get the boundary; this
+one does not, so the attempt is still uncontained and its account says
+`isolation: none`.
 
 ## Boundary rules
 

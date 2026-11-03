@@ -8,14 +8,13 @@
   "argv": ["{executable}", "edit", "{request}"],
   "preflight_argv": ["{executable}", "--version"],
   "expected_version_token": "fake-workspace-agent 1.0.0",
-  "allowed_scope": ["src"],
-  "limits": {
-    "timeout_seconds": 120.0,
+  "runtime_caps": {
     "max_output_bytes": 4096,
     "max_patch_bytes": 200000,
     "max_result_bytes": 65536,
     "max_changed_paths": 20,
-    "termination_grace_seconds": 5.0
+    "termination_grace_seconds": 5.0,
+    "poll_interval_seconds": 0.02
   },
   "purpose": "deterministic fake coding agent for the Dagster agent-attempt canary: no model provider, no credentials, no publication authority, no OS isolation"
 }

@@ -16,6 +16,7 @@ no HTTP, event bus or service topology is mandated.
 | ExecutionIntent | Ictus → Tactus admission → Dagster bridge | Exact allowed capability, selected route and restrictions bound to validated context. |
 | SubmissionReceipt / ExecutionStatus | Dagster bridge → Tactus | Durable receipt or explicit rejection/unknown; opaque execution ID with submission identity. |
 | ExecutionResult / ExecutionObservation | Execution bridge → Tactus | Correlated terminal facts/evidence; no domain lifecycle decision. |
+| RuntimeSeam / RuntimeEvidence | Tactus code location → Ictus worker → Tactus runtime backend | Operator-owned seam selection (a `module:attribute` backend, the workspace descriptor by path, and the attempt's bounds) and the bounded attempt's evidence: outcome, typed failure kind, changed paths, `sha256:` patch digest and bytes, steps, exit status, `termination{requested,signals,confirmed}` and duration. Bounds live in exactly one place, the attempt request; the runtime pin carries identity only. |
 | HumanResolution | authenticated operator → Tactus | Request, actor, typed permitted action, bounded grant and evidence. |
 
 ## Snapshot profile

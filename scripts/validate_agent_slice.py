@@ -215,36 +215,53 @@ def _use_pinned_ictus_package(ictus_root: Path) -> str:
 
 
 def _seam(location: Any) -> dict[str, Any]:
-    """Compare the pinned bridge's job shape with what Tactus implements.
+    """Assert Tactus registers Ictus's software graph instead of substituting one.
 
-    Dagster replays the execution plan recorded by *Ictus's* job definition, so a
-    Tactus code location can only receive that run when its own job declares the
-    same steps. That is a contract, not a detail: the check is explicit so a
-    mismatch is named instead of surfacing as an opaque Dagster error.
+    Dagster records the execution plan from *Ictus's* job definition and replays it
+    in whichever code location the environment names, keyed by step. A location
+    that declares its own same-named graph cannot receive that run, so the check
+    that matters is no longer "do our step names match theirs" — the location now
+    registers their job object, which makes a name comparison vacuous. What is
+    still worth asserting is that nothing local has crept back in: the four step
+    names must be Ictus's, and this module must define none of its own.
     """
 
     from ictus_dagster.adapters.workflow_registry import resolve_workflow
 
     spec = resolve_workflow(CAPABILITY)
     pinned_steps = [node.name for node in spec.job.graph.node_defs]
-    tactus_steps = [node.name for node in location.software_agent_job.graph.node_defs]
-    matched = pinned_steps == tactus_steps
+    registered_steps = [node.name for node in location.software_agent_job.graph.node_defs]
+    # The names our own graph used, before the location was reduced to a
+    # registration. Any of them present means a local graph is back.
+    local_steps = sorted(
+        name
+        for name in ("prepare_op", "execute_op", "verify_op", "finalize_op")
+        if hasattr(location, name)
+    )
+    matched = registered_steps == pinned_steps and not local_steps
     return {
         "status": "matched" if matched else "blocked",
         "blocked_dependency": None
         if matched
         else (
-            "B4: the pinned Ictus job software_agent_job records only its "
-            "fail-closed placeholder step, so a real backend cannot receive that "
-            "run. Ictus has scheduled the prepare/execute/verify skeleton (with "
-            "software_publish_job for #23); this harness switches to durable "
-            "submission by itself once it lands."
+            "the Tactus code location does not register Ictus's software graph"
+            + (
+                f": it defines {local_steps} locally, so the recorded run cannot "
+                "be replayed here"
+                if local_steps
+                else f": registered steps {registered_steps} are not the pinned "
+                f"{pinned_steps}"
+            )
         ),
         "capability": CAPABILITY,
         "job": spec.job.name,
         "resource_key": spec.resource_key,
         "pinned_steps": pinned_steps,
-        "tactus_steps": tactus_steps,
+        "tactus_steps": registered_steps,
+        "locally_defined_steps": local_steps,
+        "runtime_seam_configured": bool(
+            str(getattr(location, "_RUNTIME_SEAM", "") or "").strip()
+        ),
     }
 
 
