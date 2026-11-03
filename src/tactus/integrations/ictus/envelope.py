@@ -2,7 +2,7 @@
 
 Pinned contract
 ---------------
-* Ictus commit: ``67877fb99dacdba2ed44d3d1dfc47a02090566e2``
+* Ictus commit: ``c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1``
 * Contract source: ``contracts/decision-envelope.schema.json`` and
   ``crates/core/src/envelope.rs::validate``; route: ``proposal.schema.json``
 * Supported envelope ``schema_version``: ``1`` (frozen capability shape), ``2``
@@ -32,6 +32,7 @@ from .digests import (
     DigestContractError,
     MalformedDigestError,
     UnknownDigestVersionError,
+    canonical_digest,
 )
 
 
@@ -52,7 +53,7 @@ class EnvelopeExpiredError(EnvelopeContractError):
 
 
 class ProposalBindingUnverifiedError(EnvelopeContractError):
-    """The proposal serialization binding cannot yet be verified."""
+    """``validation.proposal_digest`` does not bind the supplied proposal."""
 
 
 class EnvelopeOutcome(str, Enum):
@@ -391,19 +392,56 @@ def _parse_legacy_triple(payload: Mapping[str, Any]) -> DecisionAdmission:
     )
 
 
-def verify_proposal_binding(envelope: Any, raw_proposal: Any) -> None:
-    """Always fail closed until Ictus publishes ``contracts/digest-vectors.json``.
+def verify_proposal_binding(
+    envelope: DecisionAdmission, raw_proposal: Mapping[str, Any] | None
+) -> None:
+    """Bind ``validation.proposal_digest`` to the proposal it was computed over.
 
-    Ictus's ``validation.proposal_digest`` is currently computed using
-    ``sha256(serde_json::to_vec(proposal))``: struct field order, not canonical
-    JSON. Canonical vectors arrive later; until then no canonical re-verification
-    can pass. This single hook must raise before inspecting or using either input.
+    The digest is Ictus's identity-digest protocol v1 over the canonical form of
+    the ``DecisionProposal`` (``docs/IDENTITY_DIGEST.md`` and
+    ``contracts/digest-vectors.json`` at the pinned revision), so a consumer
+    recomputes it from the proposal instead of trusting the wire. Equal digests
+    return; a different one is refused with both digests, truncated, and the
+    decision they disagree about. Case is not significant: both sides are hex.
+
+    There is no best-effort path and no "skip if absent" branch: an envelope
+    that carries no digest to compare against, and proposal bytes that are not
+    a JSON object, both raise rather than pass, and a proposal outside the
+    protocol's number domain is refused by :func:`canonical_digest` (with its
+    rule and JSON path) instead of being hashed as its nearest representable
+    form — that would bind a proposal Ictus never digested.
     """
 
-    raise ProposalBindingUnverifiedError(
-        "validation.proposal_digest cannot be verified until Ictus publishes "
-        "contracts/digest-vectors.json for canonical proposal serialization"
-    )
+    if not isinstance(envelope, DecisionAdmission):
+        raise MalformedEnvelopeError(
+            "proposal binding needs the parsed envelope admission, not a raw payload"
+        )
+    if not isinstance(raw_proposal, Mapping):
+        raise MalformedEnvelopeError(
+            "the proposal to bind must be a JSON object; there is no canonical "
+            f"digest for a {type(raw_proposal).__name__}"
+        )
+    validation = envelope.validation
+    if validation is None:
+        raise ProposalBindingUnverifiedError(
+            "this decision carries no validation.proposal_digest, so its "
+            f"{envelope.proposal_decision} proposal {envelope.proposal_id!r} "
+            "cannot be bound to what Ictus validated"
+        )
+    recomputed = canonical_digest(raw_proposal)
+    if recomputed != validation.proposal_digest.lower():
+        raise ProposalBindingUnverifiedError(
+            "validation.proposal_digest does not bind the supplied proposal: "
+            f"validated {_truncated(validation.proposal_digest)}, recomputed "
+            f"{_truncated(recomputed)} for {envelope.proposal_decision} "
+            f"proposal {envelope.proposal_id!r}"
+        )
+
+
+def _truncated(digest: str) -> str:
+    """A digest's first 12 hex characters: enough to tell two apart by eye."""
+
+    return f"{digest[:12]}…"
 
 
 # -- validation helpers ---------------------------------------------------

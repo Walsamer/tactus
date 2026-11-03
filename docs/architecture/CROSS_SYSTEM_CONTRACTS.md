@@ -66,9 +66,9 @@ limits, backend/provider/runtime/model and idempotency identity.
 Admission is **outcome-first**, never verdict-first. `EXECUTABLE` is the only
 outcome that carries an `ExecutionIntent` and may start new work. `NO_EXECUTION`
 was validated and permitted and reaches no execution backend, so Tactus acts on
-`proposal.decision` (ESCALATE and ABORT today; DECOMPOSE once its proposal
-binding can be verified) through the same applier and decision ledger as any
-other authorising decision. An executable intent must bind the validated
+`proposal.decision` (ESCALATE and ABORT today; DECOMPOSE once the wire carries
+the bounded plan its proposal binds) through the same applier and decision ledger
+as any other authorising decision. An executable intent must bind the validated
 proposal digest and the snapshot it was validated against: an intent for a
 different payload is not the result of that validation. `DENIED`, `PENDING`,
 `NO_ROUTE` and `INVALID` are typed non-authorising results: the caller receives
@@ -105,14 +105,24 @@ only rounds to its double are refused with a typed error naming the rule and the
 JSON path, never hashed as the nearest representable value. The rule is enforced
 wherever a digest is computed and at the text ingress that parses Ictus output, so
 a document Ictus would refuse cannot be digested here either. The published
-vectors are mirrored in `tests/integrations/ictus/test_digest_vectors.py` until a
-pin advance brings the artefact into the pinned revision.
+artefact is asserted in place: `tests/integrations/ictus/test_digest_vectors.py`
+reads `contracts/digest-vectors.json` from the checkout at the pinned revision and
+checks all 19 digested cases, the accepted document and all 10 rejections with the
+file's own `reason` and `path`. It is not vendored and not mirrored, and a machine
+without the pinned checkout fails loudly.
 
-DECOMPOSE is refused with a typed reason, and no child Work Order is created:
-the bounded child plan is not carried in the envelope, and
-`validation.proposal_digest` cannot be re-verified because Ictus currently
-serializes the proposal in struct field order rather than canonical form.
-Canonical digest vectors are required before a plan may be acted on.
+`verify_proposal_binding` recomputes that canonical digest over the proposal and
+compares it to `validation.proposal_digest`: equal returns, a mismatch is refused
+naming both digests and the decision, and an absent proposal or an absent digest
+is refused rather than skipped. There is no best-effort path.
+
+DECOMPOSE is refused with a typed reason, and no child Work Order is created: a
+`DECOMPOSE` binds its bounded child plan inside the proposal, and the wire carries
+only `validation.proposal_digest`. The pinned bridge cannot emit a `DECOMPOSE` at
+all — it passes `plan: None` (`crates/bridge/src/main.rs:256`) and `USAGE` has no
+plan flag — so there is nothing to re-hash and no plan to act on. The digest
+contract is published at the pin and the binding is implemented; what is missing
+is a wire that carries the plan.
 
 The legacy unvalidated triple (`{proposal, policy_decision, execution_intent}`)
 is **deprecated**, not removed: the same admission boundary still accepts it,

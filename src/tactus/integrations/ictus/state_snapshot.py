@@ -2,7 +2,7 @@
 
 Pinned contract
 ---------------
-* Ictus commit: ``67877fb99dacdba2ed44d3d1dfc47a02090566e2``
+* Ictus commit: ``c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1``
 * Contract source: ``contracts/state-snapshot.schema.json`` (``StateSnapshot``)
 * Supported generic ``schema_version``: ``1`` (Ictus-owned)
 * Supported Tactus *fact profile* version: ``2``

@@ -65,7 +65,7 @@ checked WorkOrder                 (tactus.domain / persistence)
 
 ## What the pinned Ictus revision already provides
 
-At the pinned revision (`67877fb`) the capability route exists:
+At the pinned revision (`c2aa092`) the capability route exists:
 
 | Element | Value |
 |---|---|
@@ -96,10 +96,12 @@ could not execute in a location that declared a different graph:
 | steps | `software_agent_placeholder_op` | Ictus's `software_agent_{prepare,execute,verify,finalize}_op` — registered, not defined |
 | resource key | `software_agent_settings` | `software_agent_settings`, re-bound so `runtime_seam` is a resource default |
 
-**B4 landed at the pinned revision `67877fb`.** `software_agent_job` and
-`software_publish_job` now carry a `prepare → execute → verify → finalize`
-skeleton and reach a runtime only through a port named in an operator-owned
-configuration file (`contracts/runtime-seam.schema.json`).
+**B4 landed against Ictus `67877fb`; the pin has since advanced to `c2aa092`
+for the identity-digest vectors, which leaves this route unchanged.**
+`software_agent_job` and `software_publish_job` now carry a
+`prepare → execute → verify → finalize` skeleton and reach a runtime only through
+a port named in an operator-owned configuration file
+(`contracts/runtime-seam.schema.json`).
 
 `agent_location.py` therefore defines no graph at all any more: it registers
 Ictus's two jobs unchanged and supplies the seam path as a **class-level

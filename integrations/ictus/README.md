@@ -38,9 +38,21 @@ A payload carrying both shapes, or neither, is refused rather than guessed.
 - **Ledger digests** are versioned: new rows are `sha256:v1:` prefixed, an
   existing bare 64-hex row reads as `sha256:v0`, and comparing two versions
   raises an immutable-record conflict.
-- **DECOMPOSE** is refused with `ProposalBindingUnverifiedError` and creates no
-  children until Ictus publishes canonical proposal digest vectors:
-  `verify_proposal_binding` is the single hook that fails closed.
+- **Proposal binding.** `verify_proposal_binding` recomputes the published
+  canonical form of the proposal and compares it to
+  `validation.proposal_digest`. Equal returns; a mismatch is refused naming both
+  digests and the decision, and absent proposal bytes or an absent digest are
+  refused rather than skipped — there is no best-effort path, and a proposal
+  outside the number domain is refused by the digest writer instead of being
+  hashed approximately. `tests/integrations/ictus/test_digest_vectors.py`
+  asserts the published `contracts/digest-vectors.json` from the pinned checkout.
+- **DECOMPOSE** is refused before any child exists, with a typed reason that says
+  what is actually missing: a `DECOMPOSE` binds its bounded child plan inside the
+  proposal, and the wire carries only the digest. The pinned bridge cannot emit a
+  `DECOMPOSE` at all — it passes `plan: None`
+  (`crates/bridge/src/main.rs:256`) and `USAGE` has no plan flag — so there is
+  nothing to verify and no child is created. The digest contract is published at
+  the pin and the binding is implemented.
 
 The work-order effect is unchanged: the same total decision-to-effect mapping and
 the same decision ledger apply, whichever shape the decision arrived in.
@@ -76,7 +88,7 @@ TACTUS_ICTUS_ROOT=/path/to/agentic-control \
 | Item | Value |
 |---|---|
 | Pinned Ictus repository | `Walsamer/ictus` |
-| Pinned Ictus commit | `67877fb99dacdba2ed44d3d1dfc47a02090566e2` |
+| Pinned Ictus commit | `c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1` |
 | Overrides | `TACTUS_ICTUS_ROOT`, `TACTUS_ICTUS_TARGET_DIR` |
 
 The normal test entry point (`uv run pytest`) executes the same boundary; a

@@ -21,7 +21,7 @@ unmerged. There were no hidden open Ictus implementation issues to preserve.
 | Ictus Fleet integration | `5ee42ea5602703b8aafd8cab9b88e3feb8347087` | FIX-006 generic vocabulary candidate, not merged main. |
 
 > Historical inspection snapshot (2026-10-06). The Ictus revision pinned by the
-> Tactus adapter conformance is now `67877fb99dacdba2ed44d3d1dfc47a02090566e2`
+> Tactus adapter conformance is now `c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1`
 > (see [ICTUS_STATE_SNAPSHOT_CONTRACT.md](ICTUS_STATE_SNAPSHOT_CONTRACT.md)).
 
 The local audit `audits/tactus-ictus-dagster/06-original-intent-and-system-design.md`,

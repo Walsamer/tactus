@@ -64,8 +64,10 @@ repository from a Tactus Work Order.
 
 ## State
 
-`main` pins Ictus at `67877fb99dacdba2ed44d3d1dfc47a02090566e2`, advanced via
-`TCT-WO-ICTUS-PIN-67877FB` (Walsamer/tactus#67) in one step to the later of
-the two upstream merges — Walsamer/ictus#24 (`db8b074`, the versioned
+`main` pins Ictus at `c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1`, advanced via
+`TCT-WO-ICTUS-PIN-C2AA092` (Walsamer/tactus#75) to Walsamer/ictus#26, the
+published identity-digest protocol with its pinned vectors. That advance
+followed `TCT-WO-ICTUS-PIN-67877FB` (Walsamer/tactus#67), which pinned the later
+of the two upstream merges — Walsamer/ictus#24 (`db8b074`, the versioned
 DecisionEnvelope) and Walsamer/ictus#25 (`67877fb`, the runtime seam).
 Never float the pin; advance it only through an authorized Work Order.
