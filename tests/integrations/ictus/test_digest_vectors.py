@@ -8,13 +8,12 @@ digested cases alone is not conformance: a consumer that hashes what the
 protocol refuses makes an unverified proposal look validated.
 
 The mirror below is read from Walsamer/ictus branch
-``feat/identity-digest-protocol`` at ``21f3840`` (PR #26). That branch is not
-merged, so its file is not vendored here and the pin stays ``67877fb``: the
-vectors are mirrored inline — the schema metadata, all 19 digested cases, the
-acceptance and all 10 rejections, i.e. everything the artefact carries — so both
-halves of the contract are asserted in CI today. Advancing the pin to the merge
-that carries the artefact replaces this mirror with an assertion against the
-checked-in file.
+``feat/identity-digest-protocol`` at ``21f3840`` (PR #26). That PR is now merged,
+and the pinned revision ``c2aa092`` carries the artefact; the mirror is that same
+document, so the vectors are still mirrored inline — the schema metadata, all 19
+digested cases, the acceptance and all 10 rejections, i.e. everything the
+artefact carries — and both halves of the contract are asserted in CI today.
+Asserting the checked-in file in place of this mirror is a follow-up.
 
 A ``payload`` is an object and a ``document`` is text, and only the text is
 judged by the literal rule: how this file spells a number inside a ``payload``

@@ -50,7 +50,7 @@ TACTUS_CONTEXT_PROFILE = "tactus.generic.v2"
 
 
 #: Exact reviewed Ictus revision this harness validates against.
-PINNED_ICTUS_COMMIT = "67877fb99dacdba2ed44d3d1dfc47a02090566e2"
+PINNED_ICTUS_COMMIT = "c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1"
 
 #: Repository that owns the pinned revision (documentation only).
 PINNED_ICTUS_REPOSITORY = "Walsamer/ictus"

@@ -137,7 +137,7 @@ def ictus_boundary(tmp_path_factory: pytest.TempPathFactory) -> conformance.Ictu
 
 def test_reviewed_ictus_revision_is_pinned(ictus_boundary: conformance.IctusBoundary) -> None:
     assert ictus_boundary.commit == conformance.PINNED_ICTUS_COMMIT
-    assert conformance.PINNED_ICTUS_COMMIT == "67877fb99dacdba2ed44d3d1dfc47a02090566e2"
+    assert conformance.PINNED_ICTUS_COMMIT == "c2aa092c3e31b8dc5a6db6d126b1ce9c5089b2f1"
     assert ictus_boundary.binary.is_file()
 
 
